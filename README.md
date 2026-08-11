@@ -58,6 +58,8 @@ or synthesizing an OBI.
 - Built-in HTTP/HTTPS execution uses the authored HTTP operation-binding method and message/reply declarations.
 - Built-in WebSocket execution preserves ordering, input half-close, cancellation, bounded backpressure, connection sharing, and isolated subscriber failure.
 - Additional protocols are installed as drivers. A missing driver is a local pre-dispatch capability error; document inventory remains independent of installed drivers.
+- The optional `@openbindings/asyncapi-mqtt` package and Go `mqtt` subpackage provide the first qualified non-HTTP profile: MQTT 3.1.1 under AsyncAPI MQTT binding versions 0.1.0 and 0.2.0. Their exact admitted and refused cells are recorded in `conformance/mqtt-3.1.1.json`.
+- The optional `@openbindings/asyncapi-kafka` package and Go `kafka` subpackage interpret AsyncAPI Kafka binding versions 0.1.0–0.5.0, delegating wire behavior to Confluent's librdkafka-backed JavaScript client and franz-go. Their exact support boundary is `conformance/kafka.json`.
 - Server, server-variable, channel-address, protocol-field, message, content-type, and security choices are resolved from the artifact plus explicit caller context. The client does not guess when several valid choices remain.
 - Operation and message traits are dereferenced and applied with AsyncAPI 3.0's ordered JSON Merge Patch rule before inventory, preparation, or dispatch; explicitly authored target properties retain precedence.
 - Unsupported or ambiguous cells refuse before dispatch.
@@ -79,7 +81,7 @@ server framework, documentation renderer, or workflow engine. Protocols not
 covered by a built-in or installed driver remain explicit execution gaps
 rather than guessed implementations.
 
-See [architecture](docs/architecture.md), [fidelity contract](docs/fidelity-contract.md), [adapter contract](docs/adapter-contract.md), [extraction ledger](docs/extraction-ledger.md), [release qualification](docs/release-qualification.md), and [conformance](conformance/README.md).
+See [architecture](docs/architecture.md), [fidelity contract](docs/fidelity-contract.md), [adapter contract](docs/adapter-contract.md), [protocol-driver qualification](docs/protocol-driver-qualification.md), [extraction ledger](docs/extraction-ledger.md), [release qualification](docs/release-qualification.md), and [conformance](conformance/README.md).
 
 ## Development
 
@@ -90,7 +92,9 @@ pnpm qualify:release
 
 The release gate builds and tests both languages, verifies there is no
 OpenBindings SDK runtime dependency, and installs the packed packages into
-clean consumers.
+clean consumers. Its live protocol phase uses an in-process MQTT broker and a
+pinned disposable Redpanda container for Kafka, including transient broker
+loss, SCRAM, and both OpenBindings bridges.
 
 ## License
 

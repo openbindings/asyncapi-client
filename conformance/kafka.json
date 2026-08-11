@@ -1,0 +1,177 @@
+{
+  "format": "openbindings.asyncapi.protocol-driver-qualification@1",
+  "driver": "kafka",
+  "authority": {
+    "asyncapiBinding": "https://www.asyncapi.com/docs/reference/bindings/kafka",
+    "bindingVersions": ["0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0"],
+    "protocol": "Apache Kafka protocol as implemented by the selected mature clients"
+  },
+  "libraries": {
+    "typescript": "@confluentinc/kafka-javascript@1.10.0 (librdkafka-backed)",
+    "go": "github.com/twmb/franz-go@v1.21.0"
+  },
+  "liveBroker": "docker.redpanda.com/redpandadata/redpanda:v26.1.13",
+  "cells": [
+    {
+      "id": "target-kafka-plaintext",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go"]
+    },
+    {
+      "id": "target-kafka-secure-tls",
+      "disposition": "unqualified",
+      "reason": "TLS option placement and certificate behavior do not yet have live certificate evidence; kafka-secure is not registered by default."
+    },
+    {
+      "id": "binding-versions-0.1.0-through-0.5.0",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "binding-revision-field-gates-and-closed-objects",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "channel-topic-override",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go"]
+    },
+    {
+      "id": "topic-name-validation",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "channel-partitions-and-replicas",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go", "scripts/qualify-kafka.mjs"]
+    },
+    {
+      "id": "channel-topic-configuration-0.4-and-0.5",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go"]
+    },
+    {
+      "id": "topic-configuration-does-not-authorize-provisioning",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go", "scripts/qualify-kafka.mjs"]
+    },
+    {
+      "id": "server-schema-registry-declaration-validation",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go"]
+    },
+    {
+      "id": "operation-client-id-schema",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go", "typescript-kafka/src/driver_live.test.ts"]
+    },
+    {
+      "id": "operation-group-id-schema",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go", "go/kafka/driver_live_test.go"]
+    },
+    {
+      "id": "schema-selected-or-configured-identities",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go"]
+    },
+    {
+      "id": "message-fixed-or-invocation-configured-key",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go", "typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go"]
+    },
+    {
+      "id": "message-per-record-dynamic-key",
+      "disposition": "excluded",
+      "reason": "A payload-only invocation value cannot carry a different Kafka key per record; non-singleton key schemas are refused unless one fixed invocation configuration completes them.",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "message-headers",
+      "disposition": "excluded",
+      "reason": "Protocol record headers are not ordinary operation values and the current profile does not smuggle them into payload schemas or Core frames.",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "schema-registry-framing",
+      "disposition": "excluded",
+      "reason": "schemaIdLocation, schemaIdPayloadEncoding, and schemaLookupStrategy require a separately qualified Schema Registry codec profile.",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "json-and-utf8-payload-codecs",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go", "typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "avro-and-other-schema-formats",
+      "disposition": "excluded",
+      "reason": "Non-JSON schema formats require separately installed codecs and are refused by the artifact codec layer when unavailable."
+    },
+    {
+      "id": "publish-and-consumer-group-subscribe",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go"]
+    },
+    {
+      "id": "security-scram-sha-256",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go", "scripts/qualify-kafka.mjs", "../openbindings-go/formats/asyncapi/driver_integration_test.go"]
+    },
+    {
+      "id": "security-scram-sha-512",
+      "disposition": "unqualified",
+      "reason": "Credential mapping and mature-client placement exist, but SCRAM-SHA-512 lacks a live broker qualification cell."
+    },
+    {
+      "id": "security-sasl-plain-user-password",
+      "disposition": "unqualified",
+      "reason": "Credential mapping and mature-client placement exist, but the pinned live broker does not implement SASL/PLAIN and no second live broker cell is admitted yet."
+    },
+    {
+      "id": "security-x509-and-tls",
+      "disposition": "unqualified",
+      "reason": "TLS and mutual-certificate behavior require a separately qualified kafka-secure profile."
+    },
+    {
+      "id": "security-v2-multi-scheme-conjunction",
+      "disposition": "excluded",
+      "reason": "The normalized AsyncAPI 2.x conjunction marker is refused rather than weakened into alternatives.",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go"]
+    },
+    {
+      "id": "reply-operations",
+      "disposition": "excluded",
+      "reason": "Kafka correlation and reply routing are not admitted in the initial profile.",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go"]
+    },
+    {
+      "id": "tombstone-records",
+      "disposition": "excluded",
+      "reason": "Null-valued Kafka tombstones are refused rather than confused with an absent application output.",
+      "evidence": ["typescript-kafka/src/index.ts", "go/kafka/driver.go"]
+    },
+    {
+      "id": "ordering-backpressure-cancellation-and-commit-boundary",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go", "typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go"]
+    },
+    {
+      "id": "transient-broker-loss-output-preservation-and-recovery",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/driver_live.test.ts", "go/kafka/driver_live_test.go", "scripts/qualify-kafka.mjs"]
+    },
+    {
+      "id": "terminal-failure-preserves-prior-output",
+      "disposition": "supported",
+      "evidence": ["typescript-kafka/src/index.test.ts", "go/kafka/driver_test.go"]
+    },
+    {
+      "id": "standalone-to-openbindings-bridge-value-fidelity",
+      "disposition": "supported",
+      "evidence": ["scripts/qualify-kafka.mjs", "../openbindings-go/formats/asyncapi/driver_integration_test.go"]
+    }
+  ]
+}

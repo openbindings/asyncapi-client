@@ -1,2 +1,10 @@
 packages:
   - "typescript"
+  - "typescript-mqtt"
+  - "typescript-kafka"
+
+# The Kafka driver deliberately delegates wire behavior to Confluent's
+# librdkafka-backed client. Its install script selects/builds the native
+# binary for the current supported platform.
+onlyBuiltDependencies:
+  - "@confluentinc/kafka-javascript"

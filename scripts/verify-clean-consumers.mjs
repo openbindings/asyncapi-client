@@ -25,34 +25,52 @@ const document = JSON.stringify({
 
 try {
   const packageDirectory = join(temporaryRoot, "package");
+  const mqttPackageDirectory = join(temporaryRoot, "mqtt-package");
+  const kafkaPackageDirectory = join(temporaryRoot, "kafka-package");
   const typeScriptConsumer = join(temporaryRoot, "typescript-consumer");
   const goConsumer = join(temporaryRoot, "go-consumer");
-  await Promise.all([mkdir(packageDirectory), mkdir(typeScriptConsumer), mkdir(goConsumer)]);
+  await Promise.all([mkdir(packageDirectory), mkdir(mqttPackageDirectory), mkdir(kafkaPackageDirectory), mkdir(typeScriptConsumer), mkdir(goConsumer)]);
   const npmEnvironment = { npm_config_cache: join(temporaryRoot, "npm-cache") };
 
   await run("npm", ["pack", "--json", "--pack-destination", packageDirectory], join(root, "typescript"), npmEnvironment);
   const archives = (await readdir(packageDirectory)).filter((name) => name.endsWith(".tgz"));
   assert.equal(archives.length, 1, `expected one npm archive, got ${archives.join(", ")}`);
   const archive = join(packageDirectory, archives[0]);
+  await run("pnpm", ["pack", "--pack-destination", mqttPackageDirectory], join(root, "typescript-mqtt"));
+  const mqttArchives = (await readdir(mqttPackageDirectory)).filter((name) => name.endsWith(".tgz"));
+  assert.equal(mqttArchives.length, 1, `expected one MQTT npm archive, got ${mqttArchives.join(", ")}`);
+  const mqttArchive = join(mqttPackageDirectory, mqttArchives[0]);
+  await run("pnpm", ["pack", "--pack-destination", kafkaPackageDirectory], join(root, "typescript-kafka"));
+  const kafkaArchives = (await readdir(kafkaPackageDirectory)).filter((name) => name.endsWith(".tgz"));
+  assert.equal(kafkaArchives.length, 1, `expected one Kafka npm archive, got ${kafkaArchives.join(", ")}`);
+  const kafkaArchive = join(kafkaPackageDirectory, kafkaArchives[0]);
 
   await writeFile(join(typeScriptConsumer, "package.json"), `${JSON.stringify({
     name: "asyncapi-client-release-consumer", private: true, type: "module",
   }, null, 2)}\n`);
-  await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock", archive], typeScriptConsumer, npmEnvironment);
+  await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock", archive, mqttArchive, kafkaArchive], typeScriptConsumer, npmEnvironment);
 
   await writeFile(join(typeScriptConsumer, "esm.mjs"), `
 import assert from "node:assert/strict";
 import { AsyncAPIClient } from "@openbindings/asyncapi-client";
+import { createAsyncAPIMQTTDriver } from "@openbindings/asyncapi-mqtt";
+import { createAsyncAPIKafkaDriver } from "@openbindings/asyncapi-kafka";
 const client = await AsyncAPIClient.load(${JSON.stringify(document)});
 assert.deepEqual(client.operations().map(({ key }) => key), ["ping"]);
+assert.deepEqual(createAsyncAPIMQTTDriver().protocols, ["mqtt"]);
+assert.deepEqual(createAsyncAPIKafkaDriver().protocols, ["kafka"]);
 client.close();
 `);
   await writeFile(join(typeScriptConsumer, "cjs.cjs"), `
 const assert = require("node:assert/strict");
 const { AsyncAPIClient } = require("@openbindings/asyncapi-client");
+const { createAsyncAPIMQTTDriver } = require("@openbindings/asyncapi-mqtt");
+const { createAsyncAPIKafkaDriver } = require("@openbindings/asyncapi-kafka");
 (async () => {
   const client = await AsyncAPIClient.load(${JSON.stringify(document)});
   assert.deepEqual(client.operations().map(({ key }) => key), ["ping"]);
+  assert.deepEqual(createAsyncAPIMQTTDriver().protocols, ["mqtt"]);
+  assert.deepEqual(createAsyncAPIKafkaDriver().protocols, ["kafka"]);
   client.close();
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 `);
@@ -74,6 +92,8 @@ import (
   "context"
   "testing"
   asyncapiclient "github.com/openbindings/asyncapi-client/go"
+  mqttdriver "github.com/openbindings/asyncapi-client/go/mqtt"
+  kafkadriver "github.com/openbindings/asyncapi-client/go/kafka"
 )
 
 func TestCleanConsumer(t *testing.T) {
@@ -82,6 +102,8 @@ func TestCleanConsumer(t *testing.T) {
   defer client.Close()
   operations := client.Operations()
   if len(operations) != 1 || operations[0].ID != "ping" { t.Fatalf("operations = %#v", operations) }
+  if got := mqttdriver.New(mqttdriver.Options{}).Protocols(); len(got) != 1 || got[0] != "mqtt" { t.Fatalf("mqtt protocols = %#v", got) }
+  if got := kafkadriver.New(kafkadriver.Options{}).Protocols(); len(got) != 1 || got[0] != "kafka" { t.Fatalf("kafka protocols = %#v", got) }
 }
 `);
   const goEnvironment = { GOWORK: "off", GOCACHE: join(temporaryRoot, "go-cache") };
@@ -91,6 +113,12 @@ func TestCleanConsumer(t *testing.T) {
   const manifest = JSON.parse(await readFile(join(typeScriptConsumer, "node_modules", "@openbindings", "asyncapi-client", "package.json"), "utf8"));
   assert.equal(manifest.name, "@openbindings/asyncapi-client");
   assert.deepEqual(Object.keys(manifest.exports), [".", "./engine", "./analysis", "./testing"]);
+  const mqttManifest = JSON.parse(await readFile(join(typeScriptConsumer, "node_modules", "@openbindings", "asyncapi-mqtt", "package.json"), "utf8"));
+  assert.equal(mqttManifest.name, "@openbindings/asyncapi-mqtt");
+  assert.equal(mqttManifest.dependencies["@openbindings/asyncapi-client"], "0.1.0");
+  const kafkaManifest = JSON.parse(await readFile(join(typeScriptConsumer, "node_modules", "@openbindings", "asyncapi-kafka", "package.json"), "utf8"));
+  assert.equal(kafkaManifest.name, "@openbindings/asyncapi-kafka");
+  assert.equal(kafkaManifest.dependencies["@openbindings/asyncapi-client"], "0.1.0");
   console.log("clean AsyncAPI TypeScript ESM/CJS and Go consumers verified");
 } finally {
   const expectedPrefix = join(tmpdir(), "openbindings-asyncapi-client-release-");

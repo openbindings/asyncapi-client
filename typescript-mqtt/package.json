@@ -1,0 +1,62 @@
+{
+  "name": "@openbindings/asyncapi-mqtt",
+  "version": "0.1.0",
+  "description": "MQTT 3.1.1 protocol driver for the standalone OpenBindings AsyncAPI client",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepack": "tsup",
+    "test": "vitest run",
+    "lint": "tsc --noEmit && tsc -p tsconfig.test.json"
+  },
+  "keywords": [
+    "asyncapi",
+    "mqtt",
+    "client",
+    "driver",
+    "brownfield"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openbindings/asyncapi-client.git",
+    "directory": "typescript-mqtt"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@openbindings/asyncapi-client": "workspace:*",
+    "mqtt": "^5.15.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "aedes": "^1.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.3"
+  }
+}

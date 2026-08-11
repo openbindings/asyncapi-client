@@ -17,6 +17,14 @@ belongs below the engine when it is ordinary AsyncAPI behavior; OpenBindings-
 specific selection, context negotiation carriage, and error translation belong
 only in the adapter.
 
+Protocol engines are optional packages/subpackages. The MQTT driver delegates
+wire exchange to MQTT.js/Paho; the Kafka driver delegates it to Confluent's
+librdkafka-backed JavaScript client/franz-go. AsyncAPI reference, operation,
+message, address, security-alternative, and codec resolution remain in the
+shared engine. Drivers receive those resolved facts, interpret only their
+protocol-binding objects, and never synthesize protocol fields into operation
+values.
+
 The test-only WebSocket controls are explicit deterministic seams. They expose
 counts and bounded actions, never pooled connections or credential-bearing
 keys, and are not application configuration.

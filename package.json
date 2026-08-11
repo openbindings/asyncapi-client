@@ -3,13 +3,17 @@
   "private": true,
   "packageManager": "pnpm@10.15.0",
   "scripts": {
-    "build": "pnpm --dir typescript build",
-    "test": "pnpm --dir typescript test",
+    "build": "pnpm --dir typescript build && pnpm --dir typescript-mqtt build && pnpm --dir typescript-kafka build",
+    "test": "pnpm --dir typescript test && pnpm --dir typescript build && pnpm --dir typescript-mqtt test && pnpm --dir typescript-kafka test",
     "test:go": "cd go && GOWORK=off GOCACHE=/tmp/openbindings-asyncapi-client-go-cache go test -race ./...",
-    "lint": "pnpm --dir typescript lint",
+    "test:mqtt:go-live": "node scripts/qualify-mqtt-go.mjs",
+    "test:kafka:live": "node scripts/qualify-kafka.mjs",
+    "verify:mqtt-matrix": "node scripts/verify-mqtt-conformance.mjs",
+    "verify:kafka-matrix": "node scripts/verify-kafka-conformance.mjs",
+    "lint": "pnpm --dir typescript lint && pnpm --dir typescript build && pnpm --dir typescript-mqtt lint && pnpm --dir typescript-kafka lint",
     "boundary": "pnpm build && node scripts/verify-boundary.mjs",
-    "verify": "pnpm lint && pnpm test && pnpm test:go && pnpm boundary",
+    "verify": "pnpm lint && pnpm test && pnpm test:go && pnpm verify:mqtt-matrix && pnpm verify:kafka-matrix && pnpm boundary",
     "verify:consumers": "node scripts/verify-clean-consumers.mjs",
-    "qualify:release": "pnpm verify && pnpm verify:consumers"
+    "qualify:release": "pnpm verify && pnpm test:mqtt:go-live && pnpm test:kafka:live && pnpm verify:consumers"
   }
 }

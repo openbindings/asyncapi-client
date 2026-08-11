@@ -1,5 +1,7 @@
 package asyncapiclient
 
+import "encoding/json"
+
 // document represents an AsyncAPI 3.0 document.
 // Only the fields needed for OpenBindings conversion are modeled.
 type document struct {
@@ -22,11 +24,13 @@ type info struct {
 type server struct {
 	Host                  string                    `json:"host" yaml:"host"`
 	Protocol              string                    `json:"protocol" yaml:"protocol"`
+	ProtocolVersion       string                    `json:"protocolVersion,omitempty" yaml:"protocolVersion,omitempty"`
 	PathName              string                    `json:"pathname,omitempty" yaml:"pathname,omitempty"`
 	Description           string                    `json:"description,omitempty" yaml:"description,omitempty"`
 	Variables             map[string]serverVariable `json:"variables,omitempty" yaml:"variables,omitempty"`
 	Tags                  []tag                     `json:"tags,omitempty" yaml:"tags,omitempty"`
 	Security              []securityRequirement     `json:"security,omitempty" yaml:"security,omitempty"`
+	Bindings              map[string]map[string]any `json:"bindings,omitempty" yaml:"bindings,omitempty"`
 	V2SecurityConjunction any                       `json:"x-ob-asyncapi-v2-security-conjunction,omitempty" yaml:"x-ob-asyncapi-v2-security-conjunction,omitempty"`
 }
 
@@ -56,7 +60,8 @@ type channel struct {
 // where they speak). Only the websockets binding speaks at channel level in
 // current artifact profile.
 type channelBindings struct {
-	WS *wsChannelBinding `json:"ws,omitempty" yaml:"ws,omitempty"`
+	WS  *wsChannelBinding
+	Raw map[string]json.RawMessage
 }
 
 // wsChannelBinding is the AsyncAPI WebSockets channel binding: `method`
@@ -101,7 +106,8 @@ type asyncOperation struct {
 // object this specification incorporates. Only the http binding speaks at
 // operation level in the current artifact profile.
 type operationBindings struct {
-	HTTP *httpOperationBinding `json:"http,omitempty" yaml:"http,omitempty"`
+	HTTP *httpOperationBinding
+	Raw  map[string]json.RawMessage
 }
 
 // httpOperationBinding is the AsyncAPI HTTP operation binding: its `method`
@@ -133,7 +139,8 @@ type message struct {
 }
 
 type messageBindings struct {
-	HTTP *httpMessageBinding `json:"http,omitempty" yaml:"http,omitempty"`
+	HTTP *httpMessageBinding
+	Raw  map[string]json.RawMessage
 }
 
 type httpMessageBinding struct {

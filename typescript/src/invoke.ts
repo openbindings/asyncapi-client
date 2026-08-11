@@ -66,6 +66,7 @@ import {
 import type {
   AsyncAPIChannel,
   AsyncAPIDocument,
+  AsyncAPIMessage,
   AsyncAPIOperation,
   AsyncAPIOAuthFlow,
   AsyncAPIOAuthFlows,
@@ -192,23 +193,21 @@ export async function runBinding(
   }
 
   const externalDriver = args.protocolDrivers?.get(target.protocol);
-  if (externalDriver) {
-    await runExternalDriver(externalDriver, args, h, doc, opID, asyncOp, ch, target);
-    return;
-  }
   if (!["http", "https", "ws", "wss"].includes(target.protocol)) {
-    h.fireError(
-      new InvocationError(
-        "DRIVER_UNAVAILABLE",
-        `no AsyncAPI protocol driver is installed for ${JSON.stringify(target.protocol)}`,
-      ),
-    );
-    return;
+    if (!externalDriver) {
+      h.fireError(
+        new InvocationError(
+          "DRIVER_UNAVAILABLE",
+          `no AsyncAPI protocol driver is installed for ${JSON.stringify(target.protocol)}`,
+        ),
+      );
+      return;
+    }
   }
-  if (
+  if (!externalDriver && (
     (asyncOp as unknown as Record<string, unknown>)["x-ob-asyncapi-v2-security-conjunction"] !== undefined
     || (target.securityServer as unknown as Record<string, unknown> | undefined)?.["x-ob-asyncapi-v2-security-conjunction"] !== undefined
-  ) {
+  )) {
     h.fireError(
       new InvocationError(
         ERR_SOURCE_CONFIG_ERROR,
@@ -218,11 +217,13 @@ export async function runBinding(
     return;
   }
 
-  try {
-    validateCell(doc, ch, asyncOp, target.protocol, args.source.profile, args.context);
-  } catch (e: unknown) {
-    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
-    return;
+  if (!externalDriver) {
+    try {
+      validateCell(doc, ch, asyncOp, target.protocol, args.source.profile, args.context);
+    } catch (e: unknown) {
+      h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+      return;
+    }
   }
 
   // Context negotiation: challenge BEFORE any connection is opened. The
@@ -239,11 +240,13 @@ export async function runBinding(
     return;
   }
 
-  try {
-    validateCredentialDestinations(asyncOp, target.securityServer, target.protocol, args.context);
-  } catch (e: unknown) {
-    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
-    return;
+  if (!externalDriver) {
+    try {
+      validateCredentialDestinations(asyncOp, target.securityServer, target.protocol, args.context);
+    } catch (e: unknown) {
+      h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+      return;
+    }
   }
 
   // The address configuration point (ASYNC-P-04): the declared address with
@@ -256,7 +259,7 @@ export async function runBinding(
     const needsPayload = channelNeedsOutgoingPayload(ch);
     if (needsPayload) {
       if (asyncOp.action !== "receive") throw new Error("subscription address uses a message runtime expression before any outgoing message exists");
-      if (target.protocol !== "http" && target.protocol !== "https") {
+      if (!externalDriver && target.protocol !== "http" && target.protocol !== "https") {
         throw new Error("WebSocket publish address runtime expressions are not available before connection in the built-in driver");
       }
       if (noInputDeclared(args)) throw new Error("address runtime expression requires an outgoing message, but the operation declares no input");
@@ -280,6 +283,22 @@ export async function runBinding(
         ERR_SOURCE_CONFIG_ERROR,
         `unknown action "${(asyncOp as { action: string }).action}"`,
       ),
+    );
+    return;
+  }
+
+  if (externalDriver) {
+    await runExternalDriver(
+      externalDriver,
+      args,
+      h,
+      doc,
+      opID,
+      asyncOp,
+      ch,
+      target,
+      address,
+      preparedInput,
     );
     return;
   }
@@ -335,10 +354,42 @@ async function runExternalDriver(
   operation: AsyncAPIOperation,
   channel: AsyncAPIChannel | undefined,
   target: ResolvedTarget,
+  address: string,
+  preparedInput: { ok: true; value: unknown } | undefined,
 ): Promise<void> {
+  let messages: AsyncAPIMessage[];
+  let encodeInputValue: ((value: unknown) => Uint8Array) | undefined;
+  let decodeOutputValue: ((payload: Uint8Array) => Promise<unknown>) | undefined;
+  try {
+    if (operation.action === "receive") {
+      messages = selectedInputMessages(operation, channel, args.context);
+      const codec = resolveInputCodec(doc, messages, args.context);
+      encodeInputValue = (value) => new TextEncoder().encode(encodeInput(codec, value));
+    } else {
+      messages = governingMessages(operation, channel);
+      const contentType = decodeContentType(doc, messages, args.context);
+      const limit = resolveDeliveryUnitLimit(args);
+      decodeOutputValue = async (payload) => {
+        if (payload.byteLength > limit) {
+          throw new Error(`delivery unit exceeds configured ${limit}-byte limit`);
+        }
+        const body = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+        return decodeThroughHooks(
+          args.hooks,
+          siteFor(args, target.serverURL),
+          { status: null, body, meta: {} },
+          builtinDecodeFor(contentType),
+        );
+      };
+    }
+  } catch (error: unknown) {
+    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(error)));
+    return;
+  }
+
   let completed = false;
   const session: AsyncAPIProtocolDriverSession = {
-    inputs: h.inputs(),
+    inputs: driverInputs(preparedInput, h),
     signal: h.signal,
     closeInput: () => h.closeInput(),
     emit: (value) => h.emitOutput(value),
@@ -358,6 +409,12 @@ async function runExternalDriver(
         ...(channel
           ? { channel: channel as unknown as Readonly<Record<string, unknown>> }
           : {}),
+        ...(target.securityServer
+          ? { server: target.securityServer as unknown as Readonly<Record<string, unknown>> }
+          : {}),
+        address,
+        messages: messages as unknown as readonly Readonly<Record<string, unknown>>[],
+        securityAlternatives: driverSecurityAlternatives(operation, target.securityServer),
         ref: args.ref,
         operationKey,
         action: operation.action,
@@ -365,6 +422,8 @@ async function runExternalDriver(
         serverURL: target.serverURL,
         context: args.context,
         signal: h.signal,
+        ...(encodeInputValue ? { encodeInput: encodeInputValue } : {}),
+        ...(decodeOutputValue ? { decodeOutput: decodeOutputValue } : {}),
       },
       session,
     );
@@ -379,6 +438,14 @@ async function runExternalDriver(
       ),
     );
   }
+}
+
+async function* driverInputs(
+  prepared: { ok: true; value: unknown } | undefined,
+  h: Handle,
+): AsyncIterable<unknown> {
+  if (prepared) yield prepared.value;
+  for await (const value of h.inputs()) yield value;
 }
 
 /** The operation's resolved channel object, or undefined when the channel
@@ -561,13 +628,40 @@ function resolveSecuritySchemes(
   return result;
 }
 
+function driverSecurityAlternatives(
+  asyncOp: AsyncAPIOperation,
+  server: AsyncAPIServer | undefined,
+): Array<Array<{ name?: string; scheme: Readonly<Record<string, unknown>> }>> {
+  const serverSchemes = serverSecuritySchemes(server);
+  const operationSchemes = operationSecuritySchemes(asyncOp);
+  const combinations: NamedSecurityScheme[][] = [];
+  if (serverSchemes.length > 0 && operationSchemes.length > 0) {
+    for (const serverScheme of serverSchemes) {
+      for (const operationScheme of operationSchemes) {
+        combinations.push([serverScheme, operationScheme]);
+      }
+    }
+  } else {
+    for (const scheme of [...serverSchemes, ...operationSchemes]) combinations.push([scheme]);
+  }
+  return combinations.map((alternative) => {
+    const seen = new Set<string>();
+    return alternative.flatMap(({ scheme, name }) => {
+      const key = `${scheme.type}\x00${scheme.scheme ?? ""}\x00${name ?? ""}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ ...(name ? { name } : {}), scheme: scheme as unknown as Readonly<Record<string, unknown>> }];
+    });
+  });
+}
+
 /**
  * Maps an AsyncAPI security scheme to a context requirement's type-specific
  * fields (name/description are layered on by schemeRequirement below). Every
  * scheme maps to SOMETHING: a recognized family, or — per the R2.c ruling —
  * a surfaced "auth.<T>" requirement (an http scheme with an unmapped
  * `scheme` value becomes "auth.http.<scheme>"; any other unmapped artifact
- * `type` becomes "auth.<type>" verbatim, e.g. "auth.scramSha256",
+ * `type` becomes "auth.<type>" verbatim, e.g. "auth.futureSasl",
  * "auth.X509") so the alternative stays discoverable instead of being
  * silently dropped.
  */
@@ -582,6 +676,8 @@ function mapScheme(scheme: AsyncAPISecurityScheme, baseURL: string): ContextRequ
     case "httpBearer":
       return { type: "auth.bearer" };
     case "userPassword":
+    case "scramSha256":
+    case "scramSha512":
       return { type: "auth.basic" };
     case "apiKey":
     case "httpApiKey":

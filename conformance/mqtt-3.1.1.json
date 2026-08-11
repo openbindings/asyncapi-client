@@ -1,0 +1,143 @@
+{
+  "format": "openbindings.asyncapi.protocol-driver-qualification@1",
+  "driver": "mqtt-3.1.1",
+  "authority": {
+    "asyncapiBinding": "https://www.asyncapi.com/docs/reference/bindings/mqtt",
+    "bindingVersions": ["0.1.0", "0.2.0"],
+    "mqtt": "https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html",
+    "protocolVersion": "3.1.1"
+  },
+  "libraries": {
+    "typescript": "mqtt@5.15.2",
+    "go": "github.com/eclipse/paho.mqtt.golang@v1.5.1"
+  },
+  "cells": [
+    {
+      "id": "target-mqtt-tcp",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_live_test.go"]
+    },
+    {
+      "id": "target-mqtts-tls",
+      "disposition": "unqualified",
+      "reason": "TLS option placement exists but no live certificate/broker evidence is admitted yet, so mqtts is not registered by default."
+    },
+    {
+      "id": "protocol-version-3.1.1",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "binding-version-0.1.0-0.2.0",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "binding-closed-content-model",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "topic-name-and-filter-validation",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "server-client-id-and-connection-identity",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_live_test.go"]
+    },
+    {
+      "id": "server-clean-session-true",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_live_test.go"]
+    },
+    {
+      "id": "server-clean-session-false-resumption",
+      "disposition": "excluded",
+      "reason": "Persistent-session disconnect/reconnect and offline-queue behavior is refused until live evidence qualifies it.",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "server-keep-alive",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "server-last-will",
+      "disposition": "excluded",
+      "reason": "Last Will is refused until an ungraceful-disconnect broker test qualifies it.",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "operation-qos-0-1-2",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go", "go/mqtt/driver_live_test.go"]
+    },
+    {
+      "id": "operation-retain",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "message-mqtt5-properties",
+      "disposition": "excluded",
+      "reason": "MQTT 5 message properties require a separate MQTT 5 driver profile.",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "server-mqtt5-properties",
+      "disposition": "excluded",
+      "reason": "sessionExpiryInterval and maximumPacketSize are outside MQTT 3.1.1.",
+      "evidence": ["go/mqtt/driver.go", "typescript-mqtt/src/index.ts"]
+    },
+    {
+      "id": "operation-mqtt5-properties",
+      "disposition": "excluded",
+      "reason": "messageExpiryInterval is outside MQTT 3.1.1.",
+      "evidence": ["go/mqtt/driver.go", "typescript-mqtt/src/index.ts"]
+    },
+    {
+      "id": "security-user-password",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_test.go", "go/mqtt/driver_live_test.go"]
+    },
+    {
+      "id": "security-v2-multi-scheme-conjunction",
+      "disposition": "excluded",
+      "reason": "The normalized AsyncAPI 2.x conjunction marker is refused rather than weakened into alternatives.",
+      "evidence": ["typescript-mqtt/src/index.ts", "go/mqtt/driver_test.go"]
+    },
+    {
+      "id": "security-x509",
+      "disposition": "unqualified",
+      "reason": "TLS certificate placement exists but lacks live mutual-TLS evidence."
+    },
+    {
+      "id": "payload-json-and-utf8-text",
+      "disposition": "supported",
+      "evidence": ["typescript/src/client.test.ts", "go/client_test.go", "typescript-mqtt/src/index.test.ts", "go/mqtt/driver_live_test.go"]
+    },
+    {
+      "id": "reply-operations",
+      "disposition": "excluded",
+      "reason": "MQTT request/reply correlation is not admitted in the MQTT 3.1.1 profile.",
+      "evidence": ["go/mqtt/driver.go", "typescript-mqtt/src/index.ts"]
+    },
+    {
+      "id": "ordering-backpressure-cancellation",
+      "disposition": "supported",
+      "evidence": ["typescript-mqtt/src/index.test.ts", "go/mqtt/driver_live_test.go", "typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "connection-loss-and-partial-output",
+      "disposition": "supported",
+      "evidence": [
+        "typescript-mqtt/src/index.test.ts",
+        "go/mqtt/driver_live_test.go",
+        "scripts/qualify-mqtt-go.mjs",
+        "../openbindings-go/formats/asyncapi/driver_integration_test.go"
+      ]
+    }
+  ]
+}

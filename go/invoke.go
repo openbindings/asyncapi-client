@@ -132,31 +132,30 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 		h.FireError(configOrSourceError(err, ""))
 		return
 	}
-	if driver := args.ProtocolDrivers[strings.ToLower(target.Protocol)]; driver != nil {
-		runProtocolDriver(ctx, driver, target, opID, &asyncOp, args, h, doc)
-		return
-	}
-	if target.Protocol != "http" && target.Protocol != "https" && target.Protocol != "ws" && target.Protocol != "wss" {
+	driver := args.ProtocolDrivers[strings.ToLower(target.Protocol)]
+	if driver == nil && target.Protocol != "http" && target.Protocol != "https" && target.Protocol != "ws" && target.Protocol != "wss" {
 		h.FireError(&ExecutionError{
 			Code:    ErrCodeDriverUnavailable,
 			Message: fmt.Sprintf("no AsyncAPI protocol driver is installed for %q", target.Protocol),
 		})
 		return
 	}
-	if asyncOp.V2SecurityConjunction != nil || (target.SecurityServer != nil && target.SecurityServer.V2SecurityConjunction != nil) {
+	if driver == nil && (asyncOp.V2SecurityConjunction != nil || (target.SecurityServer != nil && target.SecurityServer.V2SecurityConjunction != nil)) {
 		h.FireError(&ExecutionError{
 			Code:    ErrCodeSourceConfigError,
 			Message: "the built-in driver cannot preserve this AsyncAPI 2.x multi-scheme security conjunction",
 		})
 		return
 	}
-	if err := validateCell(doc, ch, &asyncOp, target.Protocol, args.Source.Profile, args.Context); err != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
-		return
-	}
-	if err := validateCredentialDestinations(doc, &asyncOp, target.SecurityServer, target.Protocol, args.Context); err != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: err.Error()})
-		return
+	if driver == nil {
+		if err := validateCell(doc, ch, &asyncOp, target.Protocol, args.Source.Profile, args.Context); err != nil {
+			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+			return
+		}
+		if err := validateCredentialDestinations(doc, &asyncOp, target.SecurityServer, target.Protocol, args.Context); err != nil {
+			h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: err.Error()})
+			return
+		}
 	}
 
 	// Context negotiation: challenge BEFORE any connection is opened.
@@ -175,7 +174,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 		return
 	}
 	var prepared *preparedInput
-	if asyncOp.Action == "receive" {
+	if asyncOp.Action == "receive" && (driver == nil || channelNeedsOutgoingPayload(ch)) {
 		if args.AcceptsInput != nil && !*args.AcceptsInput {
 			h.FireError(&ExecutionError{Code: ErrCodeMissingInput, Message: "publish invocation requires an input message"})
 			return
@@ -210,6 +209,11 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 			Code:    ErrCodeSourceConfigError,
 			Message: fmt.Sprintf("unknown action %q", asyncOp.Action),
 		})
+		return
+	}
+
+	if driver != nil {
+		runProtocolDriver(ctx, driver, target, opID, &asyncOp, ch, address, prepared, args, h, doc)
 		return
 	}
 
@@ -250,13 +254,25 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	}
 }
 
-func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolvedTarget, operationKey string, operation *asyncOperation, args *executionArgs, h handle, doc *document) {
-	request := DriverRequest{
-		Artifact: append([]byte(nil), doc.raw...), Ref: args.Ref, OperationKey: operationKey,
-		Action: operation.Action, Protocol: target.Protocol, ServerURL: target.ServerURL,
-		Context: args.Context,
+func channelNeedsOutgoingPayload(ch *channel) bool {
+	if ch == nil {
+		return false
 	}
-	session := &handleDriverSession{handle: h}
+	for _, parameter := range ch.Parameters {
+		if parameter.Location != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, prepared *preparedInput, args *executionArgs, h handle, doc *document) {
+	request, err := prepareProtocolDriverRequest(target, operationKey, operation, ch, address, args, doc)
+	if err != nil {
+		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error(), Cause: err})
+		return
+	}
+	session := &handleDriverSession{handle: h, prepared: prepared}
 	if err := driver.Execute(ctx, request, session); err != nil {
 		h.FireError(&ExecutionError{
 			Code: ErrCodeDriverFailed, Message: err.Error(), Cause: err,
@@ -265,6 +281,81 @@ func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolv
 		return
 	}
 	session.Complete()
+}
+
+func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, args *executionArgs, doc *document) (DriverRequest, error) {
+	driverDocument := objectMapForDriver(doc)
+	request := DriverRequest{
+		Artifact: append([]byte(nil), doc.raw...), Document: driverDocument,
+		Operation: objectMapForDriver(operation), Channel: objectMapForDriver(ch),
+		Server: objectMapForDriver(target.SecurityServer), Ref: args.Ref, OperationKey: operationKey,
+		Action: operation.Action, Protocol: target.Protocol, ServerURL: target.ServerURL,
+		Address: address, Context: args.Context,
+		SecurityAlternatives: driverSecurityAlternatives(doc, operation, target.SecurityServer),
+	}
+	resolveDriverBindingRefs(request.Operation, driverDocument)
+	resolveDriverBindingRefs(request.Channel, driverDocument)
+	resolveDriverBindingRefs(request.Server, driverDocument)
+	var messages []message
+	if operation.Action == "receive" {
+		selected, err := selectedInputMessages(doc, operation, ch, args.Context)
+		if err != nil {
+			return DriverRequest{}, err
+		}
+		codec, err := resolveInputCodec(doc, selected, args.Context)
+		if err != nil {
+			return DriverRequest{}, err
+		}
+		messages = selected
+		request.EncodeInput = func(value any) ([]byte, error) {
+			encoded, err := encodeInput(codec, value)
+			return []byte(encoded), err
+		}
+	} else {
+		messages = governingMessages(doc, operation, ch)
+		contentType, err := resolveSubscriptionContentType(doc, messages, args.Context)
+		if err != nil {
+			return DriverRequest{}, err
+		}
+		request.DecodeOutput = func(payload []byte) (any, error) {
+			if int64(len(payload)) > args.DeliveryUnitLimit() {
+				return nil, fmt.Errorf("delivery unit exceeds configured %d-byte limit", args.DeliveryUnitLimit())
+			}
+			return args.Hooks.DecodeOutput(siteFor(args, target.ServerURL), RawResult{Body: payload}, builtinDecodeFor(contentType))
+		}
+	}
+	request.Messages = make([]map[string]any, len(messages))
+	for i := range messages {
+		request.Messages[i] = objectMapForDriver(messages[i])
+		resolveDriverBindingRefs(request.Messages[i], driverDocument)
+	}
+	return request, nil
+}
+
+func resolveDriverBindingRefs(owner map[string]any, document map[string]any) {
+	bindings, _ := owner["bindings"].(map[string]any)
+	for name, raw := range bindings {
+		bindingObject, _ := raw.(map[string]any)
+		if bindingObject == nil {
+			continue
+		}
+		bindings[name] = resolveSchemaRefs(deepCopyMap(bindingObject), document, nil)
+	}
+}
+
+func objectMapForDriver(value any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var result map[string]any
+	if json.Unmarshal(data, &result) != nil {
+		return nil
+	}
+	return result
 }
 
 type preparedInput struct{ Value any }
@@ -468,7 +559,7 @@ func requirementType(s securityScheme) string {
 		return ""
 	case "httpBearer":
 		return "auth.bearer"
-	case "userPassword":
+	case "userPassword", "scramSha256", "scramSha512":
 		return "auth.basic"
 	case "apiKey", "httpApiKey":
 		return "auth.apiKey"
@@ -482,7 +573,7 @@ func requirementType(s securityScheme) string {
 // scheme family requirementType doesn't map: "auth.http.<scheme>" for an
 // HTTP auth scheme other than bearer/basic (e.g. "auth.http.digest"), or
 // "auth." + the artifact's own type verbatim otherwise (e.g.
-// "auth.scramSha256", "auth.X509"). The alternative stays discoverable to a
+// "auth.futureSasl", "auth.X509"). The alternative stays discoverable to a
 // runtime with a resolver for that family, rather than silently dropped.
 func unmappedRequirementType(s securityScheme) string {
 	if s.Type == "http" {
@@ -675,6 +766,48 @@ func resolveRequirementList(doc *document, requirements []securityRequirement, s
 		out = append(out, req)
 	}
 	return out
+}
+
+func driverSecurityAlternatives(doc *document, operation *asyncOperation, server *server) [][]DriverSecurityScheme {
+	serverSchemes := driverSecuritySchemes(doc, serverSecurityRequirements(server))
+	operationSchemes := driverSecuritySchemes(doc, operationSecurityRequirements(operation))
+	var combinations [][]DriverSecurityScheme
+	switch {
+	case len(serverSchemes) > 0 && len(operationSchemes) > 0:
+		for _, serverScheme := range serverSchemes {
+			for _, operationScheme := range operationSchemes {
+				alternative := []DriverSecurityScheme{serverScheme}
+				if serverScheme.Name != operationScheme.Name || serverScheme.Scheme["type"] != operationScheme.Scheme["type"] || serverScheme.Scheme["scheme"] != operationScheme.Scheme["scheme"] {
+					alternative = append(alternative, operationScheme)
+				}
+				combinations = append(combinations, alternative)
+			}
+		}
+	case len(serverSchemes) > 0:
+		for _, scheme := range serverSchemes {
+			combinations = append(combinations, []DriverSecurityScheme{scheme})
+		}
+	case len(operationSchemes) > 0:
+		for _, scheme := range operationSchemes {
+			combinations = append(combinations, []DriverSecurityScheme{scheme})
+		}
+	}
+	return combinations
+}
+
+func driverSecuritySchemes(doc *document, requirements []securityRequirement) []DriverSecurityScheme {
+	var result []DriverSecurityScheme
+	for _, requirement := range requirements {
+		scheme, ok := resolveSecurityRequirement(doc, requirement)
+		if !ok {
+			continue
+		}
+		result = append(result, DriverSecurityScheme{
+			Name:   securityRequirementName(requirement),
+			Scheme: objectMapForDriver(scheme),
+		})
+	}
+	return result
 }
 
 // resolveSecurityRequirement resolves one `security` list entry to a concrete

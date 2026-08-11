@@ -29,3 +29,10 @@ The TypeScript adapter now consumes the standalone analysis parser directly.
 The Go adapter consumes `NormalizeDocument` before building its OBI-specific
 authoring AST. Consequently the adapters do not independently reinterpret
 traits or the accepted artifact envelope.
+
+Non-HTTP protocol execution now follows the same extraction boundary. MQTT
+and Kafka live in standalone optional drivers, while the OpenBindings adapters
+only register them and translate the cardinality-neutral execution session.
+SCRAM declarations are interpreted by the AsyncAPI layer as the existing
+abstract username/password credential family; the raw declaration continues to
+the Kafka driver, which selects the concrete SCRAM mechanism.

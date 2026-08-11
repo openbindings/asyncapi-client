@@ -15,12 +15,28 @@ type ProtocolDriver interface {
 
 type DriverRequest struct {
 	Artifact     []byte
+	Document     map[string]any
+	Operation    map[string]any
+	Channel      map[string]any
+	Server       map[string]any
 	Ref          string
 	OperationKey string
 	Action       string
 	Protocol     string
 	ServerURL    string
-	Context      map[string]any
+	Address      string
+	Messages     []map[string]any
+	// SecurityAlternatives contains resolved AsyncAPI schemes. Every outer
+	// item is one alternative; all schemes within that item apply.
+	SecurityAlternatives [][]DriverSecurityScheme
+	Context              map[string]any
+	EncodeInput          func(any) ([]byte, error)
+	DecodeOutput         func([]byte) (any, error)
+}
+
+type DriverSecurityScheme struct {
+	Name   string
+	Scheme map[string]any
 }
 
 // DriverSession is a cardinality-neutral lifecycle surface. Returning nil
@@ -55,9 +71,17 @@ func indexProtocolDrivers(drivers []ProtocolDriver) (map[string]ProtocolDriver, 
 	return indexed, nil
 }
 
-type handleDriverSession struct{ handle handle }
+type handleDriverSession struct {
+	handle   handle
+	prepared *preparedInput
+}
 
 func (s *handleDriverSession) Receive(ctx context.Context) (any, error) {
+	if s.prepared != nil {
+		value := s.prepared.Value
+		s.prepared = nil
+		return value, nil
+	}
 	return s.handle.ReadInput(ctx)
 }
 func (s *handleDriverSession) CloseInput() error    { return s.handle.CloseInput() }

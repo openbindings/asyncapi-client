@@ -12,6 +12,14 @@ export interface AsyncAPIProtocolDriverRequest {
   readonly document: Readonly<Record<string, unknown>>;
   readonly operation: Readonly<Record<string, unknown>>;
   readonly channel?: Readonly<Record<string, unknown>>;
+  readonly server?: Readonly<Record<string, unknown>>;
+  /** Fully expanded AsyncAPI channel address. */
+  readonly address: string;
+  /** Governing, resolved message declarations in artifact order. */
+  readonly messages: readonly Readonly<Record<string, unknown>>[];
+  /** Resolved AsyncAPI security alternatives. Each outer item is one
+   *  satisfiable alternative; every scheme inside that item applies. */
+  readonly securityAlternatives: readonly (readonly AsyncAPIResolvedSecurityScheme[])[];
   readonly ref: string;
   readonly operationKey: string;
   readonly action: "send" | "receive";
@@ -19,6 +27,16 @@ export interface AsyncAPIProtocolDriverRequest {
   readonly serverURL: string;
   readonly context?: Readonly<Record<string, unknown>>;
   readonly signal: AbortSignal;
+  /** Present when the caller supplies application values to the operation. */
+  readonly encodeInput?: (value: unknown) => Uint8Array;
+  /** Present when the caller observes application values from the operation. */
+  readonly decodeOutput?: (payload: Uint8Array) => Promise<unknown>;
+}
+
+export interface AsyncAPIResolvedSecurityScheme {
+  /** components.securitySchemes key, when the declaration was addressable. */
+  readonly name?: string;
+  readonly scheme: Readonly<Record<string, unknown>>;
 }
 
 /** Cardinality-neutral lifecycle surface used by protocol drivers. */

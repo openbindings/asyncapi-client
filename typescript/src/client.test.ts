@@ -266,20 +266,46 @@ describe("AsyncAPIClient", () => {
   it("delegates an arbitrary artifact protocol to an installed driver", async () => {
     const document = httpDocument();
     document.servers.production = { host: "broker.example.test", protocol: "mqtt" };
-    delete (document.operations.submit as Record<string, unknown>).bindings;
+    (document.operations.submit as Record<string, unknown>).bindings = {
+      mqtt: { qos: 1 },
+      future: {
+        marker: "preserved",
+        config: { $ref: "#/components/schemas/DriverConfig" },
+      },
+    };
     delete (document.operations.submit as Record<string, unknown>).reply;
+    (document.servers.production as Record<string, unknown>).security = [
+      { $ref: "#/components/securitySchemes/mqttBasic" },
+    ];
+    (document as unknown as Record<string, unknown>).components = {
+      securitySchemes: { mqttBasic: { type: "userPassword" } },
+      schemas: { DriverConfig: { type: "object" } },
+    };
     const seen: unknown[] = [];
     const driver: AsyncAPIProtocolDriver = {
       protocols: ["mqtt"],
       async execute(request, session) {
         expect(request.protocol).toBe("mqtt");
         expect(request.operationKey).toBe("submit");
-        expect((request.operation.bindings as Record<string, unknown> | undefined)).toBeUndefined();
+        expect(request.address).toBe("/commands");
+        expect(request.server?.protocol).toBe("mqtt");
+        expect(request.messages).toHaveLength(1);
+        expect(new TextDecoder().decode(request.encodeInput?.({ id: 9 }))).toBe('{"id":9}');
+        expect(request.operation.bindings).toEqual({
+          mqtt: { qos: 1 },
+          future: { marker: "preserved", config: { type: "object" } },
+        });
+        expect(request.securityAlternatives).toEqual([[
+          { name: "mqttBasic", scheme: expect.objectContaining({ type: "userPassword" }) },
+        ]]);
         for await (const value of session.inputs) seen.push(value);
         await session.emit({ accepted: true });
       },
     };
-    const client = await AsyncAPIClient.load(document, { drivers: [driver] });
+    const client = await AsyncAPIClient.load(document, {
+      drivers: [driver],
+      context: { basic: { username: "sensor", password: "secret" } },
+    });
     await expect(client.publish("submit", { id: 9 })).resolves.toEqual([{ accepted: true }]);
     expect(seen).toEqual([{ id: 9 }]);
     client.close();

@@ -278,6 +278,22 @@ func (d *testProtocolDriver) Execute(ctx context.Context, request DriverRequest,
 	if request.Protocol != "mqtt" || request.OperationKey != "submit" || len(request.Artifact) == 0 {
 		return errors.New("driver request did not preserve the artifact target")
 	}
+	if request.Address != "/commands" || request.Server["protocol"] != "mqtt" || len(request.Messages) != 1 || request.EncodeInput == nil {
+		return errors.New("driver request did not carry resolved AsyncAPI semantics")
+	}
+	bindings, _ := request.Operation["bindings"].(map[string]any)
+	future, _ := bindings["future"].(map[string]any)
+	config, _ := future["config"].(map[string]any)
+	if mqtt, ok := bindings["mqtt"].(map[string]any); !ok || mqtt["qos"] != float64(1) || future["marker"] != "preserved" || config["type"] != "object" {
+		return errors.New("driver request did not preserve open protocol-binding entries")
+	}
+	if len(request.SecurityAlternatives) != 1 || len(request.SecurityAlternatives[0]) != 1 || request.SecurityAlternatives[0][0].Name != "mqttBasic" || request.SecurityAlternatives[0][0].Scheme["type"] != "userPassword" {
+		return errors.New("driver request did not carry resolved security alternatives")
+	}
+	encoded, err := request.EncodeInput(map[string]any{"id": 9})
+	if err != nil || string(encoded) != `{"id":9}` {
+		return errors.New("driver request did not carry the artifact codec")
+	}
 	value, err := session.Receive(ctx)
 	if err != nil {
 		return err
@@ -291,12 +307,18 @@ func (d *testProtocolDriver) Execute(ctx context.Context, request DriverRequest,
 
 func mqttArtifact() []byte {
 	doc := strings.Replace(string(httpArtifact()), `"protocol":"https"`, `"protocol":"mqtt"`, 1)
+	doc = strings.Replace(doc, `"protocol":"mqtt"`, `"protocol":"mqtt","security":[{"$ref":"#/components/securitySchemes/mqttBasic"}]`, 1)
+	doc = strings.Replace(doc, `"operations":`, `"components":{"securitySchemes":{"mqttBasic":{"type":"userPassword"}},"schemas":{"DriverConfig":{"type":"object"}}},"operations":`, 1)
+	doc = strings.Replace(doc, `"bindings":{"http":{"method":"PUT"}}`, `"bindings":{"mqtt":{"qos":1},"future":{"marker":"preserved","config":{"$ref":"#/components/schemas/DriverConfig"}}}`, 1)
 	return []byte(doc)
 }
 
 func TestClientDelegatesArbitraryProtocolToInstalledDriver(t *testing.T) {
 	driver := &testProtocolDriver{}
-	client, err := Load(context.Background(), Source{Content: mqttArtifact()}, LoadOptions{Drivers: []ProtocolDriver{driver}})
+	client, err := Load(context.Background(), Source{Content: mqttArtifact()}, LoadOptions{
+		Drivers: []ProtocolDriver{driver},
+		Context: map[string]any{"basic": map[string]any{"username": "sensor", "password": "secret"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

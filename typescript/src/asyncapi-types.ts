@@ -22,6 +22,7 @@ export interface AsyncAPIInfo {
 export interface AsyncAPIServer {
   host: string;
   protocol: string;
+  protocolVersion?: string;
   pathname?: string;
   description?: string;
   /** Declared `{name}` expressions in host/pathname, substituted per
@@ -29,6 +30,7 @@ export interface AsyncAPIServer {
    *  unresolved is a pre-dispatch refusal). */
   variables?: Record<string, AsyncAPIServerVariable>;
   security?: AsyncAPISecurityRequirement[];
+  bindings?: Record<string, Record<string, unknown>>;
 }
 
 /** An AsyncAPI Server Variable Object. */
@@ -69,6 +71,7 @@ export interface AsyncAPIParameter {
  *  speak). Only the websockets binding speaks at channel level in
  *  current artifact profile. */
 export interface AsyncAPIChannelBindings {
+  [protocol: string]: unknown;
   ws?: AsyncAPIWSChannelBinding;
 }
 
@@ -102,6 +105,7 @@ export interface AsyncAPIOperation {
  *  specification incorporates. Only the http binding speaks at operation
  *  level in the current artifact profile. */
 export interface AsyncAPIOperationBindings {
+  [protocol: string]: unknown;
   http?: AsyncAPIHTTPOperationBinding;
 }
 
@@ -127,7 +131,10 @@ export interface AsyncAPIMessage {
   schemaFormat?: string;
   payload?: Record<string, unknown>;
   headers?: Record<string, unknown>;
-  bindings?: { http?: { statusCode?: number; bindingVersion?: string } };
+  bindings?: {
+    [protocol: string]: unknown;
+    http?: { statusCode?: number; bindingVersion?: string };
+  };
   /** @internal Set only when a declared trait reference did not resolve. */
   "x-ob-asyncapi-unresolved-trait"?: string;
 }
