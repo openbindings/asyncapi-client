@@ -1,5 +1,5 @@
 /**
- * SSE subscription streaming for the AsyncAPI invoker (openbindings.asyncapi@2
+ * SSE subscription streaming for the AsyncAPI invoker (openbindings.asyncapi@1
  * §8, ASYNC-P-06): reads an established `text/event-stream` response per the
  * WHATWG server-sent events processing model — incorporated for EVENT
  * FRAMING ONLY — emitting one output value per event as units arrive
@@ -14,7 +14,7 @@
  *   - `event`, `id`, and `retry` are FRAMING: they never enter the output
  *     value; they surface out of band on the per-unit meta
  *     (x-sse-event / x-sse-id / x-sse-retry). `retry` is never acted on:
- *     reconnection is a revision-1 exclusion — one transport, one
+ *     reconnection is a built-in-driver exclusion — one transport, one
  *     invocation
  *   - CRLF, lone CR, and lone LF all terminate lines; one leading U+FEFF
  *     BOM is ignored; exactly one leading space is stripped from a field
@@ -174,7 +174,7 @@ export async function streamSSE(
         break;
       case "retry":
         // ASCII digits only, per WHATWG; recorded on meta only — never
-        // acted on (reconnection is excluded from revision 1).
+        // acted on (reconnection is excluded from the built-in driver).
         if (/^[0-9]+$/.test(value)) retryMs = Number.parseInt(value, 10);
         break;
       // Unknown fields are ignored per spec.

@@ -6,7 +6,7 @@ import {
   type AsyncAPIExecution,
   type AsyncAPIExecutionHooks,
 } from "./engine.js";
-import { operationRef, parseAsyncAPIDocument } from "./util.js";
+import { operationRef, parseAsyncAPIDocument, parseRef } from "./util.js";
 
 export type AsyncAPIOperationSelector = string | { ref: string };
 
@@ -144,12 +144,12 @@ function normalizeSource(
 
 function normalizeSelector(selector: AsyncAPIOperationSelector): string {
   if (typeof selector !== "string") return selector.ref;
-  return selector.startsWith("#/operations/") ? selector : operationRef(selector);
+  return selector.startsWith("#/") ? selector : operationRef(selector);
 }
 
 function operationFor(document: AsyncAPIDocument, selector: AsyncAPIOperationSelector) {
   const ref = normalizeSelector(selector);
-  const key = decodeURIComponent(ref.slice("#/operations/".length)).replace(/~1/g, "/").replace(/~0/g, "~");
+  const key = parseRef(ref);
   const operation = document.operations?.[key];
   if (!operation) throw new Error(`operation ${JSON.stringify(ref)} was not found`);
   return operation;

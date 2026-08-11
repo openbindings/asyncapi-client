@@ -58,7 +58,7 @@ export interface AcquireOptions {
   /**
    * Fingerprint of the credential identity a dial would use (invoke.ts's
    * wsUpgradeMaterial hashes exactly the upgrade-request material — no
-   * credential rides in-band under openbindings.asyncapi@2 §9.5, so the
+   * credential rides in-band under openbindings.asyncapi@1 §9.5, so the
    * upgrade request IS the connection's credential identity). Included in
    * the pool key alongside server/address: two acquires with different
    * credential fingerprints MUST NOT share a connection (cross-tenant
@@ -314,7 +314,7 @@ export class WSPool {
 /**
  * Preserves WebSocket message bytes at the OpenBindings string boundary.
  * Text frames already arrive as validated DOMStrings. Binary frames may
- * carry JSON/text bytes, but revision 1 has no opaque bytes value, so they
+ * carry JSON/text bytes, but the current value profile has no opaque bytes value, so they
  * must be strict UTF-8 rather than implementation stringification.
  */
 function strictUTF8Frame(data: unknown): string {

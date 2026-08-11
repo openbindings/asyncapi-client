@@ -9,8 +9,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 func loadDocument(ctx context.Context, client *http.Client, location string, content []byte) (*document, error) {
@@ -37,6 +35,7 @@ func parseDocument(data []byte) (*document, error) {
 	if err := json.Unmarshal(normalized, &doc); err != nil {
 		return nil, fmt.Errorf("parse normalized AsyncAPI document: %w", err)
 	}
+	doc.raw = append([]byte(nil), normalized...)
 	resolveRefs(&doc)
 	return &doc, nil
 }
@@ -47,10 +46,20 @@ func parseDocument(data []byte) (*document, error) {
 // sharing the client's upstream-spec interpretation.
 func NormalizeDocument(data []byte) ([]byte, error) {
 	var envelope map[string]any
-	if err := yaml.Unmarshal(data, &envelope); err != nil {
-		return nil, fmt.Errorf("parse AsyncAPI document: %w", err)
+	data = trimUTF8BOM(data)
+	if isJSON(data) {
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			return nil, fmt.Errorf("parse AsyncAPI document: %w", err)
+		}
+	} else {
+		var err error
+		envelope, err = decodeYAMLObject(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse AsyncAPI document: %w", err)
+		}
 	}
-	if err := discriminateEnvelope(envelope); err != nil {
+	envelope, err := normalizeEdition(envelope)
+	if err != nil {
 		return nil, err
 	}
 	infoValue, hasInfo := envelope["info"]
@@ -70,8 +79,17 @@ func NormalizeDocument(data []byte) ([]byte, error) {
 
 func discriminateDocument(data []byte) error {
 	var envelope map[string]any
-	if err := yaml.Unmarshal(data, &envelope); err != nil {
-		return fmt.Errorf("parse AsyncAPI document: %w", err)
+	data = trimUTF8BOM(data)
+	if isJSON(data) {
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			return fmt.Errorf("parse AsyncAPI document: %w", err)
+		}
+	} else {
+		var err error
+		envelope, err = decodeYAMLObject(data)
+		if err != nil {
+			return fmt.Errorf("parse AsyncAPI document: %w", err)
+		}
 	}
 	return discriminateEnvelope(envelope)
 }
@@ -82,8 +100,8 @@ func discriminateEnvelope(envelope map[string]any) error {
 		return fmt.Errorf("not a valid AsyncAPI document (missing 'asyncapi' field)")
 	}
 	version, ok := value.(string)
-	if !ok || version != "3.0.0" {
-		return fmt.Errorf("unsupported AsyncAPI version %v: this client accepts exactly 3.0.0", value)
+	if !ok || !supportedAsyncAPIEditions[version] {
+		return fmt.Errorf("unsupported AsyncAPI version %v: this client accepts exactly 2.0.0–2.6.0, 3.0.0, and 3.1.0", value)
 	}
 	return nil
 }
@@ -130,6 +148,7 @@ func sourceToBytes(ctx context.Context, client *http.Client, location string, co
 }
 
 func isJSON(data []byte) bool {
+	data = trimUTF8BOM(data)
 	for _, value := range data {
 		switch value {
 		case ' ', '\t', '\n', '\r':
@@ -141,6 +160,13 @@ func isJSON(data []byte) bool {
 		}
 	}
 	return false
+}
+
+func trimUTF8BOM(data []byte) []byte {
+	if len(data) >= 3 && data[0] == 0xef && data[1] == 0xbb && data[2] == 0xbf {
+		return data[3:]
+	}
+	return data
 }
 
 func extractRefName(ref string) string {
@@ -157,18 +183,32 @@ func unescapeRefToken(value string) string {
 }
 
 func resolveMessageRef(doc *document, ref messageRef) *message {
+	return resolveMessageRefSeen(doc, ref, map[string]bool{})
+}
+
+func resolveMessageRefSeen(doc *document, ref messageRef, seen map[string]bool) *message {
 	if ref.Ref == "" {
 		return nil
 	}
+	if seen[ref.Ref] {
+		return nil
+	}
+	seen[ref.Ref] = true
 	parts := strings.Split(strings.TrimPrefix(ref.Ref, "#/"), "/")
 	if len(parts) == 3 && parts[0] == "components" && parts[1] == "messages" && doc.Components != nil {
 		if value, ok := doc.Components.Messages[unescapeRefToken(parts[2])]; ok {
+			if value.Ref != "" {
+				return resolveMessageRefSeen(doc, messageRef{Ref: value.Ref}, seen)
+			}
 			return &value
 		}
 	}
 	if len(parts) == 4 && parts[0] == "channels" && parts[2] == "messages" {
 		if channel, ok := doc.Channels[unescapeRefToken(parts[1])]; ok {
 			if value, ok := channel.Messages[unescapeRefToken(parts[3])]; ok {
+				if value.Ref != "" {
+					return resolveMessageRefSeen(doc, messageRef{Ref: value.Ref}, seen)
+				}
 				return &value
 			}
 		}

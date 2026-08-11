@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AsyncAPIClient } from "./client.js";
 import { AsyncAPIEngine, AsyncAPIExecutionError } from "./engine.js";
+import type { AsyncAPIProtocolDriver } from "./driver.js";
 
 function httpDocument() {
   return {
@@ -40,6 +41,55 @@ describe("AsyncAPIClient", () => {
         interaction: "publish",
       }),
     ]);
+    client.close();
+  });
+
+  it("normalizes AsyncAPI 2.x perspective while preserving its native ref", async () => {
+    const document = {
+      asyncapi: "2.6.0",
+      info: { title: "Legacy artifact", version: "1" },
+      defaultContentType: "application/json",
+      servers: {
+        production: { url: "https://api.example.test/events", protocol: "https" },
+      },
+      channels: {
+        "commands/{tenant}": {
+          parameters: { tenant: { schema: { type: "string" } } },
+          publish: {
+            message: { messageId: "Command", payload: { type: "object" } },
+            bindings: { http: { method: "POST" } },
+          },
+        },
+      },
+    };
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const client = await AsyncAPIClient.load(document, {
+      fetch,
+      context: { configuration: { address: { parameters: { tenant: "acme" } } } },
+    });
+    expect(client.operations()).toEqual([
+      expect.objectContaining({
+        ref: "#/channels/commands~1{tenant}/publish",
+        action: "receive",
+        interaction: "publish",
+      }),
+    ]);
+    await expect(
+      client.publish("#/channels/commands~1{tenant}/publish", { id: 1 }),
+    ).resolves.toEqual([]);
+    expect(fetch).toHaveBeenCalledOnce();
+    client.close();
+  });
+
+  it("accepts the structurally compatible AsyncAPI 3.1 edition", async () => {
+    const document = httpDocument();
+    document.asyncapi = "3.1.0";
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ accepted: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const client = await AsyncAPIClient.load(document, { fetch });
+    await expect(client.publish("submit", { id: 3 })).resolves.toEqual([{ accepted: true }]);
     client.close();
   });
 
@@ -211,5 +261,38 @@ describe("AsyncAPIClient", () => {
     });
     controller.abort(new Error("stopped"));
     await expect(loading).rejects.toThrow("stopped");
+  });
+
+  it("delegates an arbitrary artifact protocol to an installed driver", async () => {
+    const document = httpDocument();
+    document.servers.production = { host: "broker.example.test", protocol: "mqtt" };
+    delete (document.operations.submit as Record<string, unknown>).bindings;
+    delete (document.operations.submit as Record<string, unknown>).reply;
+    const seen: unknown[] = [];
+    const driver: AsyncAPIProtocolDriver = {
+      protocols: ["mqtt"],
+      async execute(request, session) {
+        expect(request.protocol).toBe("mqtt");
+        expect(request.operationKey).toBe("submit");
+        expect((request.operation.bindings as Record<string, unknown> | undefined)).toBeUndefined();
+        for await (const value of session.inputs) seen.push(value);
+        await session.emit({ accepted: true });
+      },
+    };
+    const client = await AsyncAPIClient.load(document, { drivers: [driver] });
+    await expect(client.publish("submit", { id: 9 })).resolves.toEqual([{ accepted: true }]);
+    expect(seen).toEqual([{ id: 9 }]);
+    client.close();
+  });
+
+  it("reports an uninstalled protocol driver as a local capability failure", async () => {
+    const document = httpDocument();
+    document.servers.production = { host: "broker.example.test", protocol: "mqtt" };
+    delete (document.operations.submit as Record<string, unknown>).bindings;
+    const client = await AsyncAPIClient.load(document);
+    const execution = await client.start("submit");
+    const failure = execution.completed.catch((error: unknown) => error);
+    await expect(failure).resolves.toEqual(expect.objectContaining({ code: "DRIVER_UNAVAILABLE" }));
+    client.close();
   });
 });

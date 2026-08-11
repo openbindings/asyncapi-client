@@ -23,6 +23,8 @@ const (
 	ErrCodeStreamError       = "ERR_STREAM_ERROR"
 	ErrCodeValidationFailed  = "ERR_VALIDATION_FAILED"
 	ErrCodeRuntime           = "ERR_RUNTIME"
+	ErrCodeDriverUnavailable = "DRIVER_UNAVAILABLE"
+	ErrCodeDriverFailed      = "DRIVER_FAILED"
 )
 
 // ExecutionError is an SDK-neutral artifact execution failure. Details are

@@ -9,7 +9,6 @@ export {
   AsyncAPIEngine,
   AsyncAPIExecutionError,
   PreparedAsyncAPIOperation,
-  ASYNCAPI_PROFILE_COMPAT,
   ASYNCAPI_PROFILE_FULL,
   ASYNCAPI_USE_DEFAULT,
   type AsyncAPIEngineOptions,
@@ -24,3 +23,8 @@ export {
   type AsyncAPIPrepareOptions,
   type AsyncAPIPrerequisites,
 } from "./engine.js";
+export type {
+  AsyncAPIProtocolDriver,
+  AsyncAPIProtocolDriverRequest,
+  AsyncAPIProtocolDriverSession,
+} from "./driver.js";

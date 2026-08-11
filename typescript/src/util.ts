@@ -11,6 +11,11 @@ import {
   SERVER_NAME_TAG,
 } from "./constants.js";
 import { applyDocumentTraits } from "./traits.js";
+import {
+  normalizeAsyncAPIEnvelope,
+  parseV2OperationRef,
+  refForNormalizedOperationKey,
+} from "./edition.js";
 
 // The u flag makes the class match whole code points, so an astral-plane
 // character replaces as one underscore, not one per surrogate half
@@ -259,7 +264,7 @@ export async function parseAsyncAPIDocument(
     // document itself (object) — a present null included — fails the
     // document checks below loudly.
     if (typeof content === "string") {
-      raw = yaml.load(content);
+      raw = parseDocumentText(content);
     } else {
       raw = content;
     }
@@ -274,7 +279,7 @@ export async function parseAsyncAPIDocument(
       );
     }
     const text = await resp.text();
-    raw = yaml.load(text);
+    raw = parseDocumentText(text);
   } else {
     throw new Error("source must have location or content");
   }
@@ -290,11 +295,7 @@ export async function parseAsyncAPIDocument(
   if (declaredVersion === undefined) {
     throw new Error("not a valid AsyncAPI document (missing 'asyncapi' field)");
   }
-  if (declaredVersion !== "3.0.0") {
-    throw new Error(
-      `unsupported AsyncAPI version ${JSON.stringify(declaredVersion)}: the supported openbindings.asyncapi revisions accept exactly 3.0.0 (ASYNC-P-01)`,
-    );
-  }
+  raw = normalizeAsyncAPIEnvelope(raw as Record<string, unknown>);
 
   validateRawFixedFields(raw as Record<string, unknown>);
 
@@ -311,12 +312,20 @@ export async function parseAsyncAPIDocument(
     {
       baseUrl: location,
       fetch: fetchFn ?? fetch,
-      parse: (text) => yaml.load(text),
+      parse: parseDocumentText,
       signal: options?.signal,
       // AsyncAPI synthesis accounts for invalid operations individually.
       // Preserve a dangling target here so the eligibility/coverage layer can
       // exclude that operation without rejecting unrelated valid operations.
       allowUnresolved: true,
+      // These fields carry application data, not reference-bearing artifact
+      // structure. A literal object such as {"$ref":"customer-value"} in
+      // an enum or example must survive unchanged. Extension values are also
+      // owned by their extension vocabulary, not by AsyncAPI's Reference
+      // Object rules.
+      shouldTraverseChild: (_owner, key) =>
+        !["const", "default", "enum", "example", "examples"].includes(key)
+        && !key.toLowerCase().startsWith("x-"),
       // AsyncAPI 3.0 Reference Objects cannot be extended; siblings are
       // ignored. Preserve only our private identity tags, which are removed
       // from projected operation schemas and exist solely to retain source
@@ -350,6 +359,14 @@ export async function parseAsyncAPIDocument(
   }
 
   return applyDocumentTraits(resolved);
+}
+
+/** Parse JSON-looking documents as strict JSON and YAML as YAML 1.2's JSON schema. */
+function parseDocumentText(text: string): unknown {
+  const normalized = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const first = normalized.trimStart()[0];
+  if (first === "{" || first === "[") return JSON.parse(normalized);
+  return yaml.load(normalized, { schema: yaml.JSON_SCHEMA });
 }
 
 /**
@@ -387,6 +404,8 @@ export function parseRef(ref: string): string {
     );
   }
 
+  const v2 = parseV2OperationRef(ref);
+  if (v2) return v2;
   const prefix = "#/operations/";
   if (!ref.startsWith(prefix)) {
     throw new Error(
@@ -410,6 +429,8 @@ export function parseRef(ref: string): string {
  * `/` → `~1` — escape order is the reverse of decode order).
  */
 export function operationRef(opID: string): string {
+  const v2 = refForNormalizedOperationKey(opID);
+  if (v2) return v2;
   return `#/operations/${opID.replaceAll("~", "~0").replaceAll("/", "~1")}`;
 }
 

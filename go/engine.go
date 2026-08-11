@@ -10,17 +10,29 @@ import (
 // Engine owns artifact caching and reusable WebSocket sessions. It has no
 // dependency on OpenBindings and can be used directly by AsyncAPI consumers.
 type Engine struct {
-	client *http.Client
-	pool   *wsPool
-	mu     sync.RWMutex
-	cache  map[string]*document
+	client  *http.Client
+	pool    *wsPool
+	mu      sync.RWMutex
+	cache   map[string]*document
+	drivers map[string]ProtocolDriver
 }
 
 func NewEngine(client *http.Client) *Engine {
+	engine, _ := NewEngineWithDrivers(client)
+	return engine
+}
+
+// NewEngineWithDrivers constructs an engine with additional or replacement
+// protocol drivers.
+func NewEngineWithDrivers(client *http.Client, drivers ...ProtocolDriver) (*Engine, error) {
 	if client == nil {
 		client = newDefaultHTTPClient()
 	}
-	return &Engine{client: client, pool: newWSPool(client), cache: map[string]*document{}}
+	indexed, err := indexProtocolDrivers(drivers)
+	if err != nil {
+		return nil, err
+	}
+	return &Engine{client: client, pool: newWSPool(client), cache: map[string]*document{}, drivers: indexed}, nil
 }
 
 func (e *Engine) Close() error {
@@ -35,6 +47,7 @@ type PreparedOperation struct {
 	inputRequired bool
 	client        *http.Client
 	pool          *wsPool
+	drivers       map[string]ProtocolDriver
 }
 
 func (p *PreparedOperation) Ref() string      { return p.options.Ref }
@@ -85,6 +98,7 @@ func (e *Engine) PrepareCached(_ context.Context, options PrepareOptions) (*Prep
 func (p *PreparedOperation) attach(engine *Engine) {
 	p.client = engine.client
 	p.pool = engine.pool
+	p.drivers = engine.drivers
 	if p.options.HTTPClient != nil && p.options.HTTPClient != engine.client {
 		p.client = p.options.HTTPClient
 		p.pool = nil
@@ -165,6 +179,7 @@ func (p *PreparedOperation) Start(ctx context.Context) (*Execution, error) {
 		Site:                 &invokeSite{Ref: p.options.Ref, Profile: string(profile)},
 		MaxDeliveryUnitBytes: p.options.MaxDeliveryUnitBytes,
 		AcceptsInput:         p.options.AcceptsInput,
+		ProtocolDrivers:      p.drivers,
 	}
 	client := p.client
 	if client == nil {

@@ -67,7 +67,7 @@ export interface AsyncAPIParameter {
 /** The protocol entries of a channel's `bindings` object this
  *  specification incorporates (§8: bindings are authoritative where they
  *  speak). Only the websockets binding speaks at channel level in
- *  revision 1. */
+ *  current artifact profile. */
 export interface AsyncAPIChannelBindings {
   ws?: AsyncAPIWSChannelBinding;
 }
@@ -100,13 +100,13 @@ export interface AsyncAPIOperation {
 
 /** The protocol entries of an operation's `bindings` object this
  *  specification incorporates. Only the http binding speaks at operation
- *  level in revision 1. */
+ *  level in the current artifact profile. */
 export interface AsyncAPIOperationBindings {
   http?: AsyncAPIHTTPOperationBinding;
 }
 
 /** The AsyncAPI HTTP operation binding: its `method` selects the request
- *  method and is required for revision 1's HTTP publish cell (§8). */
+ *  method and is required for the built-in HTTP publish cell. */
 export interface AsyncAPIHTTPOperationBinding {
   method?: string;
   query?: Record<string, unknown>;
@@ -124,6 +124,7 @@ export interface AsyncAPIMessage {
   summary?: string;
   description?: string;
   contentType?: string;
+  schemaFormat?: string;
   payload?: Record<string, unknown>;
   headers?: Record<string, unknown>;
   bindings?: { http?: { statusCode?: number; bindingVersion?: string } };

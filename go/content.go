@@ -194,7 +194,7 @@ type inputCodec struct {
 // request-side declaration (§9.1, ASYNC-P-03): a JSON-family type serializes
 // the value as JSON; a supported text-family type carries a UTF-8 string.
 // Binary/codec-specific media and explicit non-UTF-8 charsets are refused:
-// revision 1 has no bytes value or common transcode surface. With no
+// the current value profile has no bytes value or common transcode surface. With no
 // declaration, configuration.encode must choose the JSON or text lane. More
 // or fewer than one selected message is refused; payload bytes never select
 // among artifact alternatives.
@@ -234,7 +234,7 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		}
 		return inputCodec{JSON: false, ContentType: effective}, nil
 	default:
-		return inputCodec{}, fmt.Errorf("effective content type %q has no revision-1 value carriage", messageEffectiveContentType(doc, msgs[0]))
+		return inputCodec{}, fmt.Errorf("effective content type %q has no built-in application-value carriage", messageEffectiveContentType(doc, msgs[0]))
 	}
 }
 
@@ -245,7 +245,7 @@ func messageEffectiveContentType(doc *document, m message) string {
 	return doc.DefaultContentType
 }
 
-// supportedMessageContentType enforces the revision-1 value boundary:
+// supportedMessageContentType enforces the current application-value boundary:
 // JSON-family and UTF-8 text-family media are representable; absence is
 // completed by encode/decode configuration; binary codecs and a non-UTF-8
 // charset are not assigned an invented bytes convention.
@@ -259,7 +259,7 @@ func supportedMessageContentType(contentType string) error {
 	}
 	mediaType = strings.ToLower(mediaType)
 	if mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json") && !strings.HasPrefix(mediaType, "text/") {
-		return fmt.Errorf("effective content type %q has no revision-1 value carriage", contentType)
+		return fmt.Errorf("effective content type %q has no built-in application-value carriage", contentType)
 	}
 	if charset := strings.ToLower(strings.TrimSpace(params["charset"])); charset != "" && charset != "utf-8" && charset != "utf8" {
 		return fmt.Errorf("effective content type %q declares unsupported non-UTF-8 charset %q", contentType, params["charset"])
@@ -292,7 +292,7 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 			return "", err
 		}
 		if m.Headers != nil {
-			return "", fmt.Errorf("output message declares headers, which revision 1 cannot carry")
+			return "", fmt.Errorf("output message declares headers, which the application-value boundary cannot carry")
 		}
 		ct := m.ContentType
 		if ct == "" {
@@ -357,7 +357,7 @@ func resolveReplyContentType(doc *document, op *asyncOperation, status int, actu
 			return "", err
 		}
 		if m.Headers != nil {
-			return "", fmt.Errorf("selected reply message declares headers, which revision 1 cannot carry")
+			return "", fmt.Errorf("selected reply message declares headers, which the application-value boundary cannot carry")
 		}
 		if err := supportedMessageContentType(messageEffectiveContentType(doc, m)); err != nil {
 			return "", err
@@ -436,7 +436,7 @@ func validateMessageBindingVersion(m message) error {
 	if m.Bindings != nil && m.Bindings.HTTP != nil {
 		v := m.Bindings.HTTP.BindingVersion
 		if v != "" && v != "0.3.0" {
-			return fmt.Errorf("HTTP message binding version %q is outside revision 1's incorporated 0.3.0 envelope", v)
+			return fmt.Errorf("HTTP message binding version %q is outside the built-in HTTP driver's 0.3.0 envelope", v)
 		}
 	}
 	return nil

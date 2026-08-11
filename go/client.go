@@ -12,6 +12,7 @@ type LoadOptions struct {
 	Profile    Profile
 	Context    map[string]any
 	Hooks      *Hooks
+	Drivers    []ProtocolDriver
 }
 
 type InvocationOptions struct {
@@ -31,7 +32,10 @@ type Client struct {
 }
 
 func Load(ctx context.Context, source Source, options LoadOptions) (*Client, error) {
-	engine := NewEngine(options.HTTPClient)
+	engine, err := NewEngineWithDrivers(options.HTTPClient, options.Drivers...)
+	if err != nil {
+		return nil, err
+	}
 	doc, err := engine.load(ctx, source, options.HTTPClient)
 	if err != nil {
 		_ = engine.Close()

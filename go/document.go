@@ -35,7 +35,7 @@ func (d *Document) Operations() []Operation {
 	for _, id := range ids {
 		op := d.doc.Operations[id]
 		out = append(out, Operation{
-			ID: id, Ref: "#/operations/" + escapeRefToken(id), Action: op.Action,
+			ID: id, Ref: operationRef(id), Action: op.Action,
 			Summary: op.Summary, Description: op.Description, Channel: extractRefName(op.Channel.Ref),
 		})
 	}

@@ -1,6 +1,7 @@
 package asyncapiclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -241,5 +242,109 @@ func TestArtifactRetrievalCancellationPropagates(t *testing.T) {
 	_, err := Load(ctx, Source{Location: "https://example.test/asyncapi.yaml"}, LoadOptions{HTTPClient: httpClient})
 	if !errors.Is(err, context.Canceled) && !strings.Contains(errorMessage(err), "canceled") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+type testProtocolDriver struct{ seen []any }
+
+func (d *testProtocolDriver) Protocols() []string { return []string{"mqtt"} }
+
+func (d *testProtocolDriver) Execute(ctx context.Context, request DriverRequest, session DriverSession) error {
+	if request.Protocol != "mqtt" || request.OperationKey != "submit" || len(request.Artifact) == 0 {
+		return errors.New("driver request did not preserve the artifact target")
+	}
+	value, err := session.Receive(ctx)
+	if err != nil {
+		return err
+	}
+	d.seen = append(d.seen, value)
+	if err := session.CloseInput(); err != nil {
+		return err
+	}
+	return session.Emit(map[string]any{"accepted": true})
+}
+
+func mqttArtifact() []byte {
+	doc := strings.Replace(string(httpArtifact()), `"protocol":"https"`, `"protocol":"mqtt"`, 1)
+	return []byte(doc)
+}
+
+func TestClientDelegatesArbitraryProtocolToInstalledDriver(t *testing.T) {
+	driver := &testProtocolDriver{}
+	client, err := Load(context.Background(), Source{Content: mqttArtifact()}, LoadOptions{Drivers: []ProtocolDriver{driver}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	events, err := client.Publish(context.Background(), "submit", map[string]any{"id": 9}, InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || len(driver.seen) != 1 {
+		t.Fatalf("events = %#v, seen = %#v", events, driver.seen)
+	}
+}
+
+func TestClientNormalizesAsyncAPIV2PerspectiveAndPreservesNativeRef(t *testing.T) {
+	artifact := []byte(`{
+  "asyncapi":"2.6.0",
+  "info":{"title":"Legacy artifact","version":"1"},
+  "defaultContentType":"application/json",
+  "servers":{"production":{"url":"https://api.example.test/events","protocol":"https"}},
+  "channels":{"commands/{tenant}":{
+    "parameters":{"tenant":{"schema":{"type":"string"}}},
+    "publish":{"message":{"messageId":"Command","payload":{"type":"object"}},"bindings":{"http":{"method":"POST"}}}
+  }}
+}`)
+	requests := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: 204, Status: "204 No Content", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+	})}
+	client, err := Load(context.Background(), Source{Content: artifact}, LoadOptions{
+		HTTPClient: httpClient,
+		Context: map[string]any{"configuration": map[string]any{
+			"address": map[string]any{"parameters": map[string]any{"tenant": "acme"}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	operations := client.Operations()
+	if len(operations) != 1 || operations[0].Ref != "#/channels/commands~1{tenant}/publish" || operations[0].Action != "receive" {
+		t.Fatalf("operations = %#v", operations)
+	}
+	events, err := client.Publish(context.Background(), operations[0].Ref, map[string]any{"id": 1}, InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 || requests != 1 {
+		t.Fatalf("events = %#v, requests = %d", events, requests)
+	}
+}
+
+func TestClientAcceptsAsyncAPI31(t *testing.T) {
+	artifact := bytes.Replace(httpArtifact(), []byte(`"asyncapi":"3.0.0"`), []byte(`"asyncapi":"3.1.0"`), 1)
+	client, err := Load(context.Background(), Source{Content: artifact}, LoadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if len(client.Operations()) != 1 {
+		t.Fatalf("operations = %#v", client.Operations())
+	}
+}
+
+func TestClientReportsUninstalledProtocolDriverAsCapabilityFailure(t *testing.T) {
+	client, err := Load(context.Background(), Source{Content: mqttArtifact()}, LoadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	_, err = client.Publish(context.Background(), "submit", map[string]any{"id": 9}, InvocationOptions{})
+	var failure *ExecutionError
+	if !errors.As(err, &failure) || failure.Code != ErrCodeDriverUnavailable {
+		t.Fatalf("failure = %#v (err %v)", failure, err)
 	}
 }

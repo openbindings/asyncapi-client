@@ -21,15 +21,10 @@ import (
 // carriage the openapi format consults), so this file reads one merged
 // value per point.
 
-// boundProtocols are the protocols revision 1 of asyncapi
-// binds (§2). Everything else is a definition-level exclusion, refused
-// pre-dispatch (ASYNC-P-02).
+// Protocol recognition is intentionally open. The engine resolves an
+// artifact target and then requires an installed driver before dispatch.
 func isBoundProtocol(p string) bool {
-	switch p {
-	case "http", "https", "ws", "wss":
-		return true
-	}
-	return false
+	return strings.TrimSpace(p) != ""
 }
 
 // configRequired is the typed signal a resolution helper returns when a named
@@ -104,7 +99,7 @@ func effectiveServers(doc *document, ch *channel) []namedServer {
 }
 
 // defaultServer returns the sole effective-set member whose protocol
-// revision 1 binds (§9.2). With zero or several bound members there is no
+// the current artifact profile selects. With zero or several bound members there is no
 // artifact-selected default; declaration order never chooses identity.
 func defaultServer(candidates []namedServer) *namedServer {
 	var selected *namedServer
@@ -339,7 +334,7 @@ func fullURLOverride(full string, selected *namedServer) (resolvedTarget, error)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if !isBoundProtocol(scheme) {
-		return resolvedTarget{}, fmt.Errorf("connection URL %q: scheme %q is not bound by the supported asyncapi revisions (supported: http, https, ws, wss)", full, scheme)
+		return resolvedTarget{}, fmt.Errorf("connection URL %q has no usable protocol scheme", full)
 	}
 	selectedProtocol := strings.ToLower(selected.Server.Protocol)
 	if scheme != selectedProtocol {
@@ -386,7 +381,7 @@ func assembleServer(member *namedServer, supplied map[string]string) (resolvedTa
 	srv := member.Server
 	proto := strings.ToLower(srv.Protocol)
 	if !isBoundProtocol(proto) {
-		return resolvedTarget{}, fmt.Errorf("server %q: protocol %q is not bound by the supported asyncapi revisions (supported: http, https, ws, wss)", member.Name, srv.Protocol)
+		return resolvedTarget{}, fmt.Errorf("server %q declares an empty protocol", member.Name)
 	}
 
 	if err := validateSuppliedServerVariables(member, supplied); err != nil {

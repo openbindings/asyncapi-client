@@ -1,9 +1,9 @@
 import type { InvokeHooks, InvokeSite } from "./hooks.js";
+import type { AsyncAPIProtocolDriver } from "../driver.js";
 
-/** Internal execution profile used to preserve immutable adapter behavior. */
+/** Internal execution profile used for runtime diagnostics and hook sites. */
 export interface AsyncAPIExecutionProfile {
   readonly name: string;
-  readonly preserveSendReplies: boolean;
 }
 
 export interface InvocationSource {
@@ -24,6 +24,7 @@ export interface BindingInvocationArgs {
   site?: InvokeSite;
   /** Adapter hint for an operation surface that deliberately accepts no input. */
   acceptsInput?: boolean;
+  protocolDrivers?: ReadonlyMap<string, AsyncAPIProtocolDriver>;
 }
 
 export const DEFAULT_MAX_DELIVERY_UNIT_BYTES = 10 * 1024 * 1024;

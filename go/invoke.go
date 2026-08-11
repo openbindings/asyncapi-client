@@ -61,7 +61,7 @@ func configOrSourceError(err error, serverURL string) *ExecutionError {
 //	                      artifact-declared method, response -> at most one output
 //	receive + ws/wss      client-streaming publish: every input -> one
 //	                      socket frame; the caller closing input ends it
-//	send + http/https     excluded in revision 1
+//	send + http/https     excluded by the built-in HTTP driver
 //	send + ws/wss         server-streaming subscription: socket frames ->
 //	                      outputs, no caller input values
 //
@@ -130,6 +130,24 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	target, err := resolveTarget(doc, ch, args.Context)
 	if err != nil {
 		h.FireError(configOrSourceError(err, ""))
+		return
+	}
+	if driver := args.ProtocolDrivers[strings.ToLower(target.Protocol)]; driver != nil {
+		runProtocolDriver(ctx, driver, target, opID, &asyncOp, args, h, doc)
+		return
+	}
+	if target.Protocol != "http" && target.Protocol != "https" && target.Protocol != "ws" && target.Protocol != "wss" {
+		h.FireError(&ExecutionError{
+			Code:    ErrCodeDriverUnavailable,
+			Message: fmt.Sprintf("no AsyncAPI protocol driver is installed for %q", target.Protocol),
+		})
+		return
+	}
+	if asyncOp.V2SecurityConjunction != nil || (target.SecurityServer != nil && target.SecurityServer.V2SecurityConjunction != nil) {
+		h.FireError(&ExecutionError{
+			Code:    ErrCodeSourceConfigError,
+			Message: "the built-in driver cannot preserve this AsyncAPI 2.x multi-scheme security conjunction",
+		})
 		return
 	}
 	if err := validateCell(doc, ch, &asyncOp, target.Protocol, args.Source.Profile, args.Context); err != nil {
@@ -232,6 +250,23 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	}
 }
 
+func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolvedTarget, operationKey string, operation *asyncOperation, args *executionArgs, h handle, doc *document) {
+	request := DriverRequest{
+		Artifact: append([]byte(nil), doc.raw...), Ref: args.Ref, OperationKey: operationKey,
+		Action: operation.Action, Protocol: target.Protocol, ServerURL: target.ServerURL,
+		Context: args.Context,
+	}
+	session := &handleDriverSession{handle: h}
+	if err := driver.Execute(ctx, request, session); err != nil {
+		h.FireError(&ExecutionError{
+			Code: ErrCodeDriverFailed, Message: err.Error(), Cause: err,
+			Diagnostics: map[string]any{"protocol": target.Protocol},
+		})
+		return
+	}
+	session.Complete()
+}
+
 type preparedInput struct{ Value any }
 
 func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bindingSpec string, bindCtx map[string]any) error {
@@ -240,18 +275,18 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 		httpBinding = op.Bindings.HTTP
 	}
 	if httpBinding != nil && httpBinding.BindingVersion != "" && httpBinding.BindingVersion != "0.3.0" {
-		return fmt.Errorf("HTTP binding version %q is outside revision 1's incorporated 0.3.0 envelope", httpBinding.BindingVersion)
+		return fmt.Errorf("HTTP binding version %q is outside the built-in HTTP driver's 0.3.0 envelope", httpBinding.BindingVersion)
 	}
 	var wsBinding *wsChannelBinding
 	if ch != nil && ch.Bindings != nil {
 		wsBinding = ch.Bindings.WS
 	}
 	if wsBinding != nil && wsBinding.BindingVersion != "" && wsBinding.BindingVersion != "0.1.0" {
-		return fmt.Errorf("WebSockets binding version %q is outside revision 1's incorporated 0.1.0 envelope", wsBinding.BindingVersion)
+		return fmt.Errorf("WebSockets binding version %q is outside the built-in WebSocket driver's 0.1.0 envelope", wsBinding.BindingVersion)
 	}
 	if protocol == "http" || protocol == "https" {
 		if op.Action == "send" {
-			return fmt.Errorf("standalone HTTP send operations are excluded from revision 1")
+			return fmt.Errorf("standalone HTTP send operations are not implemented by the built-in HTTP driver")
 		}
 		if httpBinding == nil || strings.TrimSpace(httpBinding.Method) == "" {
 			return fmt.Errorf("HTTP receive operation has no artifact-declared HTTP method; POST is not inferred")
@@ -267,7 +302,7 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 			return err
 		}
 		if !replyMessagesBindable(doc, op) {
-			return fmt.Errorf("an HTTP reply message uses carriage outside revision 1")
+			return fmt.Errorf("an HTTP reply message uses carriage outside the built-in HTTP driver's application-value boundary")
 		}
 		fields, err := protocolFieldValues(bindCtx)
 		if err != nil {
@@ -278,7 +313,7 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 	}
 	if op.Action == "receive" {
 		if op.Reply != nil {
-			return fmt.Errorf("reply-bearing WebSocket receive operations are excluded from revision 1")
+			return fmt.Errorf("reply-bearing WebSocket receive operations require request/reply session semantics the built-in WebSocket driver does not implement")
 		}
 		selected, err := selectedInputMessages(doc, op, ch, bindCtx)
 		if err != nil {
@@ -303,8 +338,8 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 			}
 		}
 	}
-	if op.Reply != nil && preservesSendReplies(bindingSpec) {
-		return fmt.Errorf("reply-bearing WebSocket send operations are excluded from revision 2")
+	if op.Reply != nil {
+		return fmt.Errorf("reply-bearing WebSocket send operations require request/reply session semantics the built-in WebSocket driver does not implement")
 	}
 	_, err := resolveSubscriptionContentType(doc, governingMessages(doc, op, ch), bindCtx)
 	return err
@@ -377,6 +412,9 @@ func parseRef(ref string) (string, error) {
 	if ref == "" {
 		return "", fmt.Errorf("ref is required and must be a JSON Pointer #/operations/<operation-key> (ASYNC-D-03)")
 	}
+	if operation, ok := parseV2OperationRef(ref); ok {
+		return operation, nil
+	}
 
 	const prefix = "#/operations/"
 	if !strings.HasPrefix(ref, prefix) {
@@ -398,6 +436,9 @@ func parseRef(ref string) (string, error) {
 // key: `#/operations/` + the RFC 6901-escaped key (~ → ~0 first, then
 // / → ~1 — escape order is the reverse of decode order).
 func operationRef(opID string) string {
+	if ref, ok := refForNormalizedOperationKey(opID); ok {
+		return ref
+	}
 	escaped := strings.ReplaceAll(opID, "~", "~0")
 	escaped = strings.ReplaceAll(escaped, "/", "~1")
 	return "#/operations/" + escaped
@@ -892,7 +933,7 @@ func runSSESubscribe(ctx context.Context, client *http.Client, target resolvedTa
 
 	// One transport, one invocation: transport close COMPLETES the
 	// subscription — reconnection (`retry`, `Last-Event-ID`) is excluded
-	// from revision 1 (§8), so no reconnect is ever attempted here.
+	// from the built-in SSE profile, so no reconnect is ever attempted here.
 	streamSSE(ctx, resp, decodeContentType(doc, governingMessages(doc, asyncOp, ch)), args, siteFor(args, target.ServerURL), h)
 }
 
@@ -913,7 +954,7 @@ func runSSESubscribe(ctx context.Context, client *http.Client, target resolvedTa
 //   - `event`, `id`, and `retry` are FRAMING: they never enter the output
 //     value; they surface out of band on the per-unit Meta
 //     (x-sse-event / x-sse-id / x-sse-retry). `retry` is never acted on:
-//     reconnection is a revision-1 exclusion
+//     reconnection is a built-in-driver exclusion
 //   - an incomplete final event (end of stream before its dispatching
 //     blank line) is discarded, never flushed
 func streamSSE(ctx context.Context, resp *http.Response, decodeCT string, args *executionArgs, site invokeSite, h handle) {
@@ -1038,7 +1079,7 @@ func streamSSE(ctx context.Context, resp *http.Response, decodeCT string, args *
 			dataLines = append(dataLines, value)
 		case "retry":
 			// ASCII digits only, per WHATWG; recorded on Meta only — never
-			// acted on (reconnection is excluded from revision 1).
+			// acted on (reconnection is excluded from the built-in driver).
 			if value != "" && strings.IndexFunc(value, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
 				if ms, err := strconv.Atoi(value); err == nil {
 					retryMs = ms

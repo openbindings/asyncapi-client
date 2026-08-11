@@ -16,7 +16,7 @@
  *                           response -> at most one output
  *   - receive + ws/wss      client-streaming publish: every input -> one
  *                           socket frame; the caller closing input ends it
- *   - send + http/https     excluded in revision 1
+ *   - send + http/https     excluded by the built-in HTTP driver
  *   - send + ws/wss         server-streaming subscription: socket frames
  *                           -> outputs, no caller input values
  *
@@ -133,6 +133,10 @@ function configOrSourceError(e: unknown, serverURL: string): InvocationError {
 }
 import { parseRef, errorMessage } from "./util.js";
 import type { PooledWS, WSPool } from "./ws-pool.js";
+import type {
+  AsyncAPIProtocolDriver,
+  AsyncAPIProtocolDriverSession,
+} from "./driver.js";
 
 /**
  * STAYS FIXED under the delivery-unit knob: this constant now caps only the
@@ -187,6 +191,33 @@ export async function runBinding(
     return;
   }
 
+  const externalDriver = args.protocolDrivers?.get(target.protocol);
+  if (externalDriver) {
+    await runExternalDriver(externalDriver, args, h, doc, opID, asyncOp, ch, target);
+    return;
+  }
+  if (!["http", "https", "ws", "wss"].includes(target.protocol)) {
+    h.fireError(
+      new InvocationError(
+        "DRIVER_UNAVAILABLE",
+        `no AsyncAPI protocol driver is installed for ${JSON.stringify(target.protocol)}`,
+      ),
+    );
+    return;
+  }
+  if (
+    (asyncOp as unknown as Record<string, unknown>)["x-ob-asyncapi-v2-security-conjunction"] !== undefined
+    || (target.securityServer as unknown as Record<string, unknown> | undefined)?.["x-ob-asyncapi-v2-security-conjunction"] !== undefined
+  ) {
+    h.fireError(
+      new InvocationError(
+        ERR_SOURCE_CONFIG_ERROR,
+        "the built-in driver cannot preserve this AsyncAPI 2.x multi-scheme security conjunction",
+      ),
+    );
+    return;
+  }
+
   try {
     validateCell(doc, ch, asyncOp, target.protocol, args.source.profile, args.context);
   } catch (e: unknown) {
@@ -226,7 +257,7 @@ export async function runBinding(
     if (needsPayload) {
       if (asyncOp.action !== "receive") throw new Error("subscription address uses a message runtime expression before any outgoing message exists");
       if (target.protocol !== "http" && target.protocol !== "https") {
-        throw new Error("WebSocket publish address runtime expressions are not available before connection in revision 1");
+        throw new Error("WebSocket publish address runtime expressions are not available before connection in the built-in driver");
       }
       if (noInputDeclared(args)) throw new Error("address runtime expression requires an outgoing message, but the operation declares no input");
       const first = await readFirstInput(h);
@@ -295,6 +326,61 @@ export async function runBinding(
   }
 }
 
+async function runExternalDriver(
+  driver: AsyncAPIProtocolDriver,
+  args: BindingInvocationArgs,
+  h: Handle,
+  doc: AsyncAPIDocument,
+  operationKey: string,
+  operation: AsyncAPIOperation,
+  channel: AsyncAPIChannel | undefined,
+  target: ResolvedTarget,
+): Promise<void> {
+  let completed = false;
+  const session: AsyncAPIProtocolDriverSession = {
+    inputs: h.inputs(),
+    signal: h.signal,
+    closeInput: () => h.closeInput(),
+    emit: (value) => h.emitOutput(value),
+    setLeadingMetadata: (metadata) => h.setHeader(metadata),
+    setTrailingMetadata: (metadata) => h.setTrailer(metadata),
+    complete: () => {
+      if (completed) return;
+      completed = true;
+      h.closeOutput();
+    },
+  };
+  try {
+    await driver.execute(
+      {
+        document: doc as unknown as Readonly<Record<string, unknown>>,
+        operation: operation as unknown as Readonly<Record<string, unknown>>,
+        ...(channel
+          ? { channel: channel as unknown as Readonly<Record<string, unknown>> }
+          : {}),
+        ref: args.ref,
+        operationKey,
+        action: operation.action,
+        protocol: target.protocol,
+        serverURL: target.serverURL,
+        context: args.context,
+        signal: h.signal,
+      },
+      session,
+    );
+    session.complete();
+  } catch (error: unknown) {
+    h.fireError(
+      new InvocationError(
+        "DRIVER_FAILED",
+        errorMessage(error),
+        undefined,
+        { protocol: target.protocol },
+      ),
+    );
+  }
+}
+
 /** The operation's resolved channel object, or undefined when the channel
  *  `$ref` did not resolve (the dereferencer leaves dangling refs in place). */
 function resolvedChannel(ch: AsyncAPIChannel | undefined): AsyncAPIChannel | undefined {
@@ -308,33 +394,33 @@ function validateCell(
   ch: AsyncAPIChannel | undefined,
   op: AsyncAPIOperation,
   protocol: string,
-  profile: { preserveSendReplies: boolean },
+  _profile: object,
   context?: Record<string, unknown>,
 ): void {
   const httpBinding = op.bindings?.http;
   if (httpBinding?.bindingVersion !== undefined && httpBinding.bindingVersion !== "0.3.0") {
-    throw new Error(`HTTP binding version ${JSON.stringify(httpBinding.bindingVersion)} is outside revision 1's incorporated 0.3.0 envelope`);
+    throw new Error(`HTTP binding version ${JSON.stringify(httpBinding.bindingVersion)} is outside the built-in HTTP driver's 0.3.0 envelope`);
   }
   const wsBinding = ch?.bindings?.ws;
   if (wsBinding?.bindingVersion !== undefined && wsBinding.bindingVersion !== "0.1.0") {
-    throw new Error(`WebSockets binding version ${JSON.stringify(wsBinding.bindingVersion)} is outside revision 1's incorporated 0.1.0 envelope`);
+    throw new Error(`WebSockets binding version ${JSON.stringify(wsBinding.bindingVersion)} is outside the built-in WebSocket driver's 0.1.0 envelope`);
   }
 
   if (protocol === "http" || protocol === "https") {
-    if (op.action === "send") throw new Error("standalone HTTP send operations are excluded from revision 1");
+    if (op.action === "send") throw new Error("standalone HTTP send operations are not implemented by the built-in HTTP driver");
     if (!httpBinding?.method?.trim()) throw new Error("HTTP receive operation has no artifact-declared HTTP method; POST is not inferred");
     const selected = selectedInputMessages(op, ch, context);
     validateMessageBindingVersion(selected[0]!);
     resolveInputCodec(doc, selected, context);
     if (!replyMessagesBindable(doc, op)) {
-      throw new Error("an HTTP reply message uses carriage outside revision 1");
+      throw new Error("an HTTP reply message uses carriage outside the built-in HTTP driver's application-value boundary");
     }
     resolveHTTPQuery(op, protocolFieldValues(context).httpQuery);
     return;
   }
 
   if (op.action === "receive") {
-    if (op.reply) throw new Error("reply-bearing WebSocket receive operations are excluded from revision 1");
+    if (op.reply) throw new Error("reply-bearing WebSocket receive operations require request/reply session semantics the built-in WebSocket driver does not implement");
     const selected = selectedInputMessages(op, ch, context);
     validateMessageBindingVersion(selected[0]!);
     resolveInputCodec(doc, selected, context);
@@ -343,8 +429,10 @@ function validateCell(
       throw new Error("configuration.websocketMessageType must select text or binary for a WebSocket publish");
     }
   } else {
-    if (op.reply && profile.preserveSendReplies) {
-      throw new Error("reply-bearing WebSocket send operations are excluded from revision 2");
+    if (op.reply) {
+      throw new Error(
+        "reply-bearing WebSocket send operations require request/reply session semantics the built-in WebSocket driver does not implement",
+      );
     }
     // This validates non-empty output declarations, message-header
     // exclusions, declaration identity, and the decode point when absent.
@@ -1005,7 +1093,7 @@ async function runSSESubscribe(
 
   // One transport, one invocation: transport close COMPLETES the
   // subscription — reconnection (`retry`, `Last-Event-ID`) is excluded from
-  // revision 1 (§8), so no reconnect is ever attempted here. Outputs decode
+  // the built-in SSE profile, so no reconnect is ever attempted here. Outputs decode
   // by the operation's own message declarations (direction-correct decode,
   // ASYNC-P-05).
   const decodeCT = decodeContentType(doc, governingMessages(asyncOp, ch));

@@ -49,6 +49,16 @@ export interface DereferenceOptions {
    * targets individually after dereferencing the rest of the artifact.
    */
   allowUnresolved?: boolean;
+  /**
+   * Return false to preserve a child subtree as data instead of interpreting
+   * `$ref`-shaped objects inside it. Format processors use this for literal
+   * examples, enum members, defaults, and extension values.
+   */
+  shouldTraverseChild?: (
+    owner: Record<string, unknown>,
+    key: string,
+    value: unknown,
+  ) => boolean;
 }
 
 /** Resolve a JSON Pointer (RFC 6901) against a root object. */
@@ -167,6 +177,7 @@ export async function dereference<T = unknown>(
   const allowUnresolved = options?.allowUnresolved ?? false;
   const mergeRefSiblings = options?.mergeRefSiblings;
   const prepareRefTarget = options?.prepareRefTarget;
+  const shouldTraverseChild = options?.shouldTraverseChild;
 
   // The single working tree. Internal refs resolve against THIS clone, never
   // the caller's `doc`: resolving against the original both mutates the
@@ -418,6 +429,7 @@ export async function dereference<T = unknown>(
 
     resolvedNodes.set(obj, obj);
     for (const key of Object.keys(obj)) {
+      if (shouldTraverseChild?.(obj, key, obj[key]) === false) continue;
       obj[key] = await walkAsync(obj[key], document);
     }
     return obj;

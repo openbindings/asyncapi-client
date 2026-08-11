@@ -1,11 +1,11 @@
 /**
  * Declared protocol `bindings` objects, honored where they speak
- * (openbindings.asyncapi@2 §8, ASYNC-P-02): an http operation binding's
+ * (openbindings.asyncapi@1 §8, ASYNC-P-02): an http operation binding's
  * `method` selects the request method; a websockets channel binding's
  * `method`, `query`, and `headers` govern the upgrade request, with
  * declared query and header values supplied through `protocolFields`
  * (§9.2), and any unsatisfied required declaration a pre-dispatch refusal.
- * Revision 1 requires the HTTP publish method instead of inventing one; the
+ * The built-in HTTP driver requires the authored publish method instead of inventing one; the
  * WebSocket protocol itself fixes the upgrade method. Mirrors the Go SDK's
  * bindings.go.
  */

@@ -1,6 +1,6 @@
 # OpenBindings AsyncAPI Client
 
-A document-driven AsyncAPI 3.0 client for invoking brownfield event APIs directly from their AsyncAPI documents.
+A document-driven AsyncAPI 2.x/3.x client for invoking brownfield event APIs directly from their AsyncAPI documents.
 
 The client does not generate source code and does not require an OpenBindings Interface (OBI). Load a document, select an authored operation, then publish or subscribe. The artifact remains authoritative for server and address resolution, protocol bindings, message selection, content type, security placement, replies, and lifecycle behavior.
 
@@ -53,10 +53,11 @@ or synthesizing an OBI.
 
 ## Artifact semantics
 
-- AsyncAPI 3.0.0 is accepted; other editions fail loudly.
+- Exact AsyncAPI editions 2.0.0–2.6.0, 3.0.0, and 3.1.0 are accepted; other editions fail loudly.
 - `receive` is invoked as a publish interaction; `send` is invoked as a subscription, because the artifact describes the application rather than the caller.
-- HTTP/HTTPS publish uses the authored HTTP operation-binding method and message/reply declarations.
-- WebSocket publish/subscription preserves ordering, input half-close, cancellation, bounded backpressure, connection sharing, and isolated subscriber failure.
+- Built-in HTTP/HTTPS execution uses the authored HTTP operation-binding method and message/reply declarations.
+- Built-in WebSocket execution preserves ordering, input half-close, cancellation, bounded backpressure, connection sharing, and isolated subscriber failure.
+- Additional protocols are installed as drivers. A missing driver is a local pre-dispatch capability error; document inventory remains independent of installed drivers.
 - Server, server-variable, channel-address, protocol-field, message, content-type, and security choices are resolved from the artifact plus explicit caller context. The client does not guess when several valid choices remain.
 - Operation and message traits are dereferenced and applied with AsyncAPI 3.0's ordered JSON Merge Patch rule before inventory, preparation, or dispatch; explicitly authored target properties retain precedence.
 - Unsupported or ambiguous cells refuse before dispatch.
@@ -75,8 +76,8 @@ document representation. TypeScript exposes the normalized parser from the
 
 The client is an invocation runtime, not an AsyncAPI code generator, broker,
 server framework, documentation renderer, or workflow engine. Protocols not
-currently bound by the supported AsyncAPI profile remain explicit coverage
-gaps rather than guessed implementations.
+covered by a built-in or installed driver remain explicit execution gaps
+rather than guessed implementations.
 
 See [architecture](docs/architecture.md), [fidelity contract](docs/fidelity-contract.md), [adapter contract](docs/adapter-contract.md), [extraction ledger](docs/extraction-ledger.md), [release qualification](docs/release-qualification.md), and [conformance](conformance/README.md).
 

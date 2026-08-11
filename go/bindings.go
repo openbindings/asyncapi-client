@@ -14,7 +14,7 @@ import (
 // websockets channel binding's `method`, `query`, and `headers` govern the
 // upgrade request, with declared query and header values supplied like
 // address parameters (§9.2) and any unsatisfied required declaration a
-// pre-dispatch refusal. Revision 1 requires the HTTP publish method instead
+// pre-dispatch refusal. The built-in HTTP driver requires the authored method instead
 // of inventing one; the WebSocket protocol itself fixes the upgrade method.
 
 // requestMethod returns the request method for an http-protocol cell: the

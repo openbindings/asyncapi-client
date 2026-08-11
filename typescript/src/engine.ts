@@ -16,6 +16,10 @@ import { ASYNCAPI_PROFILE_FULL, type AsyncAPIExecutionProfile } from "./profile.
 import { resolveTarget } from "./target.js";
 import { errorMessage, parseAsyncAPIDocument, parseRef } from "./util.js";
 import { WSPool } from "./ws-pool.js";
+import {
+  indexProtocolDrivers,
+  type AsyncAPIProtocolDriver,
+} from "./driver.js";
 
 export interface AsyncAPIEngineSource {
   location?: string;
@@ -48,6 +52,8 @@ export interface AsyncAPIEngineOptions {
   hooks?: AsyncAPIExecutionHooks;
   maxDeliveryUnitBytes?: number;
   profile?: AsyncAPIExecutionProfile;
+  /** Additional or replacement protocol drivers. */
+  drivers?: readonly AsyncAPIProtocolDriver[];
 }
 
 export interface AsyncAPIPrepareOptions {
@@ -122,6 +128,7 @@ export class AsyncAPIExecutionError extends Error {
 interface PreparedArguments extends AsyncAPIPrepareOptions {
   profile: AsyncAPIExecutionProfile;
   defaultHooks?: AsyncAPIExecutionHooks;
+  protocolDrivers: ReadonlyMap<string, AsyncAPIProtocolDriver>;
 }
 
 export class PreparedAsyncAPIOperation {
@@ -177,6 +184,7 @@ export class PreparedAsyncAPIOperation {
           acceptsInput: this.args.acceptsInput,
           maxDeliveryUnitBytes: this.args.maxDeliveryUnitBytes,
           observeOutput: (_value, valueMetadata) => metadata.push(cloneMetadata(valueMetadata)),
+          protocolDrivers: this.args.protocolDrivers,
         },
         invocation,
         this.document,
@@ -192,9 +200,11 @@ export class AsyncAPIEngine {
   private readonly cache = new Map<string, AsyncAPIDocument>();
   private readonly pool = new WSPool();
   private readonly options: AsyncAPIEngineOptions;
+  private readonly drivers: ReadonlyMap<string, AsyncAPIProtocolDriver>;
 
   constructor(options: AsyncAPIEngineOptions = {}) {
     this.options = options;
+    this.drivers = indexProtocolDrivers(options.drivers);
   }
 
   async prepare(options: AsyncAPIPrepareOptions): Promise<PreparedAsyncAPIOperation> {
@@ -249,6 +259,7 @@ export class AsyncAPIEngine {
       hooks: options.hooks,
       defaultHooks: this.options.hooks,
       maxDeliveryUnitBytes: options.maxDeliveryUnitBytes ?? this.options.maxDeliveryUnitBytes,
+      protocolDrivers: this.drivers,
     };
   }
 
@@ -404,7 +415,6 @@ function cloneMetadata(metadata: Record<string, string[]>): Record<string, strin
 }
 
 export {
-  ASYNCAPI_PROFILE_COMPAT,
   ASYNCAPI_PROFILE_FULL,
   type AsyncAPIExecutionProfile,
 } from "./profile.js";

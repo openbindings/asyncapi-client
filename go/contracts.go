@@ -12,8 +12,7 @@ const DefaultMaxDeliveryUnitBytes int64 = 10 << 20
 type Profile string
 
 const (
-	ProfileCompatibility Profile = "asyncapi-3.0-compatibility"
-	ProfileFull          Profile = "asyncapi-3.0-full"
+	ProfileFull Profile = "asyncapi-2.0-3.1"
 )
 
 func normalizedProfile(profile Profile) Profile {
@@ -22,8 +21,6 @@ func normalizedProfile(profile Profile) Profile {
 	}
 	return profile
 }
-
-func preservesSendReplies(profile string) bool { return Profile(profile) == ProfileFull }
 
 // Source identifies an AsyncAPI artifact without an OBI.
 type Source struct {
@@ -151,6 +148,7 @@ type executionArgs struct {
 	Site                 *invokeSite
 	MaxDeliveryUnitBytes int64
 	AcceptsInput         *bool
+	ProtocolDrivers      map[string]ProtocolDriver
 }
 
 func (a *executionArgs) DeliveryUnitLimit() int64 {

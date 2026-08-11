@@ -11,8 +11,8 @@ adapter lives in the language SDK repository and converts only at the outer
 edge: source and operation coordinates in, then values, failures, metadata,
 and lifecycle transitions out.
 
-Artifact profiles preserve immutable adapter revisions without placing binding
-specification identifiers in the standalone public API. New protocol support
+Artifact profiles version standalone execution behavior without placing
+OpenBindings binding-specification identifiers in the public API. New protocol support
 belongs below the engine when it is ordinary AsyncAPI behavior; OpenBindings-
 specific selection, context negotiation carriage, and error translation belong
 only in the adapter.

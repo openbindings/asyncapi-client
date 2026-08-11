@@ -1,11 +1,11 @@
 /**
- * The server and address configuration points of openbindings.asyncapi@2
+ * The server and address configuration points of openbindings.asyncapi@1
  * §9.2 (ASYNC-P-04): the effective server set and its deterministic
  * ordering, server-variable substitution, channel-address parameter
  * expansion, and the concatenation URL-assembly rule. Every unresolvable
  * input is a pre-dispatch refusal, never a guess — this specification does
  * not assume the channel key is an address, never dials literal braces,
- * and refuses out-of-revision protocols.
+ * while leaving protocol executability to the installed driver set.
  *
  * Consultation order per point is per-invocation configuration →
  * consumer-level configuration → the default; both configuration tiers
@@ -23,11 +23,12 @@ import type {
 import { CHANNEL_NAME_TAG, SERVER_NAME_TAG } from "./constants.js";
 
 /**
- * The protocols revision 1 of openbindings.asyncapi binds (§2). Everything
- * else is a definition-level exclusion, refused pre-dispatch (ASYNC-P-02).
+ * Syntactic protocol recognition is intentionally open. The engine resolves
+ * the artifact target first, then requires a matching protocol driver before
+ * any connection or dispatch.
  */
 export function isBoundProtocol(p: string): boolean {
-  return p === "http" || p === "https" || p === "ws" || p === "wss";
+  return p.trim() !== "";
 }
 
 /** A doc server paired with its `servers`-map key, so consumer
@@ -102,7 +103,7 @@ export function effectiveServers(
 }
 
 /**
- * Returns the sole effective-set member whose protocol revision 1 binds
+ * Returns the sole effective-set member selected by the current artifact profile
  * (§9.2). With zero or several bound members there is no artifact-selected
  * default; declaration order never chooses identity.
  */
@@ -341,7 +342,7 @@ function fullURLOverride(full: string, selected: NamedServer): ResolvedTarget {
   const scheme = u.protocol.replace(/:$/, "").toLowerCase();
   if (!isBoundProtocol(scheme)) {
     throw new Error(
-      `connection URL ${JSON.stringify(full)}: scheme ${JSON.stringify(scheme)} is not bound by the supported openbindings.asyncapi revisions (supported: http, https, ws, wss)`,
+      `connection URL ${JSON.stringify(full)} has no usable protocol scheme`,
     );
   }
   const selectedProtocol = selected.server.protocol.toLowerCase();
@@ -397,7 +398,7 @@ function assembleServer(
   const proto = srv.protocol.toLowerCase();
   if (!isBoundProtocol(proto)) {
     throw new Error(
-      `server ${JSON.stringify(member.name)}: protocol ${JSON.stringify(srv.protocol)} is not bound by the supported openbindings.asyncapi revisions (supported: http, https, ws, wss)`,
+      `server ${JSON.stringify(member.name)} declares an empty protocol`,
     );
   }
 

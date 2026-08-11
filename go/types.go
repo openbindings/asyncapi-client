@@ -3,6 +3,7 @@ package asyncapiclient
 // document represents an AsyncAPI 3.0 document.
 // Only the fields needed for OpenBindings conversion are modeled.
 type document struct {
+	raw                []byte
 	AsyncAPI           string                    `json:"asyncapi" yaml:"asyncapi"`
 	DefaultContentType string                    `json:"defaultContentType,omitempty" yaml:"defaultContentType,omitempty"`
 	Info               info                      `json:"info" yaml:"info"`
@@ -19,13 +20,14 @@ type info struct {
 }
 
 type server struct {
-	Host        string                    `json:"host" yaml:"host"`
-	Protocol    string                    `json:"protocol" yaml:"protocol"`
-	PathName    string                    `json:"pathname,omitempty" yaml:"pathname,omitempty"`
-	Description string                    `json:"description,omitempty" yaml:"description,omitempty"`
-	Variables   map[string]serverVariable `json:"variables,omitempty" yaml:"variables,omitempty"`
-	Tags        []tag                     `json:"tags,omitempty" yaml:"tags,omitempty"`
-	Security    []securityRequirement     `json:"security,omitempty" yaml:"security,omitempty"`
+	Host                  string                    `json:"host" yaml:"host"`
+	Protocol              string                    `json:"protocol" yaml:"protocol"`
+	PathName              string                    `json:"pathname,omitempty" yaml:"pathname,omitempty"`
+	Description           string                    `json:"description,omitempty" yaml:"description,omitempty"`
+	Variables             map[string]serverVariable `json:"variables,omitempty" yaml:"variables,omitempty"`
+	Tags                  []tag                     `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Security              []securityRequirement     `json:"security,omitempty" yaml:"security,omitempty"`
+	V2SecurityConjunction any                       `json:"x-ob-asyncapi-v2-security-conjunction,omitempty" yaml:"x-ob-asyncapi-v2-security-conjunction,omitempty"`
 }
 
 // serverVariable is an AsyncAPI Server Variable Object: a declared `{name}`
@@ -52,7 +54,7 @@ type channel struct {
 // channelBindings models the protocol entries of a channel's `bindings`
 // object this specification incorporates (§8: bindings are authoritative
 // where they speak). Only the websockets binding speaks at channel level in
-// revision 1.
+// current artifact profile.
 type channelBindings struct {
 	WS *wsChannelBinding `json:"ws,omitempty" yaml:"ws,omitempty"`
 }
@@ -82,27 +84,28 @@ type asyncOperation struct {
 	// channel, `receive` = it expects to receive from it. An invocation is
 	// the counterparty (ASYNC-P-02): invoking `send` subscribes, invoking
 	// `receive` publishes.
-	Action          string                `json:"action" yaml:"action"`
-	Channel         channelRef            `json:"channel" yaml:"channel"`
-	Summary         string                `json:"summary,omitempty" yaml:"summary,omitempty"`
-	Description     string                `json:"description,omitempty" yaml:"description,omitempty"`
-	Messages        []messageRef          `json:"messages,omitempty" yaml:"messages,omitempty"`
-	Tags            []tag                 `json:"tags,omitempty" yaml:"tags,omitempty"`
-	Reply           *operationReply       `json:"reply,omitempty" yaml:"reply,omitempty"`
-	Bindings        *operationBindings    `json:"bindings,omitempty" yaml:"bindings,omitempty"`
-	Security        []securityRequirement `json:"security,omitempty" yaml:"security,omitempty"`
-	UnresolvedTrait string                `json:"x-ob-asyncapi-unresolved-trait,omitempty" yaml:"x-ob-asyncapi-unresolved-trait,omitempty"`
+	Action                string                `json:"action" yaml:"action"`
+	Channel               channelRef            `json:"channel" yaml:"channel"`
+	Summary               string                `json:"summary,omitempty" yaml:"summary,omitempty"`
+	Description           string                `json:"description,omitempty" yaml:"description,omitempty"`
+	Messages              []messageRef          `json:"messages,omitempty" yaml:"messages,omitempty"`
+	Tags                  []tag                 `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Reply                 *operationReply       `json:"reply,omitempty" yaml:"reply,omitempty"`
+	Bindings              *operationBindings    `json:"bindings,omitempty" yaml:"bindings,omitempty"`
+	Security              []securityRequirement `json:"security,omitempty" yaml:"security,omitempty"`
+	UnresolvedTrait       string                `json:"x-ob-asyncapi-unresolved-trait,omitempty" yaml:"x-ob-asyncapi-unresolved-trait,omitempty"`
+	V2SecurityConjunction any                   `json:"x-ob-asyncapi-v2-security-conjunction,omitempty" yaml:"x-ob-asyncapi-v2-security-conjunction,omitempty"`
 }
 
 // operationBindings models the protocol entries of an operation's `bindings`
 // object this specification incorporates. Only the http binding speaks at
-// operation level in revision 1.
+// operation level in the current artifact profile.
 type operationBindings struct {
 	HTTP *httpOperationBinding `json:"http,omitempty" yaml:"http,omitempty"`
 }
 
 // httpOperationBinding is the AsyncAPI HTTP operation binding: its `method`
-// selects the request method for the supported unary publish cell. Revision 1
+// selects the request method for the built-in unary publish cell. The driver
 // does not infer a method and excludes standalone HTTP subscriptions.
 type httpOperationBinding struct {
 	Method         string         `json:"method,omitempty" yaml:"method,omitempty"`
@@ -121,6 +124,7 @@ type message struct {
 	Summary         string           `json:"summary,omitempty" yaml:"summary,omitempty"`
 	Description     string           `json:"description,omitempty" yaml:"description,omitempty"`
 	ContentType     string           `json:"contentType,omitempty" yaml:"contentType,omitempty"`
+	SchemaFormat    string           `json:"schemaFormat,omitempty" yaml:"schemaFormat,omitempty"`
 	Payload         map[string]any   `json:"payload,omitempty" yaml:"payload,omitempty"`
 	Headers         map[string]any   `json:"headers,omitempty" yaml:"headers,omitempty"`
 	Bindings        *messageBindings `json:"bindings,omitempty" yaml:"bindings,omitempty"`
