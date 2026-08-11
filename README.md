@@ -2,7 +2,7 @@
 
 A document-driven AsyncAPI 2.x/3.x client for invoking brownfield event APIs directly from their AsyncAPI documents.
 
-The client does not generate source code and does not require an OpenBindings Interface (OBI). Load a document, select an authored operation, then publish or subscribe. The artifact remains authoritative for server and address resolution, protocol bindings, message selection, content type, security placement, replies, and lifecycle behavior.
+The client does not generate source code and does not require an OpenBindings Interface (OBI). Load a document, select an authored operation, then publish or subscribe. This client's contract deliberately follows the artifact and incorporated AsyncAPI/protocol-binding rules for server and address resolution, protocol bindings, message selection, content type, security placement, replies, and lifecycle behavior.
 
 This repository is also the execution substrate used by the OpenBindings AsyncAPI adapter. Its public API is intentionally AsyncAPI-native; protocol abstraction belongs in the adapter above it.
 

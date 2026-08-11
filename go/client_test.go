@@ -160,6 +160,31 @@ func TestClientResolvesExternalClosureAndRetainsRecursiveSchemas(t *testing.T) {
 	}
 }
 
+func TestClientRetainsDraft07PlainNameIDsAndDanglingSchemaFragments(t *testing.T) {
+	root := []byte(`{
+  "asyncapi":"3.0.0","info":{"title":"External schema","version":"1"},
+  "servers":{"api":{"host":"api.example.test","protocol":"https"}},
+  "channels":{"commands":{"$ref":"./channel.json#/channels/commands"}},
+  "operations":{"submit":{"action":"receive","channel":{"$ref":"#/channels/commands"},"bindings":{"http":{"method":"POST"}}}}
+}`)
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "https://artifact.example.test/channel.json" {
+			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: request}, nil
+		}
+		body := `{"channels":{"commands":{"address":"/commands","messages":{"Command":{"contentType":"application/json","payload":{"$schema":"http://json-schema.org/draft-07/schema#","$id":"#Command","type":"object","properties":{"optional":{"$ref":"#/missing"}}}}}}}}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}, Request: request}, nil
+	})}
+	client, err := Load(context.Background(), Source{Location: "https://artifact.example.test/root.json", Content: root}, LoadOptions{HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	operations := client.Operations()
+	if len(operations) != 1 || operations[0].ID != "submit" {
+		t.Fatalf("operations = %#v", operations)
+	}
+}
+
 func TestClientRefusesOutOfProfileProtocolBindingVersion(t *testing.T) {
 	doc := strings.Replace(string(httpArtifact()), `"method":"PUT"`, `"method":"PUT","bindingVersion":"0.4.0"`, 1)
 	requests := 0
