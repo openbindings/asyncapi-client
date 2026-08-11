@@ -1,0 +1,54 @@
+{
+  "name": "@openbindings/asyncapi-client",
+  "version": "0.1.0",
+  "description": "Document-driven AsyncAPI client and protocol-driver runtime",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+    },
+    "./engine": {
+      "import": { "types": "./dist/engine.d.ts", "default": "./dist/engine.js" },
+      "require": { "types": "./dist/engine.d.cts", "default": "./dist/engine.cjs" }
+    },
+    "./analysis": {
+      "import": { "types": "./dist/analysis.d.ts", "default": "./dist/analysis.js" },
+      "require": { "types": "./dist/analysis.d.cts", "default": "./dist/analysis.cjs" }
+    },
+    "./testing": {
+      "import": { "types": "./dist/testing.d.ts", "default": "./dist/testing.js" },
+      "require": { "types": "./dist/testing.d.cts", "default": "./dist/testing.cjs" }
+    }
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsup",
+    "prepack": "tsup",
+    "test": "vitest run",
+    "lint": "tsc --noEmit && tsc -p tsconfig.test.json"
+  },
+  "keywords": ["asyncapi", "client", "runtime", "brownfield", "websocket", "events"],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openbindings/asyncapi-client.git",
+    "directory": "typescript"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": { "js-yaml": "^4.2.0" },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.3",
+    "ws": "^8.21.0"
+  }
+}
