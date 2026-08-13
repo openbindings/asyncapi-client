@@ -44,8 +44,8 @@ type Prerequisites struct {
 	Alternatives []RequirementAlternative
 }
 
-func newConfigValueRequirement(point, key, description string, choices []string, durable *bool) Requirement {
-	extra := map[string]any{"point": point, "key": key}
+func newConfigValueRequirement(point, path, description string, choices []string, durable *bool) Requirement {
+	extra := map[string]any{"point": point, "path": path}
 	if len(choices) > 0 {
 		extra["choices"] = append([]string(nil), choices...)
 	}
@@ -53,7 +53,7 @@ func newConfigValueRequirement(point, key, description string, choices []string,
 }
 
 func newContextRequiredError(message string, details *Prerequisites) *ExecutionError {
-	return &ExecutionError{Code: ErrCodeContextRequired, Message: message, Details: details}
+	return &ExecutionError{Code: ErrCodeContextRequired, Message: message, Details: details, DetailsPresent: true}
 }
 
 type Metadata map[string][]string

@@ -32,7 +32,7 @@ func TestResolveProfileRefusesAmbiguousOrMQTT5Cells(t *testing.T) {
 		{
 			name: "MQTT 5 message field",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Messages[0]["bindings"] = map[string]any{"mqtt": map[string]any{"bindingVersion": "0.2.0", "responseTopic": "responses"}}
+				request.Input.Messages[0]["bindings"] = map[string]any{"mqtt": map[string]any{"bindingVersion": "0.2.0", "responseTopic": "responses"}}
 			},
 			want: "MQTT 5 message-binding fields",
 		},
@@ -52,7 +52,7 @@ func TestResolveProfileRefusesAmbiguousOrMQTT5Cells(t *testing.T) {
 		},
 		{
 			name:   "publish topic wildcard",
-			mutate: func(request *asyncapiclient.DriverRequest) { request.Address = "events/#" },
+			mutate: func(request *asyncapiclient.DriverRequest) { request.Input.Address = "events/#" },
 			want:   "publish topic names cannot contain wildcard",
 		},
 		{
@@ -142,7 +142,7 @@ func TestValidateTopicNamesAndFilters(t *testing.T) {
 
 func profileRequest() asyncapiclient.DriverRequest {
 	return asyncapiclient.DriverRequest{
-		Action: "receive", Address: "events/acme",
+		Action: "receive",
 		Server: map[string]any{
 			"protocolVersion": "3.1.1",
 			"bindings": map[string]any{"mqtt": map[string]any{
@@ -152,7 +152,8 @@ func profileRequest() asyncapiclient.DriverRequest {
 		Operation: map[string]any{"bindings": map[string]any{"mqtt": map[string]any{
 			"bindingVersion": "0.2.0", "qos": float64(2), "retain": true,
 		}}},
-		Channel:  map[string]any{},
-		Messages: []map[string]any{{}},
+		Input: &asyncapiclient.DriverInput{DriverDirection: asyncapiclient.DriverDirection{
+			Address: "events/acme", Channel: map[string]any{}, Messages: []map[string]any{{}},
+		}},
 	}
 }

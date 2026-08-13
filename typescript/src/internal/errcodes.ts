@@ -218,8 +218,9 @@ export type InvocationErrorCode =
 /**
  * Returns the SDK's open code for concrete HTTP unsuccessful completion. The
  * binding-invoker interface deliberately does not project status numbers into
- * a closed cross-protocol failure or retry taxonomy. The status may be retained
- * separately on an explicit diagnostic surface.
+ * a closed cross-protocol failure or retry taxonomy. This standalone runtime
+ * may retain the status as native execution evidence; an abstract adapter must
+ * not project it merely because it was observed.
  */
 export function httpErrorCode(_status: number): string {
   return ERR_EXECUTION_FAILED;

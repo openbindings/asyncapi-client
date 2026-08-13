@@ -16,13 +16,26 @@ SCRAM-SHA-256 and repeats the security path through abstract username/password
 context. Cells marked `unqualified` are not release claims even when
 implementation code is present.
 
+The built-in WebSocket gate opens real loopback servers in both languages and
+executes both AsyncAPI reply perspectives. It also proves that concurrent
+request/reply calls are connection-isolated when the artifact supplies no
+correlation routing. The admitted and refused cells are frozen in
+`conformance/websocket-reply.json`; static two-endpoint sessions on one server
+are included, while cross-protocol/server and runtime-expression reply routes
+remain explicit exclusions.
+
 SDK adapter suites are a separate required integration gate until repositories
 can consume published `0.1.x` packages. CI uses explicit local workspace
 replacements only for the unreleased development dependency.
 
 Release qualification does not imply complete AsyncAPI ecosystem coverage. The
-corpus and holdout report in the OpenBindings conformance repository remains the
-evidence for which protocol cells are admitted, excluded, or still unobserved.
+distilled corpus and holdout qualification report published with the
+OpenBindings specification
+(`spec/conformance/abstraction-fidelity/ASYNCAPI-FIDELITY.md`) remains the
+evidence for which protocol cells are admitted, excluded, or still unobserved;
+the underlying 250-artifact corpus is an internal, non-redistributed
+qualification asset whose sealed 63-repository holdout is committed by
+SHA-256 `ad9a78e13914a343f1e7dc37a7de22b749e0fbbbceba1995b17a83c59663a3da`.
 Its authority-matrix evidence gate assigns every surveyed cell exactly once and
 distinguishes executable support from deterministic exclusion; “fully
 accounted for” must never be reported as “fully supported.”

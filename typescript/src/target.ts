@@ -22,6 +22,10 @@ import type {
 } from "./asyncapi-types.js";
 import { CHANNEL_NAME_TAG, SERVER_NAME_TAG } from "./constants.js";
 
+function escapeJSONPointerToken(value: string): string {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
 /**
  * Syntactic protocol recognition is intentionally open. The engine resolves
  * the artifact target first, then requires a matching protocol driver before
@@ -130,7 +134,7 @@ function boundServerNames(candidates: NamedServer[]): string[] {
 export class ConfigRequired extends Error {
   constructor(
     readonly point: string,
-    readonly key: string,
+    readonly path: string,
     message: string,
     readonly choices?: string[],
     readonly durable?: boolean,
@@ -183,7 +187,7 @@ export function resolveTarget(
       }
       throw new ConfigRequired(
         "server",
-        "key",
+        "/key",
         "configuration.server.key must select one artifact server before metadata.baseURL can replace its target",
         names,
         true,
@@ -199,7 +203,7 @@ export function resolveTarget(
     }
     throw new ConfigRequired(
       "server",
-      "key",
+      "/key",
       "the effective server set declares several bindable servers; configuration.server.key must select one artifact member",
       names,
       true,
@@ -282,7 +286,7 @@ function resolveServerConfig(
     }
     throw new ConfigRequired(
       "server",
-      "key",
+      "/key",
       "configuration.server.key must select one artifact server before variables or a URL replacement can be applied",
       names,
       true,
@@ -441,7 +445,7 @@ function substituteServerVariables(
       if (val === undefined || val === "") {
         throw new ConfigRequired(
           "server",
-          name,
+          `/variables/${escapeJSONPointerToken(name)}`,
           `server ${JSON.stringify(member.name)}: variable ${JSON.stringify(name)} has no supplied value and no declared default (supply one at the server configuration point's "variables" member)`,
           declared?.enum,
         );
@@ -554,7 +558,7 @@ export function resolveAddress(
     // resolvable by consumer supply, and per-invocation (not persisted).
     throw new ConfigRequired(
       "address",
-      "address",
+      "",
       `channel ${JSON.stringify(channelName)} declares no address and none was supplied at the address configuration point (AsyncAPI's runtime-generated address); supply one`,
       undefined,
       false,
@@ -597,7 +601,7 @@ function expandAddress(
       } else {
         throw new ConfigRequired(
           "address",
-          name,
+          `/parameters/${escapeJSONPointerToken(name)}`,
           `channel ${JSON.stringify(channelName)}: address parameter ${JSON.stringify(name)} has no supplied value and no declared default`,
           declared?.enum,
         );

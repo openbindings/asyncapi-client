@@ -32,10 +32,10 @@ import {
   contextRequiredError,
   configValueRequirement,
   contextSatisfies,
-  contextBearerToken,
+  contextBearerTokenFor,
   contextApiKeyFor,
-  contextBasicAuth,
-  contextString,
+  contextBasicAuthFor,
+  contextAccessTokenFor,
   contextHeaders,
   contextCookies,
   contextConfiguration,
@@ -89,6 +89,7 @@ import {
   isWellFormedUnicode,
   normalizeMediaType,
   resolveReplyContentType,
+  replyGoverningMessages,
   validateMessageBindingVersion,
   resolveInputCodec,
   selectedInputMessages,
@@ -124,7 +125,7 @@ function configOrSourceError(e: unknown, serverURL: string): InvocationError {
       alternatives: [
         {
           requirements: [
-            configValueRequirement(e.point, e.key, e.message, e.choices, e.durable),
+            configValueRequirement(e.point, e.path, e.message, e.choices, e.durable),
           ],
         },
       ],
@@ -145,6 +146,7 @@ import type {
  * never an emitted output value, so the consumer bound does not apply.
  */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+let nextWebSocketReplySession = 0;
 
 type Handle = BindingHandle<unknown, unknown>;
 
@@ -249,6 +251,19 @@ export async function runBinding(
     }
   }
 
+  // Reply routing is artifact/configuration authority, not application input.
+  // Resolve it before any address expression can request a caller value so an
+  // unsupported route is a side-effect-free pre-dispatch refusal.
+  let preparedWSReplyLane: WebSocketReplyLane | undefined;
+  if (!externalDriver && (target.protocol === "ws" || target.protocol === "wss") && asyncOp.reply) {
+    try {
+      preparedWSReplyLane = resolveWebSocketReplyLane(doc, asyncOp, target, args.context);
+    } catch (e: unknown) {
+      h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+      return;
+    }
+  }
+
   // The address configuration point (ASYNC-P-04): the declared address with
   // every {name} expression expanded — an absent address or an unresolved
   // expression is a pre-dispatch refusal, never a guess.
@@ -319,6 +334,50 @@ export async function runBinding(
         return;
       }
       const dialAddress = mergeQuery(address, up.query);
+      if (asyncOp.reply) {
+        const replyLane = preparedWSReplyLane;
+        let inputMessages: AsyncAPIMessage[];
+        let outputMessages: AsyncAPIMessage[];
+        try {
+          if (!replyLane) throw new Error("WebSocket reply route was not prepared");
+          const replyChannel = resolvedChannel(asyncOp.reply.channel);
+          inputMessages = asyncOp.action === "receive"
+            ? selectedInputMessages(asyncOp, ch, args.context)
+            : selectedInputMessages(
+                { action: "receive", messages: asyncOp.reply.messages },
+                replyChannel,
+                args.context,
+              );
+          outputMessages = asyncOp.action === "receive"
+            ? replyGoverningMessages(asyncOp)
+            : governingMessages(asyncOp, ch);
+        } catch (e: unknown) {
+          h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+          return;
+        }
+        const operationLane: WebSocketReplyLane = { target, dialAddress, headers: up.headers };
+        const inputLane = asyncOp.action === "receive" ? operationLane : replyLane;
+        const outputLane = asyncOp.action === "receive" ? replyLane : operationLane;
+        await runWSSubscribe(
+          wsPool,
+          outputLane.target,
+          outputLane.dialAddress,
+          outputLane.headers,
+          doc,
+          ch,
+          asyncOp,
+          args,
+          h,
+          {
+            inputMessages,
+            outputMessages,
+            requireInput: asyncOp.action === "receive",
+            isolationKey: `reply-${++nextWebSocketReplySession}`,
+            inputLane,
+          },
+        );
+        return;
+      }
       if (asyncOp.action === "receive") {
         await runWSPublish(wsPool, target, dialAddress, up.headers, doc, ch, asyncOp, args, h);
       } else {
@@ -345,6 +404,48 @@ export async function runBinding(
   }
 }
 
+interface WebSocketReplyLane {
+  target: ResolvedTarget;
+  dialAddress: string;
+  headers?: Record<string, string>;
+}
+
+function resolveWebSocketReplyLane(
+  doc: AsyncAPIDocument,
+  operation: AsyncAPIOperation,
+  operationTarget: ResolvedTarget,
+  context?: Record<string, unknown>,
+): WebSocketReplyLane {
+  const reply = operation.reply;
+  if (!reply) throw new Error("operation has no reply");
+  if (reply.address?.location) {
+    const source = reply.address.location.startsWith("$message.header#") ? "application header" : "runtime expression";
+    throw new Error(`WebSocket reply address uses an ${source} that the current payload-only session profile cannot resolve`);
+  }
+  const replyChannel = resolvedChannel(reply.channel);
+  if (!replyChannel) throw new Error("WebSocket reply has no resolved reply channel");
+  const bindingVersion = replyChannel.bindings?.ws?.bindingVersion;
+  if (bindingVersion !== undefined && bindingVersion !== "0.1.0") {
+    throw new Error(`reply WebSockets binding version ${JSON.stringify(bindingVersion)} is outside the built-in WebSocket driver's 0.1.0 envelope`);
+  }
+  const replyTarget = resolveTarget(doc, replyChannel, context);
+  if ((replyTarget.protocol !== "ws" && replyTarget.protocol !== "wss")
+    || replyTarget.protocol !== operationTarget.protocol
+    || replyTarget.serverURL !== operationTarget.serverURL) {
+    throw new Error("WebSocket reply channel selects a different protocol or server; cross-target reply sessions are not qualified");
+  }
+  const replyAddress = resolveAddress(replyChannel, channelNameOf(replyChannel), { address: "" });
+  const fields = protocolFieldValues(context);
+  const replyUpgrade = resolveWSUpgrade(
+    replyChannel,
+    channelNameOf(replyChannel),
+    fields.webSocketQuery,
+    fields.webSocketHeaders,
+  );
+  const replyDialAddress = mergeQuery(replyAddress, replyUpgrade.query);
+  return { target: replyTarget, dialAddress: replyDialAddress, headers: replyUpgrade.headers };
+}
+
 async function runExternalDriver(
   driver: AsyncAPIProtocolDriver,
   args: BindingInvocationArgs,
@@ -357,29 +458,94 @@ async function runExternalDriver(
   address: string,
   preparedInput: { ok: true; value: unknown } | undefined,
 ): Promise<void> {
-  let messages: AsyncAPIMessage[];
-  let encodeInputValue: ((value: unknown) => Uint8Array) | undefined;
-  let decodeOutputValue: ((payload: Uint8Array) => Promise<unknown>) | undefined;
+  let input: {
+    channel?: Readonly<Record<string, unknown>>;
+    server?: Readonly<Record<string, unknown>>;
+    protocol: string;
+    serverURL: string;
+    address?: string;
+    messages: readonly Readonly<Record<string, unknown>>[];
+    encode: (value: unknown) => Uint8Array;
+  } | undefined;
+  let output: {
+    channel?: Readonly<Record<string, unknown>>;
+    server?: Readonly<Record<string, unknown>>;
+    protocol: string;
+    serverURL: string;
+    address?: string;
+    messages: readonly Readonly<Record<string, unknown>>[];
+    decode: (payload: Uint8Array) => Promise<unknown>;
+  } | undefined;
   try {
-    if (operation.action === "receive") {
-      messages = selectedInputMessages(operation, channel, args.context);
-      const codec = resolveInputCodec(doc, messages, args.context);
-      encodeInputValue = (value) => new TextEncoder().encode(encodeInput(codec, value));
-    } else {
-      messages = governingMessages(operation, channel);
-      const contentType = decodeContentType(doc, messages, args.context);
+    const replyChannel = resolvedChannel(operation.reply?.channel);
+    const replyMessages = replyGoverningMessages(operation);
+    const replyTarget = replyChannel ? resolveTarget(doc, replyChannel, args.context) : undefined;
+    const replyAddress = replyChannel && !operation.reply?.address?.location
+      ? channelNameOf(replyChannel) === channelNameOf(channel)
+        ? address
+        : resolveAddress(replyChannel, channelNameOf(replyChannel), { address: "" })
+      : undefined;
+    const inputChannel = operation.action === "receive" ? channel : replyChannel;
+    const inputTarget = operation.action === "receive" ? target : replyTarget;
+    const inputAddress = operation.action === "receive" ? address : replyAddress;
+    const inputMessages = operation.action === "receive"
+      ? selectedInputMessages(operation, channel, args.context)
+      : operation.reply
+        ? selectedInputMessages(
+            { action: "receive", messages: operation.reply.messages },
+            replyChannel,
+            args.context,
+          )
+        : [];
+    if (inputMessages.length > 0) {
+      const codec = resolveInputCodec(doc, inputMessages, args.context);
+      input = {
+        ...(inputChannel
+          ? { channel: inputChannel as unknown as Readonly<Record<string, unknown>> }
+          : {}),
+        ...(inputTarget?.securityServer
+          ? { server: inputTarget.securityServer as unknown as Readonly<Record<string, unknown>> }
+          : {}),
+        protocol: inputTarget?.protocol ?? target.protocol,
+        serverURL: inputTarget?.serverURL ?? target.serverURL,
+        ...(inputAddress !== undefined ? { address: inputAddress } : {}),
+        messages: inputMessages as unknown as readonly Readonly<Record<string, unknown>>[],
+        encode: (value) => new TextEncoder().encode(encodeInput(codec, value)),
+      };
+    }
+
+    const outputChannel = operation.action === "send" ? channel : replyChannel;
+    const outputTarget = operation.action === "send" ? target : replyTarget;
+    const outputAddress = operation.action === "send" ? address : replyAddress;
+    const outputMessages = operation.action === "send"
+      ? governingMessages(operation, channel)
+      : replyMessages;
+    if (outputMessages.length > 0) {
+      const contentType = decodeContentType(doc, outputMessages, args.context);
       const limit = resolveDeliveryUnitLimit(args);
-      decodeOutputValue = async (payload) => {
-        if (payload.byteLength > limit) {
-          throw new Error(`delivery unit exceeds configured ${limit}-byte limit`);
-        }
-        const body = new TextDecoder("utf-8", { fatal: true }).decode(payload);
-        return decodeThroughHooks(
-          args.hooks,
-          siteFor(args, target.serverURL),
-          { status: null, body, meta: {} },
-          builtinDecodeFor(contentType),
-        );
+      output = {
+        ...(outputChannel
+          ? { channel: outputChannel as unknown as Readonly<Record<string, unknown>> }
+          : {}),
+        ...(outputTarget?.securityServer
+          ? { server: outputTarget.securityServer as unknown as Readonly<Record<string, unknown>> }
+          : {}),
+        protocol: outputTarget?.protocol ?? target.protocol,
+        serverURL: outputTarget?.serverURL ?? target.serverURL,
+        ...(outputAddress !== undefined ? { address: outputAddress } : {}),
+        messages: outputMessages as unknown as readonly Readonly<Record<string, unknown>>[],
+        decode: async (payload) => {
+          if (payload.byteLength > limit) {
+            throw new Error(`delivery unit exceeds configured ${limit}-byte limit`);
+          }
+          const body = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+          return decodeThroughHooks(
+            args.hooks,
+            siteFor(args, target.serverURL),
+            { status: null, body, meta: {} },
+            builtinDecodeFor(contentType),
+          );
+        },
       };
     }
   } catch (error: unknown) {
@@ -406,14 +572,11 @@ async function runExternalDriver(
       {
         document: doc as unknown as Readonly<Record<string, unknown>>,
         operation: operation as unknown as Readonly<Record<string, unknown>>,
-        ...(channel
-          ? { channel: channel as unknown as Readonly<Record<string, unknown>> }
-          : {}),
         ...(target.securityServer
           ? { server: target.securityServer as unknown as Readonly<Record<string, unknown>> }
           : {}),
-        address,
-        messages: messages as unknown as readonly Readonly<Record<string, unknown>>[],
+        ...(input ? { input } : {}),
+        ...(output ? { output } : {}),
         securityAlternatives: driverSecurityAlternatives(operation, target.securityServer),
         ref: args.ref,
         operationKey,
@@ -422,8 +585,6 @@ async function runExternalDriver(
         serverURL: target.serverURL,
         context: args.context,
         signal: h.signal,
-        ...(encodeInputValue ? { encodeInput: encodeInputValue } : {}),
-        ...(decodeOutputValue ? { decodeOutput: decodeOutputValue } : {}),
       },
       session,
     );
@@ -487,7 +648,6 @@ function validateCell(
   }
 
   if (op.action === "receive") {
-    if (op.reply) throw new Error("reply-bearing WebSocket receive operations require request/reply session semantics the built-in WebSocket driver does not implement");
     const selected = selectedInputMessages(op, ch, context);
     validateMessageBindingVersion(selected[0]!);
     resolveInputCodec(doc, selected, context);
@@ -495,15 +655,25 @@ function validateCell(
     if (messageType !== "text" && messageType !== "binary") {
       throw new Error("configuration.websocketMessageType must select text or binary for a WebSocket publish");
     }
+    if (op.reply) decodeContentType(doc, replyGoverningMessages(op), context);
   } else {
-    if (op.reply) {
-      throw new Error(
-        "reply-bearing WebSocket send operations require request/reply session semantics the built-in WebSocket driver does not implement",
-      );
-    }
     // This validates non-empty output declarations, message-header
     // exclusions, declaration identity, and the decode point when absent.
     decodeContentType(doc, governingMessages(op, ch), context);
+    if (op.reply) {
+      const replyChannel = resolvedChannel(op.reply.channel);
+      const selected = selectedInputMessages(
+        { action: "receive", messages: op.reply.messages },
+        replyChannel,
+        context,
+      );
+      validateMessageBindingVersion(selected[0]!);
+      resolveInputCodec(doc, selected, context);
+      const messageType = contextConfiguration(context)["websocketMessageType"];
+      if (messageType !== "text" && messageType !== "binary") {
+        throw new Error("configuration.websocketMessageType must select text or binary for a WebSocket reply input");
+      }
+    }
   }
 }
 
@@ -537,10 +707,12 @@ function validateCredentialDestinations(
       credential = contextApiKeyFor(context, name);
       if (credential && scheme.name && scheme.in) destination = `${scheme.in}:${scheme.in === "header" ? scheme.name.toLowerCase() : scheme.name}`;
     } else if (scheme.type === "http" && ["basic", "bearer"].includes((scheme.scheme ?? "").toLowerCase())) {
-      credential = (scheme.scheme ?? "").toLowerCase() === "basic" ? (contextBasicAuth(context) ? "present" : undefined) : contextBearerToken(context);
+      credential = (scheme.scheme ?? "").toLowerCase() === "basic"
+        ? (contextBasicAuthFor(context, name) ? "present" : undefined)
+        : contextBearerTokenFor(context, name);
       if (credential) destination = "header:authorization";
     } else if (scheme.type === "oauth2" || scheme.type === "openIdConnect" || scheme.type === "httpBearer") {
-      credential = contextBearerToken(context) || contextString(context, "accessToken");
+      credential = contextAccessTokenFor(context, name) || contextBearerTokenFor(context, name);
       if (credential) destination = "header:authorization";
     }
     if (!destination) continue;
@@ -739,6 +911,7 @@ function schemeRequirement(
 ): ContextRequirement {
   const req = mapScheme(scheme, baseURL);
   if (name) req.name = name;
+  req.durable = true;
   if (scheme.description) req.description = scheme.description;
   return req;
 }
@@ -848,7 +1021,7 @@ function applyCredentialsViaSchemes(
       case "http":
         switch ((scheme.scheme ?? "").toLowerCase()) {
           case "bearer": {
-            const token = contextBearerToken(ctx);
+            const token = contextBearerTokenFor(ctx, schemeName);
             if (token) {
               headers.set("Authorization", `Bearer ${token}`);
               applied = true;
@@ -856,7 +1029,7 @@ function applyCredentialsViaSchemes(
             break;
           }
           case "basic": {
-            const basic = contextBasicAuth(ctx);
+            const basic = contextBasicAuthFor(ctx, schemeName);
             if (basic) {
               const encoded = btoa(`${basic.username}:${basic.password}`);
               headers.set("Authorization", `Basic ${encoded}`);
@@ -867,7 +1040,7 @@ function applyCredentialsViaSchemes(
         }
         break;
       case "httpBearer": {
-        const token = contextBearerToken(ctx);
+        const token = contextBearerTokenFor(ctx, schemeName);
         if (token) {
           headers.set("Authorization", `Bearer ${token}`);
           applied = true;
@@ -875,7 +1048,7 @@ function applyCredentialsViaSchemes(
         break;
       }
       case "oauth2": {
-        const token = contextBearerToken(ctx) || contextString(ctx, "accessToken");
+        const token = contextAccessTokenFor(ctx, schemeName) || contextBearerTokenFor(ctx, schemeName);
         if (token) {
           headers.set("Authorization", `Bearer ${token}`);
           applied = true;
@@ -883,7 +1056,7 @@ function applyCredentialsViaSchemes(
         break;
       }
       case "userPassword": {
-        const basic = contextBasicAuth(ctx);
+        const basic = contextBasicAuthFor(ctx, schemeName);
         if (basic) {
           const encoded = btoa(`${basic.username}:${basic.password}`);
           headers.set("Authorization", `Basic ${encoded}`);
@@ -1333,20 +1506,35 @@ async function runWSSubscribe(
   asyncOp: AsyncAPIOperation,
   args: BindingInvocationArgs,
   h: Handle,
+  exchange?: {
+    inputMessages: AsyncAPIMessage[];
+    outputMessages: AsyncAPIMessage[];
+    requireInput: boolean;
+    isolationKey: string;
+    inputLane: WebSocketReplyLane;
+  },
 ): Promise<void> {
   // This cell is server-streaming, not bidirectional: the selected send
   // operation defines only what the described application emits.
-  await h.closeInput();
+  if (!exchange) await h.closeInput();
   // Outputs decode by the operation's own message declarations
   // (direction-correct decode, ASYNC-P-05); forwarded input frames use the
   // same governing declaration (§9.1). An excluded declared family refuses
   // only when an input frame actually arrives — a duplex subscription's
   // inputs are optional, and the exclusion belongs to the input lane.
-  const wsContentType = decodeContentType(doc, governingMessages(asyncOp, ch), args.context);
+  const wsContentType = decodeContentType(
+    doc,
+    exchange?.outputMessages ?? governingMessages(asyncOp, ch),
+    args.context,
+  );
   let codec: InputCodec | undefined;
   let codecErr: unknown;
   try {
-    codec = resolveInputCodec(doc, selectedInputMessages(asyncOp, ch, args.context), args.context);
+    codec = resolveInputCodec(
+      doc,
+      exchange?.inputMessages ?? selectedInputMessages(asyncOp, ch, args.context),
+      args.context,
+    );
   } catch (e: unknown) {
     codecErr = e;
   }
@@ -1359,11 +1547,46 @@ async function runWSSubscribe(
       credentialKey: material.fingerprint,
       headers: material.headers,
       signal: h.signal,
+      ...(exchange ? { isolationKey: exchange.isolationKey, captureInitialMessages: true } : {}),
     });
   } catch (e: unknown) {
     if (h.signal.aborted) return;
     h.fireError(new InvocationError(ERR_CONNECT_FAILED, errorMessage(e)));
     return;
+  }
+
+  let inputPooled = pooled;
+  let removeInputClose: () => void = () => undefined;
+  if (exchange && (exchange.inputLane.target.serverURL !== target.serverURL
+    || exchange.inputLane.dialAddress !== dialAddress
+    || JSON.stringify(sortedStringRecord(exchange.inputLane.headers)) !== JSON.stringify(sortedStringRecord(wsHeaders)))) {
+    const inputMaterial = wsUpgradeMaterial(
+      exchange.inputLane.target,
+      exchange.inputLane.dialAddress,
+      asyncOp,
+      exchange.inputLane.headers,
+      args.context,
+    );
+    try {
+      inputPooled = await pool.acquire(
+        exchange.inputLane.target.serverURL,
+        exchange.inputLane.dialAddress,
+        {
+          buildURL: () => inputMaterial.url,
+          credentialKey: inputMaterial.fingerprint,
+          headers: inputMaterial.headers,
+          signal: h.signal,
+          isolationKey: exchange.isolationKey,
+        },
+      );
+      removeInputClose = inputPooled.onClose((error) => {
+        if (error && !h.signal.aborted) h.fireError(new InvocationError(ERR_STREAM_ERROR, error.message));
+      });
+    } catch (e: unknown) {
+      pooled.release();
+      if (!h.signal.aborted) h.fireError(new InvocationError(ERR_CONNECT_FAILED, errorMessage(e)));
+      return;
+    }
   }
 
   // NO in-band auth: no credential ever rides a message body or a first
@@ -1511,6 +1734,8 @@ async function runWSSubscribe(
   // (resolved above); an excluded declared family refuses only here, when
   // an input actually arrives.
   const inputPump = async (): Promise<void> => {
+    if (!exchange) return;
+    let sent = 0;
     try {
       for await (const msg of h.inputs()) {
         if (codecErr !== undefined || !codec) {
@@ -1524,7 +1749,12 @@ async function runWSSubscribe(
           h.fireError(new InvocationError(ERR_VALIDATION_FAILED, errorMessage(e)));
           return;
         }
-        pooled.send(frame);
+        const messageType = contextConfiguration(args.context)["websocketMessageType"];
+        inputPooled.send(messageType === "binary" ? new TextEncoder().encode(frame) : frame);
+        sent++;
+      }
+      if (exchange.requireInput && sent === 0) {
+        h.fireError(new InvocationError(ERR_MISSING_INPUT, "request/reply invocation requires at least one input message"));
       }
     } catch {
       // Invocation terminated; the output pump owns the terminal transition.
@@ -1552,8 +1782,14 @@ async function runWSSubscribe(
     h.signal.removeEventListener("abort", onAbort);
     removeMsg();
     removeClose();
+    removeInputClose();
+    if (inputPooled !== pooled) inputPooled.release();
     pooled.release();
   }
+}
+
+function sortedStringRecord(value: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
 }
 
 // ---------------------------------------------------------------------------

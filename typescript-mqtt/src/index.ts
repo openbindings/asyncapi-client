@@ -144,6 +144,9 @@ function resolveProfile(
   if (request.operation["reply"] !== undefined) {
     throw new Error("the MQTT 3.1.1 driver does not admit AsyncAPI reply operations");
   }
+  const direction = request.input ?? request.output;
+  if (!direction) throw new Error("MQTT request has no invocation direction");
+  if (direction.address === undefined) throw new Error("MQTT request address is not resolvable before dispatch");
   const protocolVersion = stringValue(request.server?.["protocolVersion"])
     || mqttConfiguration(request)["protocolVersion"]
     || options.protocolVersion;
@@ -153,7 +156,7 @@ function resolveProfile(
 
   const serverBinding = binding(request.server, "mqtt");
   const operationBinding = binding(request.operation, "mqtt");
-  const channelBinding = binding(request.channel, "mqtt");
+  const channelBinding = binding(direction.channel, "mqtt");
   validateBindingVersion(serverBinding, "server");
   validateBindingVersion(operationBinding, "operation");
   validateAllowedFields(serverBinding, [
@@ -164,8 +167,8 @@ function resolveProfile(
   if (Object.keys(channelBinding).length > 0) {
     throw new Error("the AsyncAPI MQTT 0.2.0 channel binding must be empty");
   }
-  validateTopic(request.address, request.action);
-  for (const message of request.messages) {
+  validateTopic(direction.address, request.action);
+  for (const message of direction.messages) {
     const messageBinding = binding(message, "mqtt");
     validateBindingVersion(messageBinding, "message");
     const mqtt5Fields = Object.keys(messageBinding).filter((key) => key !== "bindingVersion");
@@ -242,12 +245,13 @@ async function publishInputs(
   session: AsyncAPIProtocolDriverSession,
   profile: MQTTProfile,
 ): Promise<void> {
-  if (!request.encodeInput) throw new Error("MQTT publish request has no artifact codec");
+  if (!request.input) throw new Error("MQTT publish request has no artifact input lane");
+  if (request.input.address === undefined) throw new Error("MQTT publish address is unresolved");
   let count = 0;
   for await (const value of session.inputs) {
     if (request.signal.aborted) return;
-    const payload = request.encodeInput(value);
-    await publish(client, request.address, payload, { qos: profile.qos, retain: profile.retain });
+    const payload = request.input.encode(value);
+    await publish(client, request.input.address, payload, { qos: profile.qos, retain: profile.retain });
     count++;
   }
   if (count === 0) throw new Error("MQTT publish invocation requires at least one input value");
@@ -259,8 +263,9 @@ async function subscribeOutputs(
   session: AsyncAPIProtocolDriverSession,
   profile: MQTTProfile,
 ): Promise<void> {
-  if (!request.decodeOutput) throw new Error("MQTT subscription request has no artifact codec");
-  const decodeOutput = request.decodeOutput;
+  if (!request.output) throw new Error("MQTT subscription request has no artifact output lane");
+  if (request.output.address === undefined) throw new Error("MQTT subscription address is unresolved");
+  const decodeOutput = request.output.decode;
   await session.closeInput();
   let failSubscriber: (error: unknown) => void = () => undefined;
   const failed = new Promise<never>((_resolve, reject) => { failSubscriber = reject; });
@@ -276,19 +281,19 @@ async function subscribeOutputs(
     },
     fail: failSubscriber,
   };
-  let subscribers = connection.subscribers.get(request.address);
+  let subscribers = connection.subscribers.get(request.output.address);
   if (!subscribers) {
     subscribers = new Set();
-    connection.subscribers.set(request.address, subscribers);
+    connection.subscribers.set(request.output.address, subscribers);
   }
   subscribers.add(subscriber);
   try {
-    await subscribe(connection.client, request.address, { qos: profile.qos });
+    await subscribe(connection.client, request.output.address, { qos: profile.qos });
     session.setLeadingMetadata({ "mqtt-subscription": ["ready"] });
     await Promise.race([untilStopped(connection.client, request.signal), failed]);
   } finally {
     subscribers.delete(subscriber);
-    if (subscribers.size === 0) connection.subscribers.delete(request.address);
+    if (subscribers.size === 0) connection.subscribers.delete(request.output.address);
   }
 }
 

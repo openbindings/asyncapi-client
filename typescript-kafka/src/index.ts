@@ -113,9 +113,12 @@ function resolveProfile(
   if (request.operation["reply"] !== undefined) {
     throw new Error("the Kafka driver does not admit AsyncAPI reply operations");
   }
+  const direction = request.input ?? request.output;
+  if (!direction) throw new Error("Kafka request has no invocation direction");
+  if (direction.address === undefined) throw new Error("Kafka request address is not resolvable before dispatch");
 
   const serverBinding = binding(request.server, "kafka");
-  const channelBinding = binding(request.channel, "kafka");
+  const channelBinding = binding(direction.channel, "kafka");
   const operationBinding = binding(request.operation, "kafka");
   const serverVersion = validateBinding("server", serverBinding);
   const channelVersion = validateBinding("channel", channelBinding);
@@ -125,11 +128,11 @@ function resolveProfile(
   validateOperationBinding(operationBinding);
 
   const configuration = kafkaConfiguration(request);
-  const topic = stringValue(channelBinding["topic"]) ?? request.address;
+  const topic = stringValue(channelBinding["topic"]) ?? direction.address;
   validateTopic(topic);
 
   let key: Uint8Array | undefined;
-  for (const message of request.messages) {
+  for (const message of direction.messages) {
     if (message["headers"] !== undefined) {
       throw new Error("Kafka message headers are outside the payload-only OpenBindings Kafka profile");
     }
@@ -179,7 +182,7 @@ async function publishInputs(
   session: AsyncAPIProtocolDriverSession,
   profile: KafkaProfile,
 ): Promise<void> {
-  if (!request.encodeInput) throw new Error("Kafka publish request has no artifact codec");
+  if (!request.input) throw new Error("Kafka publish request has no artifact input lane");
   await producer.connect();
   try {
     let count = 0;
@@ -188,7 +191,7 @@ async function publishInputs(
       await producer.send({
         topic: profile.topic,
         messages: [{
-          value: request.encodeInput(value),
+          value: request.input.encode(value),
           ...(profile.key ? { key: profile.key } : {}),
         }],
       });
@@ -206,8 +209,8 @@ async function subscribeOutputs(
   session: AsyncAPIProtocolDriverSession,
   profile: KafkaProfile,
 ): Promise<void> {
-  if (!request.decodeOutput) throw new Error("Kafka subscription request has no artifact codec");
-  const decodeOutput = request.decodeOutput;
+  if (!request.output) throw new Error("Kafka subscription request has no artifact output lane");
+  const decodeOutput = request.output.decode;
   await session.closeInput();
   await consumer.connect();
   try {

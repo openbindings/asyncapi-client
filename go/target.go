@@ -40,7 +40,7 @@ func isBoundProtocol(p string) bool {
 // releasing a stored value.
 type configRequired struct {
 	point       string
-	key         string
+	path        string
 	description string
 	choices     []string
 	durable     *bool
@@ -48,6 +48,10 @@ type configRequired struct {
 }
 
 func (c *configRequired) Error() string { return c.description }
+
+func escapeContextPointerToken(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "~", "~0"), "/", "~1")
+}
 
 // namedServer pairs a doc server with its `servers`-map key, so consumer
 // configuration can select a member by key and so security derivation can
@@ -165,7 +169,7 @@ func resolveTarget(doc *document, ch *channel, bindCtx map[string]any) (resolved
 					return resolvedTarget{}, fmt.Errorf("the effective server set declares no server with a protocol bound by the supported asyncapi revisions")
 				}
 				return resolvedTarget{}, &configRequired{
-					point: "server", key: "key",
+					point: "server", path: "/key",
 					description: "configuration.server.key must select one artifact server before metadata.baseURL can replace its target",
 					choices:     names, durable: boolPointer(true),
 				}
@@ -181,7 +185,7 @@ func resolveTarget(doc *document, ch *channel, bindCtx map[string]any) (resolved
 		}
 		return resolvedTarget{}, &configRequired{
 			point:       "server",
-			key:         "key",
+			path:        "/key",
 			description: "the effective server set declares several bindable servers; configuration.server.key must select one artifact member",
 			choices:     names,
 			durable:     boolPointer(true),
@@ -263,7 +267,7 @@ func resolveServerConfig(raw any, candidates []namedServer, def *namedServer) (r
 			return resolvedTarget{}, fmt.Errorf("the effective server set declares no server with a protocol bound by the supported asyncapi revisions")
 		}
 		return resolvedTarget{}, &configRequired{
-			point: "server", key: "key",
+			point: "server", path: "/key",
 			description: "configuration.server.key must select one artifact server before variables or a URL replacement can be applied",
 			choices:     names, durable: boolPointer(true),
 		}
@@ -431,7 +435,7 @@ func substituteServerVariables(member *namedServer, template string, supplied ma
 				}
 				return "", &configRequired{
 					point:       "server",
-					key:         name,
+					path:        "/variables/" + escapeContextPointerToken(name),
 					description: fmt.Sprintf("server %q: variable %q has no supplied value and no declared default (supply one at the server configuration point's \"variables\" member)", member.Name, name),
 					choices:     choices,
 					hostHint:    member.Server.Host,
@@ -550,7 +554,7 @@ func resolveAddress(ch *channel, channelName string, cfg addressConfig, payloads
 		no := false
 		return "", &configRequired{
 			point:       "address",
-			key:         "address",
+			path:        "",
 			description: fmt.Sprintf("channel %q declares no address and none was supplied at the address configuration point (AsyncAPI's runtime-generated address); supply one", channelName),
 			durable:     &no,
 		}
@@ -603,7 +607,7 @@ func expandAddress(ch *channel, channelName string, supplied map[string]string, 
 				}
 				return "", &configRequired{
 					point:       "address",
-					key:         name,
+					path:        "/parameters/" + escapeContextPointerToken(name),
 					description: fmt.Sprintf("channel %q: address parameter %q has no supplied value and no declared default", channelName, name),
 					choices:     choices,
 				}

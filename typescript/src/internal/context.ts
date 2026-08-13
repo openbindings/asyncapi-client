@@ -88,6 +88,24 @@ export function contextBearerToken(ctx: Record<string, unknown> | null | undefin
   return typeof v === "string" ? v : "";
 }
 
+export function contextNamedCredential(
+  ctx: Record<string, unknown> | null | undefined,
+  name?: string,
+): unknown {
+  if (!ctx || !name) return undefined;
+  const credentials = ctx["credentials"];
+  if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) return undefined;
+  return (credentials as Record<string, unknown>)[name];
+}
+
+export function contextBearerTokenFor(
+  ctx: Record<string, unknown> | null | undefined,
+  name?: string,
+): string {
+  const named = contextNamedCredential(ctx, name);
+  return typeof named === "string" && named ? named : contextBearerToken(ctx);
+}
+
 /** Returns the well-known `headers` field from context as a typed string-string map. */
 export function contextHeaders(ctx: Record<string, unknown> | null | undefined): Record<string, string> {
   return extractStringMap(ctx, "headers");
@@ -163,6 +181,8 @@ export function contextApiKeyFor(
   name?: string,
 ): string {
   if (name) {
+    const credential = contextNamedCredential(ctx, name);
+    if (typeof credential === "string" && credential) return credential;
     const named = contextApiKeys(ctx)[name];
     if (named) return named;
   }
@@ -181,6 +201,32 @@ export function contextBasicAuth(
   const password = typeof b["password"] === "string" ? b["password"] : "";
   if (!username && !password) return null;
   return { username, password };
+}
+
+export function contextBasicAuthFor(
+  ctx: Record<string, unknown> | null | undefined,
+  name?: string,
+): { username: string; password: string } | null {
+  const named = contextNamedCredential(ctx, name);
+  if (named && typeof named === "object" && !Array.isArray(named)) {
+    const value = named as Record<string, unknown>;
+    const username = typeof value["username"] === "string" ? value["username"] : "";
+    const password = typeof value["password"] === "string" ? value["password"] : "";
+    if (username || password) return { username, password };
+  }
+  return contextBasicAuth(ctx);
+}
+
+export function contextAccessTokenFor(
+  ctx: Record<string, unknown> | null | undefined,
+  name?: string,
+): string {
+  const named = contextNamedCredential(ctx, name);
+  if (named && typeof named === "object" && !Array.isArray(named)) {
+    const token = (named as Record<string, unknown>)["accessToken"];
+    if (typeof token === "string" && token) return token;
+  }
+  return contextString(ctx, "accessToken");
 }
 
 /** Returns a string value from context by key, or empty string if absent. */
@@ -223,9 +269,9 @@ export function redactContext(ctx: Record<string, unknown> | null | undefined): 
         const b = v as Record<string, unknown>;
         redacted[k] = { ...b, ...("password" in b ? { password: "[REDACTED]" } : {}) };
       } else {
-        redacted[k] = v;
+        redacted[k] = "[REDACTED]";
       }
-    } else if (k === "apiKeys") {
+    } else if (k === "apiKeys" || k === "credentials") {
       // Scheme-scoped API keys: every named entry is credential material,
       // same as the single 'apiKey' field. Scheme names stay; values redact.
       if (typeof v === "object" && v !== null && !Array.isArray(v)) {
@@ -234,7 +280,7 @@ export function redactContext(ctx: Record<string, unknown> | null | undefined): 
         for (const name of Object.keys(m)) rc[name] = "[REDACTED]";
         redacted[k] = rc;
       } else {
-        redacted[k] = v;
+        redacted[k] = "[REDACTED]";
       }
     } else {
       // Flat credential fields: bearerToken, apiKey, accessToken,
@@ -400,12 +446,42 @@ export function normalizeEndpoint(url: string): string {
  * layer — rule 10 of the binding-invoker interface: no resolver here, no
  * invented satisfaction convention).
  */
-function requirementSatisfied(ctx: Record<string, unknown>, req: ContextRequirement): boolean {
+function requirementSatisfied(
+  ctx: Record<string, unknown>,
+  req: ContextRequirement,
+  allowFlatNamedCredential = true,
+): boolean {
+  const name = typeof req.name === "string" && req.name ? req.name : undefined;
+  const named = contextNamedCredential(ctx, name);
+  if (req.type === "auth.bearer") {
+    if (typeof named === "string" && named) return true;
+    return allowFlatNamedCredential && contextBearerToken(ctx) !== "";
+  }
   if (req.type === "auth.apiKey") {
-    return contextApiKeyFor(ctx, typeof req.name === "string" ? req.name : undefined) !== "";
+    if (typeof named === "string" && named) return true;
+    const legacyNamed = name ? contextApiKeys(ctx)[name] : undefined;
+    if (legacyNamed) return true;
+    return allowFlatNamedCredential && contextApiKey(ctx) !== "";
+  }
+  if (req.type === "auth.basic") {
+    if (name && named && typeof named === "object" && !Array.isArray(named)) {
+      const value = named as Record<string, unknown>;
+      const username = value["username"];
+      const password = value["password"];
+      if (typeof username === "string" && typeof password === "string" && (username !== "" || password !== "")) return true;
+    }
+    return allowFlatNamedCredential && contextBasicAuth(ctx) !== null;
+  }
+  if (req.type === "auth.oauth2") {
+    if (name && named && typeof named === "object" && !Array.isArray(named)) {
+      const token = (named as Record<string, unknown>)["accessToken"];
+      if (typeof token === "string" && token) return true;
+    }
+    return allowFlatNamedCredential && contextString(ctx, "accessToken") !== "";
   }
   if (req.type === "config.value") {
     const point = typeof req.point === "string" ? req.point : "";
+    const path = typeof req.path === "string" ? req.path : "";
     const configuration = ctx["configuration"];
     if (
       !point
@@ -415,8 +491,8 @@ function requirementSatisfied(ctx: Record<string, unknown>, req: ContextRequirem
     ) {
       return false;
     }
-    const value = (configuration as Record<string, unknown>)[point];
-    return value !== undefined && value !== null && value !== "";
+    const selected = configurationValueAt((configuration as Record<string, unknown>)[point], path);
+    return selected.present && selected.value !== undefined && selected.value !== null && selected.value !== "";
   }
   const mappedField = REQUIREMENT_FIELDS[req.type];
   if (mappedField === undefined && req.type.startsWith("auth.")) {
@@ -438,9 +514,28 @@ export function contextSatisfies(
   ctx: Record<string, unknown>,
   details: ContextRequiredDetails,
 ): boolean {
-  return details.alternatives.some(
-    (alt) => alt.requirements.length > 0 && alt.requirements.every((req) => requirementSatisfied(ctx, req)),
-  );
+  return details.alternatives.some((alt) => {
+    if (alt.requirements.length === 0) return false;
+    return alt.requirements.every((req) => {
+      return requirementSatisfied(ctx, req, flatCredentialIsUnambiguous(details, req));
+    });
+  });
+}
+
+function flatCredentialIsUnambiguous(
+  details: ContextRequiredDetails,
+  requirement: ContextRequirement,
+): boolean {
+  const identities = new Set<string>();
+  let unnamed = 0;
+  for (const alternative of details.alternatives) {
+    for (const candidate of alternative.requirements) {
+      if (candidate.type !== requirement.type) continue;
+      if (typeof candidate.name === "string" && candidate.name) identities.add(candidate.name);
+      else unnamed++;
+    }
+  }
+  return identities.size + unnamed === 1;
 }
 
 /**
@@ -471,7 +566,10 @@ const REQUIREMENT_FAMILY_FIELDS: Record<string, string[]> = {
  * be sensitive according to their binding specification or application
  * meaning.
  */
-export const CREDENTIAL_FIELDS = new Set(Object.values(REQUIREMENT_FAMILY_FIELDS).flat());
+export const CREDENTIAL_FIELDS = new Set([
+  ...Object.values(REQUIREMENT_FAMILY_FIELDS).flat(),
+  "credentials",
+]);
 
 /**
  * Admits the API key credential for one `auth.apiKey` requirement into the
@@ -488,6 +586,15 @@ function admitApiKey(
   name: string | undefined,
 ): void {
   if (name) {
+    const credentials = stored["credentials"];
+    if (credentials && typeof credentials === "object" && !Array.isArray(credentials)) {
+      const value = (credentials as Record<string, unknown>)[name];
+      if (typeof value === "string" && value) {
+        const existing = (out["credentials"] as Record<string, unknown> | undefined) ?? {};
+        out["credentials"] = { ...existing, [name]: value };
+        return;
+      }
+    }
     const map = stored["apiKeys"];
     if (map && typeof map === "object" && !Array.isArray(map) && name in (map as Record<string, unknown>)) {
       const existing = (out["apiKeys"] as Record<string, unknown> | undefined) ?? {};
@@ -522,7 +629,9 @@ export function scopeContext(
   }
   for (const alt of details.alternatives) {
     if (alt.requirements.length === 0) continue;
-    const satisfied = alt.requirements.every((req) => requirementSatisfied(stored, req));
+    const satisfied = alt.requirements.every((req) => {
+      return requirementSatisfied(stored, req, flatCredentialIsUnambiguous(details, req));
+    });
     if (!satisfied) continue;
     for (const req of alt.requirements) {
       if (req.type === "auth.apiKey") {
@@ -531,6 +640,7 @@ export function scopeContext(
       }
       if (req.type === "config.value") {
         const point = typeof req.point === "string" ? req.point : "";
+        const path = typeof req.path === "string" ? req.path : "";
         const configuration = stored["configuration"];
         if (
           point
@@ -545,12 +655,32 @@ export function scopeContext(
             && !Array.isArray(out["configuration"])
               ? out["configuration"] as Record<string, unknown>
               : {};
-          out["configuration"] = {
-            ...existing,
-            [point]: (configuration as Record<string, unknown>)[point],
-          };
+          const pointValue = (configuration as Record<string, unknown>)[point];
+          const selected = configurationValueAt(pointValue, path);
+          if (!selected.present) continue;
+          if (path === "") {
+            out["configuration"] = { ...existing, [point]: pointValue };
+          } else {
+            const priorPoint = existing[point];
+            const scopedPoint = priorPoint && typeof priorPoint === "object" && !Array.isArray(priorPoint)
+              ? priorPoint as Record<string, unknown>
+              : {};
+            out["configuration"] = {
+              ...existing,
+              [point]: mergeConfigurationFragment(scopedPoint, configurationFragment(path, selected.value)),
+            };
+          }
         }
         continue;
+      }
+      const name = typeof req.name === "string" && req.name ? req.name : undefined;
+      if (name && req.type.startsWith("auth.")) {
+        const credentials = stored["credentials"];
+        if (credentials && typeof credentials === "object" && !Array.isArray(credentials) && name in credentials) {
+          const existing = (out["credentials"] as Record<string, unknown> | undefined) ?? {};
+          out["credentials"] = { ...existing, [name]: (credentials as Record<string, unknown>)[name] };
+          continue;
+        }
       }
       const fields = REQUIREMENT_FAMILY_FIELDS[req.type] ?? [req.type];
       for (const f of fields) {
@@ -558,6 +688,44 @@ export function scopeContext(
       }
     }
     return out;
+  }
+  return out;
+}
+
+function configurationPointerTokens(path: string): string[] | null {
+  if (path === "") return [];
+  if (!path.startsWith("/")) return null;
+  const tokens = path.slice(1).split("/");
+  if (tokens.some((token) => /(?:~(?![01]))/.test(token))) return null;
+  return tokens.map((token) => token.replaceAll("~1", "/").replaceAll("~0", "~"));
+}
+
+function configurationValueAt(root: unknown, path: string): { present: boolean; value?: unknown } {
+  const tokens = configurationPointerTokens(path);
+  if (tokens === null) return { present: false };
+  let current = root;
+  if (tokens.length === 0) return { present: root !== undefined, value: root };
+  for (const token of tokens) {
+    if (!current || typeof current !== "object" || Array.isArray(current) || !Object.hasOwn(current, token)) return { present: false };
+    current = (current as Record<string, unknown>)[token];
+  }
+  return { present: true, value: current };
+}
+
+function configurationFragment(path: string, value: unknown): Record<string, unknown> {
+  const tokens = configurationPointerTokens(path) ?? [];
+  let fragment: unknown = value;
+  for (let index = tokens.length - 1; index >= 0; index--) fragment = { [tokens[index]!]: fragment };
+  return fragment as Record<string, unknown>;
+}
+
+function mergeConfigurationFragment(left: Record<string, unknown>, right: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    const prior = out[key];
+    out[key] = prior && value && typeof prior === "object" && !Array.isArray(prior) && typeof value === "object" && !Array.isArray(value)
+      ? mergeConfigurationFragment(prior as Record<string, unknown>, value as Record<string, unknown>)
+      : value;
   }
   return out;
 }
@@ -586,6 +754,17 @@ export function scopeContext(
  */
 export function storeContextResolver(store: ContextStore): ContextResolver {
   return async (details: ContextRequiredDetails) => {
+    const reusable: ContextRequiredDetails = {
+      ...details,
+      alternatives: details.alternatives.filter(
+        (alternative) =>
+          alternative.requirements.length > 0 &&
+          alternative.requirements.every(
+            (requirement) => requirement.durable === true,
+          ),
+      ),
+    };
+    if (reusable.alternatives.length === 0) return null;
     const key = normalizeEndpoint(details.target);
     // An empty or unkeyable target cannot safely select reusable stored
     // context. Interactive or application-specific resolvers may still
@@ -593,6 +772,6 @@ export function storeContextResolver(store: ContextStore): ContextResolver {
     if (!key) return null;
     const ctx = await store.get(key);
     if (!ctx) return null;
-    return contextSatisfies(ctx, details) ? scopeContext(ctx, details) : null;
+    return contextSatisfies(ctx, reusable) ? scopeContext(ctx, reusable) : null;
   };
 }

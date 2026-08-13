@@ -7,8 +7,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 func httpArtifact() []byte {
@@ -228,16 +232,196 @@ func TestEngineReportsArtifactPrerequisitesWithoutDispatch(t *testing.T) {
 	}
 }
 
-func TestReplyBearingWebSocketRefusesBeforeDial(t *testing.T) {
-	doc := strings.Replace(string(httpArtifact()), `"protocol":"https"`, `"protocol":"wss"`, 1)
-	doc = strings.Replace(doc, `"action":"receive"`, `"action":"send"`, 1)
-	doc = strings.Replace(doc, `"bindings":{"http":{"method":"PUT"}},`, "", 1)
+func TestReplyBearingWebSocketReceiveSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var request map[string]any
+		_ = json.Unmarshal(payload, &request)
+		response, _ := json.Marshal(map[string]any{"accepted": request["id"]})
+		_ = conn.Write(r.Context(), websocket.MessageText, response)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+	doc := websocketReplyArtifact(server.URL, "receive")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Load(ctx, Source{Content: doc}, LoadOptions{Context: map[string]any{"configuration": map[string]any{"websocketMessageType": "text"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	events, err := client.Publish(ctx, "submit", map[string]any{"id": 17}, InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Value.(map[string]any)["accepted"] != float64(17) {
+		t.Fatalf("events = %#v", events)
+	}
+	type result struct {
+		id     int
+		events []Event
+		err    error
+	}
+	results := make(chan result, 2)
+	for _, id := range []int{31, 47} {
+		go func(id int) {
+			got, invokeErr := client.Publish(ctx, "submit", map[string]any{"id": id}, InvocationOptions{})
+			results <- result{id: id, events: got, err: invokeErr}
+		}(id)
+	}
+	for range 2 {
+		got := <-results
+		if got.err != nil || len(got.events) != 1 || got.events[0].Value.(map[string]any)["accepted"] != float64(got.id) {
+			t.Fatalf("concurrent result = %#v", got)
+		}
+	}
+}
+
+func TestReplyBearingWebSocketSendKeepsDirectionsDistinct(t *testing.T) {
+	replies := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"command":23}`))
+		_, payload, err := conn.Read(r.Context())
+		if err == nil {
+			var reply map[string]any
+			_ = json.Unmarshal(payload, &reply)
+			replies <- reply
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+	doc := websocketReplyArtifact(server.URL, "send")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Load(ctx, Source{Content: doc}, LoadOptions{Context: map[string]any{"configuration": map[string]any{"websocketMessageType": "text"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	execution, err := client.Start(ctx, "submit", InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.Send(ctx, map[string]any{"accepted": 23}); err != nil {
+		t.Fatal(err)
+	}
+	_ = execution.FinishInput()
+	var events []Event
+	for event := range execution.Events() {
+		events = append(events, event)
+	}
+	if err := execution.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Value.(map[string]any)["command"] != float64(23) {
+		t.Fatalf("events = %#v", events)
+	}
+	select {
+	case reply := <-replies:
+		if reply["accepted"] != float64(23) {
+			t.Fatalf("reply = %#v", reply)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
+func TestReplyBearingWebSocketCoordinatesDistinctStaticEndpoint(t *testing.T) {
+	replyReady := make(chan *websocket.Conn, 1)
+	replyDone := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/replies", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		replyReady <- conn
+		<-replyDone
+	})
+	mux.HandleFunc("/commands", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var request map[string]any
+		_ = json.Unmarshal(payload, &request)
+		reply := <-replyReady
+		response, _ := json.Marshal(map[string]any{"accepted": request["id"]})
+		_ = reply.Write(context.Background(), websocket.MessageText, response)
+		_ = reply.Close(websocket.StatusNormalClosure, "done")
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+		close(replyDone)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	var document map[string]any
+	if err := json.Unmarshal(websocketReplyArtifact(server.URL, "receive"), &document); err != nil {
+		t.Fatal(err)
+	}
+	channels := document["channels"].(map[string]any)
+	commands := channels["commands"].(map[string]any)
+	channels["replies"] = map[string]any{
+		"address":  "/replies",
+		"messages": map[string]any{"Result": commands["messages"].(map[string]any)["Result"]},
+	}
+	operation := document["operations"].(map[string]any)["submit"].(map[string]any)
+	operation["reply"] = map[string]any{
+		"channel":  map[string]any{"$ref": "#/channels/replies"},
+		"messages": []any{map[string]any{"$ref": "#/channels/replies/messages/Result"}},
+	}
+	content, _ := json.Marshal(document)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Load(ctx, Source{Content: content}, LoadOptions{Context: map[string]any{"configuration": map[string]any{"websocketMessageType": "text"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	events, err := client.Publish(ctx, "submit", map[string]any{"id": 71}, InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Value.(map[string]any)["accepted"] != float64(71) {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestReplyBearingWebSocketRefusesHeaderAddressBeforeDial(t *testing.T) {
+	var document map[string]any
+	if err := json.Unmarshal(websocketReplyArtifact("http://api.example.test", "receive"), &document); err != nil {
+		t.Fatal(err)
+	}
+	operation := document["operations"].(map[string]any)["submit"].(map[string]any)
+	operation["reply"].(map[string]any)["address"] = map[string]any{"location": "$message.header#/replyTo"}
+	content, _ := json.Marshal(document)
 	requests := 0
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests++
 		return nil, errors.New("must not dial")
 	})}
-	client, err := Load(context.Background(), Source{Content: []byte(doc)}, LoadOptions{HTTPClient: httpClient})
+	client, err := Load(context.Background(), Source{Content: content}, LoadOptions{
+		HTTPClient: httpClient,
+		Context:    map[string]any{"configuration": map[string]any{"websocketMessageType": "text"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +439,14 @@ func TestReplyBearingWebSocketRefusesBeforeDial(t *testing.T) {
 	if requests != 0 {
 		t.Fatalf("network requests = %d, want 0", requests)
 	}
+}
+
+func websocketReplyArtifact(serverURL, action string) []byte {
+	doc := strings.Replace(string(httpArtifact()), `"host":"api.example.test","protocol":"https"`, `"host":"`+strings.TrimPrefix(serverURL, "http://")+`","protocol":"ws"`, 1)
+	doc = strings.Replace(doc, `"action":"receive"`, `"action":"`+action+`"`, 1)
+	doc = strings.Replace(doc, `"bindings":{"http":{"method":"PUT"}},`, "", 1)
+	doc = strings.Replace(doc, `"reply":{"messages":`, `"reply":{"channel":{"$ref":"#/channels/commands"},"messages":`, 1)
+	return []byte(doc)
 }
 
 func TestArtifactRetrievalCancellationPropagates(t *testing.T) {
@@ -278,7 +470,7 @@ func (d *testProtocolDriver) Execute(ctx context.Context, request DriverRequest,
 	if request.Protocol != "mqtt" || request.OperationKey != "submit" || len(request.Artifact) == 0 {
 		return errors.New("driver request did not preserve the artifact target")
 	}
-	if request.Address != "/commands" || request.Server["protocol"] != "mqtt" || len(request.Messages) != 1 || request.EncodeInput == nil {
+	if request.Input == nil || request.Input.Address != "/commands" || request.Server["protocol"] != "mqtt" || len(request.Input.Messages) != 1 || request.Input.Encode == nil {
 		return errors.New("driver request did not carry resolved AsyncAPI semantics")
 	}
 	bindings, _ := request.Operation["bindings"].(map[string]any)
@@ -290,7 +482,7 @@ func (d *testProtocolDriver) Execute(ctx context.Context, request DriverRequest,
 	if len(request.SecurityAlternatives) != 1 || len(request.SecurityAlternatives[0]) != 1 || request.SecurityAlternatives[0][0].Name != "mqttBasic" || request.SecurityAlternatives[0][0].Scheme["type"] != "userPassword" {
 		return errors.New("driver request did not carry resolved security alternatives")
 	}
-	encoded, err := request.EncodeInput(map[string]any{"id": 9})
+	encoded, err := request.Input.Encode(map[string]any{"id": 9})
 	if err != nil || string(encoded) != `{"id":9}` {
 		return errors.New("driver request did not carry the artifact codec")
 	}

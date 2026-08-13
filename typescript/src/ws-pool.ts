@@ -53,6 +53,12 @@ export interface PooledWS {
 }
 
 export interface AcquireOptions {
+  /** Per-invocation partition used for request/reply sessions that must not
+   * observe frames belonging to a concurrent invocation. */
+  isolationKey?: string;
+  /** Preserve frames arriving between handshake completion and listener
+   * attachment. Used by isolated request/reply sessions. */
+  captureInitialMessages?: boolean;
   /** Custom URL builder (e.g. to add query-param credentials). */
   buildURL?: (base: string, addr: string) => string;
   /**
@@ -89,6 +95,8 @@ interface PoolEntry {
   closeHandlers: Set<(err?: Error) => void>;
   ready: Promise<void>;
   key: string;
+  pendingMessages: Array<{ data: string; decodeError?: Error }>;
+  captureInitialMessages: boolean;
 }
 
 /** @internal Implementation detail of the asyncapi invoker; not public API. */
@@ -110,10 +118,10 @@ export class WSPool {
     address: string,
     options: AcquireOptions = {},
   ): Promise<PooledWS> {
-    const { buildURL, credentialKey, headers, signal } = options;
+    const { buildURL, credentialKey, headers, signal, isolationKey, captureInitialMessages } = options;
     if (signal?.aborted) throw abortError(signal);
 
-    const key = poolKey(serverURL, address, credentialKey);
+    const key = poolKey(serverURL, address, credentialKey, isolationKey);
 
     // Fast path: reuse existing connection (already ready by construction).
     const existing = this.conns.get(key);
@@ -136,7 +144,7 @@ export class WSPool {
     }
 
     // Create a new connection.
-    const createPromise = this.createEntry(key, serverURL, address, buildURL, headers);
+    const createPromise = this.createEntry(key, serverURL, address, buildURL, headers, captureInitialMessages ?? false);
     this.creating.set(key, createPromise);
 
     let entry: PoolEntry;
@@ -175,6 +183,7 @@ export class WSPool {
     address: string,
     buildURL?: (base: string, addr: string) => string,
     headers?: Record<string, string>,
+    captureInitialMessages = false,
   ): Promise<PoolEntry> {
     const url = buildURL
       ? buildURL(serverURL, address)
@@ -202,13 +211,17 @@ export class WSPool {
     ws.addEventListener("message", (ev) => {
       try {
         const data = strictUTF8Frame(ev.data);
-        for (const handler of messageHandlers) {
-          handler(data);
+        if (captureInitialMessages && entry.refCount === 0) {
+          entry.pendingMessages.push({ data });
+        } else {
+          for (const handler of messageHandlers) handler(data);
         }
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
-        for (const handler of messageHandlers) {
-          handler("", err);
+        if (captureInitialMessages && entry.refCount === 0) {
+          entry.pendingMessages.push({ data: "", decodeError: err });
+        } else {
+          for (const handler of messageHandlers) handler("", err);
         }
       }
     });
@@ -240,6 +253,8 @@ export class WSPool {
       closeHandlers,
       ready,
       key,
+      pendingMessages: [],
+      captureInitialMessages,
     };
 
     await ready;
@@ -266,6 +281,8 @@ export class WSPool {
 
       onMessage(handler: (data: string, decodeError?: Error) => void): () => void {
         entry.messageHandlers.add(handler);
+        const pending = entry.pendingMessages.splice(0);
+        for (const message of pending) handler(message.data, message.decodeError);
         return () => {
           entry.messageHandlers.delete(handler);
         };
@@ -348,8 +365,8 @@ function strictUTF8Frame(data: unknown): string {
  * another (cross-tenant credential leak). An absent/empty fingerprint
  * still partitions consistently — "no credentials" is its own bucket.
  */
-function poolKey(serverURL: string, address: string, credentialKey?: string): string {
-  return `${serverURL}|${address}|${credentialKey ?? ""}`;
+function poolKey(serverURL: string, address: string, credentialKey?: string, isolationKey?: string): string {
+  return `${serverURL}|${address}|${credentialKey ?? ""}|${isolationKey ?? ""}`;
 }
 
 // ---------------------------------------------------------------------------

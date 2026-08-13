@@ -1,0 +1,90 @@
+{
+  "format": "openbindings.asyncapi.protocol-driver-qualification@1",
+  "driver": "websocket-reply-session",
+  "authority": {
+    "asyncapi": "https://www.asyncapi.com/docs/reference/specification/v3.1.0",
+    "editions": ["3.0.0", "3.1.0"],
+    "websocketBinding": "https://github.com/asyncapi/bindings/tree/master/websockets",
+    "bindingVersions": ["0.1.0"]
+  },
+  "lifecycle": {
+    "model": "full-duplex-session",
+    "inputHalfClose": "ends only the caller-to-application lane",
+    "completion": "clean peer close completes output; cancellation cancels the session",
+    "cardinality": "not inferred from request/reply syntax"
+  },
+  "cells": [
+    {
+      "id": "receive-operation-with-reply",
+      "disposition": "supported",
+      "evidence": ["typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "send-operation-with-reply",
+      "disposition": "supported",
+      "evidence": ["typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "static-reply-channel-on-same-websocket-endpoint",
+      "disposition": "supported",
+      "evidence": ["typescript/src/invoke.ts", "go/invoke.go", "typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "isolated-concurrent-request-reply-sessions",
+      "disposition": "supported",
+      "reason": "Each invocation has a distinct connection partition, so absent correlation metadata cannot cause cross-invocation delivery.",
+      "evidence": ["typescript/src/client.test.ts", "go/client_test.go", "typescript/src/ws-pool.ts", "go/ws_pool.go"]
+    },
+    {
+      "id": "payload-correlation-identifier",
+      "disposition": "supported",
+      "reason": "Correlation fields remain ordinary application payload and the isolated session does not consume or rewrite them.",
+      "evidence": ["typescript/src/asyncapi-types.ts", "go/types.go", "typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "input-half-close-keeps-output-open",
+      "disposition": "supported",
+      "evidence": ["typescript/src/invoke.ts", "go/invoke.go", "typescript/src/client.test.ts", "go/client_test.go"]
+    },
+    {
+      "id": "ordering-cancellation-partial-output-and-peer-completion",
+      "disposition": "supported",
+      "evidence": ["typescript/src/invoke.ts", "go/invoke.go"]
+    },
+    {
+      "id": "standalone-to-openbindings-bridge-value-and-lifecycle-fidelity",
+      "disposition": "supported",
+      "evidence": ["../openbindings-ts/packages/asyncapi/src/ws-reply.test.ts", "../openbindings-go/formats/asyncapi/integration_test.go"]
+    },
+    {
+      "id": "static-reply-channel-on-distinct-endpoint-same-server",
+      "disposition": "supported",
+      "reason": "The output connection is established before the input connection so immediate reply-side delivery is not lost.",
+      "evidence": ["typescript/src/client.test.ts", "go/client_test.go", "typescript/src/invoke.ts", "go/invoke.go"]
+    },
+    {
+      "id": "cross-protocol-reply-channel",
+      "disposition": "excluded",
+      "reason": "A WebSocket operation whose reply selects another protocol or server requires a separately qualified composite driver.",
+      "evidence": ["typescript/src/invoke.ts", "go/invoke.go"]
+    },
+    {
+      "id": "runtime-expression-reply-address-from-payload",
+      "disposition": "excluded",
+      "reason": "Per-message reply routing is refused until both operation perspectives and multiple in-flight messages have live evidence.",
+      "evidence": ["typescript/src/invoke.ts", "go/invoke.go"]
+    },
+    {
+      "id": "runtime-expression-reply-address-from-application-header",
+      "disposition": "excluded",
+      "reason": "AsyncAPI message headers are application headers, but the current standalone session value is payload-only; the runtime refuses rather than smuggling headers into payload or OpenBindings Core frames.",
+      "evidence": ["typescript/src/invoke.ts", "go/invoke.go"]
+    },
+    {
+      "id": "message-headers-on-either-value-lane",
+      "disposition": "excluded",
+      "reason": "The payload-only value boundary cannot faithfully carry authored application headers yet.",
+      "evidence": ["typescript/src/content.ts", "go/content.go"]
+    }
+  ]
+}

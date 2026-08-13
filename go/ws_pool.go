@@ -101,8 +101,8 @@ func newWSPool(httpClient *http.Client) *wsPool {
 // use. A pooled connection is never shared across differing credential
 // identities (ASYNC-P-07: cross-tenant credential leak); identical
 // credentials still pool.
-func wsPoolKey(serverURL, address string, doc *document, secSrv *server, asyncOp *asyncOperation, bindCtx map[string]any, extraHeaders map[string]string) string {
-	return serverURL + "|" + address + "|" + credentialDigest(serverURL, address, doc, secSrv, asyncOp, bindCtx, extraHeaders)
+func wsPoolKey(serverURL, address string, doc *document, secSrv *server, asyncOp *asyncOperation, bindCtx map[string]any, extraHeaders map[string]string, isolationKey string) string {
+	return serverURL + "|" + address + "|" + credentialDigest(serverURL, address, doc, secSrv, asyncOp, bindCtx, extraHeaders) + "|" + isolationKey
 }
 
 // credentialDigest summarizes the auth-relevant material a dial for this
@@ -153,8 +153,12 @@ func credentialDigest(serverURL, address string, doc *document, secSrv *server, 
 //
 // If multiple goroutines call acquire for the same key concurrently, only one
 // creates the connection while the others wait.
-func (p *wsPool) acquire(ctx context.Context, serverURL, address string, doc *document, secSrv *server, asyncOp *asyncOperation, bindCtx map[string]any, extraHeaders map[string]string, readLimit int64, l *wsListener) (*pooledWS, func(), error) {
-	key := wsPoolKey(serverURL, address, doc, secSrv, asyncOp, bindCtx, extraHeaders)
+func (p *wsPool) acquire(ctx context.Context, serverURL, address string, doc *document, secSrv *server, asyncOp *asyncOperation, bindCtx map[string]any, extraHeaders map[string]string, readLimit int64, l *wsListener, isolationKey ...string) (*pooledWS, func(), error) {
+	partition := ""
+	if len(isolationKey) > 0 {
+		partition = isolationKey[0]
+	}
+	key := wsPoolKey(serverURL, address, doc, secSrv, asyncOp, bindCtx, extraHeaders, partition)
 
 	for {
 		p.mu.Lock()

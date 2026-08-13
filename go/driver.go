@@ -17,21 +17,37 @@ type DriverRequest struct {
 	Artifact     []byte
 	Document     map[string]any
 	Operation    map[string]any
-	Channel      map[string]any
 	Server       map[string]any
 	Ref          string
 	OperationKey string
 	Action       string
 	Protocol     string
 	ServerURL    string
-	Address      string
-	Messages     []map[string]any
+	Input        *DriverInput
+	Output       *DriverOutput
 	// SecurityAlternatives contains resolved AsyncAPI schemes. Every outer
 	// item is one alternative; all schemes within that item apply.
 	SecurityAlternatives [][]DriverSecurityScheme
 	Context              map[string]any
-	EncodeInput          func(any) ([]byte, error)
-	DecodeOutput         func([]byte) (any, error)
+}
+
+type DriverDirection struct {
+	Channel   map[string]any
+	Server    map[string]any
+	Protocol  string
+	ServerURL string
+	Address   string
+	Messages  []map[string]any
+}
+
+type DriverInput struct {
+	DriverDirection
+	Encode func(any) ([]byte, error)
+}
+
+type DriverOutput struct {
+	DriverDirection
+	Decode func([]byte) (any, error)
 }
 
 type DriverSecurityScheme struct {

@@ -31,13 +31,10 @@ import type { InvocationErrorCode } from "./errcodes.js";
  * The structured error type for all terminal invocation failures. A class
  * (not a plain shape) so it carries a stack trace and supports `instanceof`.
  *
- * The terminal error frame is the portable unsuccessful-completion signal.
- * `details` carries portable data defined by an interface-owned code
- * (currently CONTEXT_REQUIRED and validation failures), or an opaque JSON
- * failure value identified as application-authored by the governing binding
- * rules. `diagnostics` is an optional expert escape hatch for selected-binding
- * or implementation evidence; ordinary operation behavior must not depend on
- * it.
+ * This internal carrier separates structured failure data from native or
+ * implementation evidence. The public standalone API is protocol-aware; an
+ * OpenBindings adapter may project only the subset its governing binding rules
+ * admit and must leave `diagnostics` below the abstract invocation boundary.
  */
 export class InvocationError extends Error {
   readonly code: InvocationErrorCode | (string & {});
@@ -49,6 +46,7 @@ export class InvocationError extends Error {
     message: string,
     details?: unknown,
     diagnostics?: unknown,
+    cause?: unknown,
   ) {
     // A CONTEXT_REQUIRED challenge is actionable only through its details; an
     // error string that hides the target and the requirement families strands
@@ -59,7 +57,7 @@ export class InvocationError extends Error {
       const summary = contextRequirementSummary(details);
       if (summary) rendered = `${rendered} (${summary})`;
     }
-    super(rendered);
+    super(rendered, cause !== undefined ? { cause } : undefined);
     this.name = "InvocationError";
     this.code = code;
     if (details !== undefined) this.details = details;
@@ -124,14 +122,15 @@ export interface ContextRequirement {
    * `securitySchemes` key, or the AsyncAPI `components.securitySchemes` key a
    * `$ref` resolves through). Distinguishes two requirements of the same
    * `type` within one alternative — two ANDed API keys are otherwise
-   * indistinguishable — and keys scheme-scoped credential lookup (see
-   * `apiKeys` on {@link ContextStore}/`BindingContext`). Absent when the
+   * indistinguishable — and keys scheme-scoped lookup in
+   * `BindingContext.credentials` (with historical `apiKeys` support for API
+   * keys). Absent when the
    * artifact declares the scheme inline with no addressable name.
    */
   name?: string;
   /**
-   * Whether resolved context MAY be persisted and reused. Defaults to true;
-   * `durable: false` context MUST be re-satisfied per call. The contract
+   * Whether resolved context MAY be persisted and reused. Defaults to false;
+   * only `durable: true` permits persistence. The contract
    * prescribes no store or key derivation.
    */
   durable?: boolean;
@@ -172,24 +171,21 @@ export function contextRequiredError(
  * family for a configuration value a binding needs but the artifact
  * does not supply (a server variable with no default, a channel address a
  * service generates at runtime). `point` names the binding-specification
- * configuration point ("server", "address", …); `key` names the specific
- * value within it (a server-variable name, or "address" for a whole channel
- * address); `choices` carries values declared by the artifact, while the
+ * configuration point ("server", "address", …); `path` is a JSON Pointer
+ * relative to that point, with the empty pointer addressing the whole point;
+ * `choices` carries values declared by the artifact, while the
  * governing binding specification decides whether that list is closed or
- * advisory. `durable` defaults to true, permitting but not requiring reuse;
- * pass `false` for a value that must be fresh per invocation. The resolved
- * value is carried in the `configuration` context field
- * under `point`; its shape there is the invoker's own, so this requirement
- * names what is needed, not the resolved structure.
+ * advisory. `durable` defaults to false; pass `true` only when reuse is
+ * permitted.
  */
 export function configValueRequirement(
   point: string,
-  key: string,
+  path: string,
   description: string,
   choices?: string[],
   durable?: boolean,
 ): ContextRequirement {
-  const req: ContextRequirement = { type: "config.value", point, key, description };
+  const req: ContextRequirement = { type: "config.value", point, path, description };
   if (choices && choices.length > 0) req.choices = choices;
   if (durable !== undefined) req.durable = durable;
   return req;

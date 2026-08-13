@@ -6,7 +6,20 @@ An AsyncAPI protocol driver is the concrete end of this authority chain:
 2. The applicable AsyncAPI protocol-binding specification governs concrete binding objects at its defined locations.
 3. A protocol driver maps those resolved facts into a mature protocol-native client and preserves the resulting exchange lifecycle.
 
-The standalone engine therefore supplies drivers with the resolved server URL, expanded channel address, resolved server/channel/operation/message objects, selected message declarations, resolved security alternatives, and artifact-governed encode/decode functions. A driver must not repeat AsyncAPI reference, trait, security-reference, message-selection, address, or payload-codec logic. It may place a credential only through a security alternative declared by the artifact; unrelated context must never be volunteered to the protocol.
+The standalone engine therefore supplies drivers with separate resolved input
+and output directions. Each direction carries its own server, protocol, server
+URL, channel, governing messages, statically knowable address, and
+artifact-governed encoder or decoder. This is load-bearing for AsyncAPI reply
+operations: the operation direction and reply direction may not have the same
+channel or even the same protocol. A runtime-expression address remains absent
+until a driver has the corresponding message; it is never replaced with the
+other direction's address.
+
+A driver must not repeat AsyncAPI reference, trait, security-reference,
+message-selection, or payload-codec logic. It may resolve protocol timing and
+per-message routing that only the concrete driver can observe. It may place a
+credential only through a security alternative declared by the artifact;
+unrelated context must never be volunteered to the protocol.
 
 ## Admission
 
@@ -24,7 +37,9 @@ A streaming driver must demonstrate ordering, delivery boundaries, bounded backp
 
 ## Abstraction gate
 
-Driver registration is runtime capability. It must not alter synthesis, add a protocol allowlist to `openbindings.asyncapi`, add protocol fields to OBI operation values, or change Core/invoker frames. The standalone client may expose protocol diagnostics. The OpenBindings adapter remains responsible for keeping those diagnostics outside ordinary protocol-independent values.
+Driver registration is runtime capability. It must not alter synthesis, add a protocol allowlist to `openbindings.asyncapi`, add protocol fields to OBI operation values, or change Core/invoker frames. The standalone client may expose protocol diagnostics. The OpenBindings adapter keeps those diagnostics below the abstract invocation boundary rather than projecting them onto outputs, errors, or lifecycle frames.
 
-Current matrices are [mqtt-3.1.1.json](../conformance/mqtt-3.1.1.json) and
+Current matrices are
+[websocket-reply.json](../conformance/websocket-reply.json),
+[mqtt-3.1.1.json](../conformance/mqtt-3.1.1.json), and
 [kafka.json](../conformance/kafka.json).

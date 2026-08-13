@@ -133,7 +133,13 @@ function hookTerminal(tier: string, nativeCode: string, err: unknown): Invocatio
       if (!("decidedBy" in m)) m.decidedBy = tier;
       return err;
     }
-    return new InvocationError(err.code, err.message, err.details, { decidedBy: tier });
+    return new InvocationError(
+      err.code,
+      err.message,
+      err.details,
+      { decidedBy: tier },
+      err.cause,
+    );
   }
   return new InvocationError(
     nativeCode,

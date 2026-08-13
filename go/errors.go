@@ -27,15 +27,19 @@ const (
 	ErrCodeDriverFailed      = "DRIVER_FAILED"
 )
 
-// ExecutionError is an SDK-neutral artifact execution failure. Details are
-// application-facing facts defined by the artifact family; Diagnostics are
-// an explicit protocol-aware escape hatch.
+// ExecutionError is an SDK-neutral artifact execution failure. Details and
+// Diagnostics are protocol-aware runtime fields; an abstraction adapter must
+// apply its own governing rules before projecting either one.
 type ExecutionError struct {
-	Code        string
-	Message     string
-	Details     any
-	Diagnostics any
-	Cause       error
+	Code    string
+	Message string
+	Details any
+	// DetailsPresent marks Details as a deliberately portable caller-owned
+	// value and distinguishes its absence from an explicit null. Merely setting
+	// Details as native runtime evidence does not grant that meaning.
+	DetailsPresent bool
+	Diagnostics    any
+	Cause          error
 }
 
 func (e *ExecutionError) Error() string {

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 import { AsyncAPIClient } from "./client.js";
-import { AsyncAPIEngine, AsyncAPIExecutionError } from "./engine.js";
+import { AsyncAPIEngine } from "./engine.js";
+import { AsyncAPIExecutionError } from "./engine.js";
 import type { AsyncAPIProtocolDriver } from "./driver.js";
 
 function httpDocument() {
@@ -237,17 +240,161 @@ describe("AsyncAPIClient", () => {
     engine.close();
   });
 
-  it("refuses reply-bearing WebSocket operations before establishing a socket", async () => {
+  it("executes an isolated reply-bearing WebSocket receive session", async () => {
+    const httpServer = createServer();
+    const wsServer = new WebSocketServer({ server: httpServer });
+    wsServer.on("connection", (socket) => {
+      socket.on("message", (data) => {
+        const request = JSON.parse(data.toString()) as { id: number };
+        socket.send(JSON.stringify({ accepted: request.id }));
+        socket.close(1000);
+      });
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const address = httpServer.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind TCP");
+    const previous = globalThis.WebSocket;
+    globalThis.WebSocket = NodeWebSocket as unknown as typeof WebSocket;
     const document = httpDocument();
-    document.servers.production = { host: "api.example.test", protocol: "wss" };
+    document.servers.production = { host: `127.0.0.1:${address.port}`, protocol: "ws" };
+    delete (document.operations.submit as Record<string, unknown>).bindings;
+    document.operations.submit.reply = {
+      channel: document.channels.commands,
+      messages: [document.channels.commands.messages.Result],
+    } as any;
+    const client = await AsyncAPIClient.load(document, {
+      context: { configuration: { websocketMessageType: "text" } },
+    });
+    try {
+      await expect(client.publish("submit", { id: 17 })).resolves.toEqual([{ accepted: 17 }]);
+      const concurrent = await Promise.all([
+        client.publish("submit", { id: 31 }),
+        client.publish("submit", { id: 47 }),
+      ]);
+      expect(concurrent).toEqual([[{ accepted: 31 }], [{ accepted: 47 }]]);
+    } finally {
+      client.close();
+      globalThis.WebSocket = previous;
+      await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    }
+  });
+
+  it("keeps reply-bearing WebSocket send input and output directions distinct", async () => {
+    const httpServer = createServer();
+    const wsServer = new WebSocketServer({ server: httpServer });
+    const received: unknown[] = [];
+    wsServer.on("connection", (socket) => {
+      socket.send(JSON.stringify({ command: 23 }));
+      socket.on("message", (data) => {
+        received.push(JSON.parse(data.toString()));
+        socket.close(1000);
+      });
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const address = httpServer.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind TCP");
+    const previous = globalThis.WebSocket;
+    globalThis.WebSocket = NodeWebSocket as unknown as typeof WebSocket;
+    const document = httpDocument();
+    document.servers.production = { host: `127.0.0.1:${address.port}`, protocol: "ws" };
     document.operations.submit.action = "send";
     delete (document.operations.submit as Record<string, unknown>).bindings;
-    const client = await AsyncAPIClient.load(document);
-    const execution = await client.start("submit");
-    const failure = execution.completed.catch((error: unknown) => error);
-    await expect(failure).resolves.toBeInstanceOf(AsyncAPIExecutionError);
-    await expect(failure).resolves.toEqual(expect.objectContaining({ code: "ERR_SOURCE_CONFIG_ERROR" }));
-    client.close();
+    document.operations.submit.reply = {
+      channel: document.channels.commands,
+      messages: [document.channels.commands.messages.Result],
+    } as any;
+    const client = await AsyncAPIClient.load(document, {
+      context: { configuration: { websocketMessageType: "text" } },
+    });
+    try {
+      const execution = await client.start("submit");
+      await execution.send({ accepted: 23 });
+      await execution.finishInput();
+      const outputs: unknown[] = [];
+      for await (const event of execution.events) outputs.push(event.value);
+      await execution.completed;
+      expect(outputs).toEqual([{ command: 23 }]);
+      expect(received).toEqual([{ accepted: 23 }]);
+    } finally {
+      client.close();
+      globalThis.WebSocket = previous;
+      await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    }
+  });
+
+  it("coordinates a static reply channel on a distinct WebSocket endpoint", async () => {
+    const httpServer = createServer();
+    const wsServer = new WebSocketServer({ server: httpServer });
+    let replySocket: import("ws").WebSocket | undefined;
+    wsServer.on("connection", (socket, request) => {
+      if (request.url === "/replies") {
+        replySocket = socket;
+        return;
+      }
+      socket.on("message", (data) => {
+        const requestValue = JSON.parse(data.toString()) as { id: number };
+        replySocket?.send(JSON.stringify({ accepted: requestValue.id }));
+        replySocket?.close(1000);
+        socket.close(1000);
+      });
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const address = httpServer.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind TCP");
+    const previous = globalThis.WebSocket;
+    globalThis.WebSocket = NodeWebSocket as unknown as typeof WebSocket;
+    const document = httpDocument() as any;
+    document.servers.production = { host: `127.0.0.1:${address.port}`, protocol: "ws" };
+    delete document.operations.submit.bindings;
+    document.channels.replies = {
+      address: "/replies",
+      messages: { Result: document.channels.commands.messages.Result },
+    };
+    document.operations.submit.reply = {
+      channel: document.channels.replies,
+      messages: [document.channels.replies.messages.Result],
+    };
+    const client = await AsyncAPIClient.load(document, {
+      context: { configuration: { websocketMessageType: "text" } },
+    });
+    try {
+      await expect(client.publish("submit", { id: 71 })).resolves.toEqual([{ accepted: 71 }]);
+    } finally {
+      client.close();
+      globalThis.WebSocket = previous;
+      await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    }
+  });
+
+  it("refuses an application-header reply address before opening a WebSocket", async () => {
+    const document = httpDocument() as any;
+    document.servers.production = { host: "api.example.test", protocol: "wss" };
+    delete document.operations.submit.bindings;
+    document.operations.submit.reply = {
+      channel: document.channels.commands,
+      messages: [document.channels.commands.messages.Result],
+      address: { location: "$message.header#/replyTo" },
+    };
+    const opened = vi.fn();
+    const previous = globalThis.WebSocket;
+    globalThis.WebSocket = opened as unknown as typeof WebSocket;
+    const client = await AsyncAPIClient.load(document, {
+      context: { configuration: { websocketMessageType: "text" } },
+    });
+    try {
+      const execution = await client.start("submit");
+      const failure = execution.completed.catch((error: unknown) => error);
+      await expect(failure).resolves.toEqual(expect.objectContaining<Partial<AsyncAPIExecutionError>>({
+        code: "ERR_SOURCE_CONFIG_ERROR",
+      }));
+      expect(opened).not.toHaveBeenCalled();
+    } finally {
+      client.close();
+      globalThis.WebSocket = previous;
+    }
   });
 
   it("propagates cancellation through artifact retrieval", async () => {
@@ -287,10 +434,10 @@ describe("AsyncAPIClient", () => {
       async execute(request, session) {
         expect(request.protocol).toBe("mqtt");
         expect(request.operationKey).toBe("submit");
-        expect(request.address).toBe("/commands");
+        expect(request.input?.address).toBe("/commands");
         expect(request.server?.protocol).toBe("mqtt");
-        expect(request.messages).toHaveLength(1);
-        expect(new TextDecoder().decode(request.encodeInput?.({ id: 9 }))).toBe('{"id":9}');
+        expect(request.input?.messages).toHaveLength(1);
+        expect(new TextDecoder().decode(request.input!.encode({ id: 9 }))).toBe('{"id":9}');
         expect(request.operation.bindings).toEqual({
           mqtt: { qos: 1 },
           future: { marker: "preserved", config: { type: "object" } },

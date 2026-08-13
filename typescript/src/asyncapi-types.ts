@@ -84,6 +84,7 @@ export interface AsyncAPIWSChannelBinding {
   method?: string;
   query?: Record<string, unknown>;
   headers?: Record<string, unknown>;
+  correlationId?: { location?: string };
   bindingVersion?: string;
 }
 
@@ -120,6 +121,7 @@ export interface AsyncAPIHTTPOperationBinding {
 export interface AsyncAPIOperationReply {
   channel?: AsyncAPIChannel;
   messages?: AsyncAPIMessage[];
+  address?: { location?: string };
 }
 
 export interface AsyncAPIMessage {

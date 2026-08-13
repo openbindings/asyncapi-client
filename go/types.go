@@ -120,8 +120,13 @@ type httpOperationBinding struct {
 }
 
 type operationReply struct {
-	Channel  *channelRef  `json:"channel,omitempty" yaml:"channel,omitempty"`
-	Messages []messageRef `json:"messages,omitempty" yaml:"messages,omitempty"`
+	Channel  *channelRef   `json:"channel,omitempty" yaml:"channel,omitempty"`
+	Messages []messageRef  `json:"messages,omitempty" yaml:"messages,omitempty"`
+	Address  *replyAddress `json:"address,omitempty" yaml:"address,omitempty"`
+}
+
+type replyAddress struct {
+	Location string `json:"location,omitempty" yaml:"location,omitempty"`
 }
 
 type message struct {
@@ -133,9 +138,14 @@ type message struct {
 	SchemaFormat    string           `json:"schemaFormat,omitempty" yaml:"schemaFormat,omitempty"`
 	Payload         map[string]any   `json:"payload,omitempty" yaml:"payload,omitempty"`
 	Headers         map[string]any   `json:"headers,omitempty" yaml:"headers,omitempty"`
+	CorrelationID   *correlationID   `json:"correlationId,omitempty" yaml:"correlationId,omitempty"`
 	Bindings        *messageBindings `json:"bindings,omitempty" yaml:"bindings,omitempty"`
 	Ref             string           `json:"$ref,omitempty" yaml:"$ref,omitempty"`
 	UnresolvedTrait string           `json:"x-ob-asyncapi-unresolved-trait,omitempty" yaml:"x-ob-asyncapi-unresolved-trait,omitempty"`
+}
+
+type correlationID struct {
+	Location string `json:"location,omitempty" yaml:"location,omitempty"`
 }
 
 type messageBindings struct {

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -36,7 +37,7 @@ func configOrSourceError(err error, serverURL string) *ExecutionError {
 		if target == "" {
 			target = cr.hostHint
 		}
-		req := newConfigValueRequirement(cr.point, cr.key, cr.description, cr.choices, cr.durable)
+		req := newConfigValueRequirement(cr.point, cr.path, cr.description, cr.choices, cr.durable)
 		return newContextRequiredError(cr.description, &Prerequisites{
 			Target:       target,
 			Alternatives: []RequirementAlternative{{Requirements: []Requirement{req}}},
@@ -71,10 +72,10 @@ func configOrSourceError(err error, serverURL string) *ExecutionError {
 // input) are raised via FireError BEFORE any network I/O, per the
 // binding-author contract and ASYNC-P-02/-03/-04's pre-dispatch refusals.
 
-// maxResponseBytes bounds the HTTP ERROR body captured into failure details
-// (httpStatusError). Deliberately fixed: a diagnostics capture on the error
-// path, not a delivery unit — executionArgs.MaxDeliveryUnitBytes
-// does not apply here.
+// maxResponseBytes bounds how much of an HTTP error body is retained by
+// httpStatusError. Deliberately fixed: this is a standalone-runtime evidence
+// bound on the error path, not a delivery unit —
+// executionArgs.MaxDeliveryUnitBytes does not apply here.
 const maxResponseBytes = 10 * 1024 * 1024 // 10 MB
 
 // sseMaxLineBytes bounds individual SSE line length to prevent runaway memory
@@ -83,6 +84,8 @@ const maxResponseBytes = 10 * 1024 * 1024 // 10 MB
 // Deliberately fixed: a line-scanner internal guard, not the delivery-unit
 // bound — executionArgs.MaxDeliveryUnitBytes does not apply here.
 const sseMaxLineBytes = 16 * 1024 * 1024
+
+var nextWebSocketReplySession atomic.Uint64
 
 type handle = artifactHandle[any, any]
 
@@ -173,6 +176,18 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
 		return
 	}
+	// A reply route is artifact/configuration authority, not an application
+	// value. Resolve it before waiting for caller input so an unsupported route
+	// is a true pre-dispatch refusal and cannot strand an invocation waiting for
+	// a value that no conforming execution could use.
+	var preparedWSReplyLane *wsReplyLane
+	if driver == nil && (target.Protocol == "ws" || target.Protocol == "wss") && asyncOp.Reply != nil {
+		preparedWSReplyLane, err = resolveWebSocketReplyLane(doc, &asyncOp, target, args.Context)
+		if err != nil {
+			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+			return
+		}
+	}
 	var prepared *preparedInput
 	if asyncOp.Action == "receive" && (driver == nil || channelNeedsOutgoingPayload(ch)) {
 		if args.AcceptsInput != nil && !*args.AcceptsInput {
@@ -234,10 +249,41 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 			return
 		}
 		dialAddress := mergeQuery(address, up.Query)
+		if asyncOp.Reply != nil {
+			replyLane := preparedWSReplyLane
+			if replyLane == nil {
+				h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: "WebSocket reply route was not prepared"})
+				return
+			}
+			var inputMessages, outputMessages []message
+			if asyncOp.Action == "receive" {
+				inputMessages, err = selectedInputMessages(doc, &asyncOp, ch, args.Context)
+				outputMessages = replyGoverningMessages(doc, &asyncOp)
+			} else {
+				inputMessages, err = selectedReplyInputMessages(doc, &asyncOp, replyChannel(doc, &asyncOp), args.Context)
+				outputMessages = governingMessages(doc, &asyncOp, ch)
+			}
+			if err != nil {
+				h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+				return
+			}
+			operationLane := wsReplyLane{Target: target, Address: dialAddress, Headers: up.Headers}
+			inputLane, outputLane := operationLane, *replyLane
+			if asyncOp.Action == "send" {
+				inputLane, outputLane = *replyLane, operationLane
+			}
+			runWSSubscribe(ctx, pool, outputLane.Target, outputLane.Address, outputLane.Headers, doc, ch, &asyncOp, args, h, &wsReplyExchange{
+				InputMessages: inputMessages, OutputMessages: outputMessages,
+				RequireInput: asyncOp.Action == "receive",
+				IsolationKey: "reply-" + strconv.FormatUint(nextWebSocketReplySession.Add(1), 10),
+				Prepared:     prepared, InputLane: inputLane,
+			})
+			return
+		}
 		if asyncOp.Action == "receive" {
 			runWSPublish(ctx, pool, target, dialAddress, up.Headers, doc, ch, &asyncOp, args, h, prepared)
 		} else {
-			runWSSubscribe(ctx, pool, target, dialAddress, up.Headers, doc, ch, &asyncOp, args, h)
+			runWSSubscribe(ctx, pool, target, dialAddress, up.Headers, doc, ch, &asyncOp, args, h, nil)
 		}
 	case "http", "https":
 		if asyncOp.Action == "receive" {
@@ -252,6 +298,69 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 			Message: fmt.Sprintf("protocol %q is not bound by the supported asyncapi revisions (supported: http, https, ws, wss)", target.Protocol),
 		})
 	}
+}
+
+type wsReplyLane struct {
+	Target  resolvedTarget
+	Address string
+	Headers map[string]string
+}
+
+func resolveWebSocketReplyLane(doc *document, operation *asyncOperation, operationTarget resolvedTarget, bindCtx map[string]any) (*wsReplyLane, error) {
+	reply := operation.Reply
+	if reply == nil {
+		return nil, fmt.Errorf("operation has no reply")
+	}
+	if reply.Address != nil && reply.Address.Location != "" {
+		source := "runtime expression"
+		if strings.HasPrefix(reply.Address.Location, "$message.header#") {
+			source = "application header"
+		}
+		return nil, fmt.Errorf("WebSocket reply address uses an %s that the current payload-only session profile cannot resolve", source)
+	}
+	replyCh := replyChannel(doc, operation)
+	if replyCh == nil {
+		return nil, fmt.Errorf("WebSocket reply has no resolved reply channel")
+	}
+	if replyCh.Bindings != nil && replyCh.Bindings.WS != nil {
+		version := replyCh.Bindings.WS.BindingVersion
+		if version != "" && version != "0.1.0" {
+			return nil, fmt.Errorf("reply WebSockets binding version %q is outside the built-in WebSocket driver's 0.1.0 envelope", version)
+		}
+	}
+	replyTarget, err := resolveTarget(doc, replyCh, bindCtx)
+	if err != nil {
+		return nil, err
+	}
+	if (replyTarget.Protocol != "ws" && replyTarget.Protocol != "wss") || replyTarget.Protocol != operationTarget.Protocol || replyTarget.ServerURL != operationTarget.ServerURL {
+		return nil, fmt.Errorf("WebSocket reply channel selects a different protocol or server; cross-target reply sessions are not qualified")
+	}
+	replyName := extractRefName(reply.Channel.Ref)
+	replyAddress, err := resolveAddress(replyCh, replyName, addressConfig{})
+	if err != nil {
+		return nil, err
+	}
+	fields, err := protocolFieldValues(bindCtx)
+	if err != nil {
+		return nil, err
+	}
+	replyUpgrade, err := resolveWSUpgrade(replyCh, replyName, fields.WebSocketQuery, fields.WebSocketHeaders)
+	if err != nil {
+		return nil, err
+	}
+	return &wsReplyLane{Target: replyTarget, Address: mergeQuery(replyAddress, replyUpgrade.Query), Headers: replyUpgrade.Headers}, nil
+}
+
+func equalStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func channelNeedsOutgoingPayload(ch *channel) bool {
@@ -287,16 +396,40 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 	driverDocument := objectMapForDriver(doc)
 	request := DriverRequest{
 		Artifact: append([]byte(nil), doc.raw...), Document: driverDocument,
-		Operation: objectMapForDriver(operation), Channel: objectMapForDriver(ch),
-		Server: objectMapForDriver(target.SecurityServer), Ref: args.Ref, OperationKey: operationKey,
+		Operation: objectMapForDriver(operation),
+		Server:    objectMapForDriver(target.SecurityServer), Ref: args.Ref, OperationKey: operationKey,
 		Action: operation.Action, Protocol: target.Protocol, ServerURL: target.ServerURL,
-		Address: address, Context: args.Context,
+		Context:              args.Context,
 		SecurityAlternatives: driverSecurityAlternatives(doc, operation, target.SecurityServer),
 	}
 	resolveDriverBindingRefs(request.Operation, driverDocument)
-	resolveDriverBindingRefs(request.Channel, driverDocument)
 	resolveDriverBindingRefs(request.Server, driverDocument)
-	var messages []message
+	var inputMessages, outputMessages []message
+	inputChannel, outputChannel := ch, ch
+	inputTarget, outputTarget := target, target
+	inputAddress, outputAddress := address, address
+	var replyTarget resolvedTarget
+	replyAddress := ""
+	if operation.Reply != nil {
+		replyCh := replyChannel(doc, operation)
+		if replyCh != nil {
+			var targetErr error
+			replyTarget, targetErr = resolveTarget(doc, replyCh, args.Context)
+			if targetErr != nil {
+				return DriverRequest{}, targetErr
+			}
+			if operation.Reply.Address == nil || operation.Reply.Address.Location == "" {
+				if extractRefName(operation.Channel.Ref) == extractRefName(operation.Reply.Channel.Ref) {
+					replyAddress = address
+				} else {
+					replyAddress, targetErr = resolveAddress(replyCh, extractRefName(operation.Reply.Channel.Ref), addressConfig{})
+					if targetErr != nil {
+						return DriverRequest{}, targetErr
+					}
+				}
+			}
+		}
+	}
 	if operation.Action == "receive" {
 		selected, err := selectedInputMessages(doc, operation, ch, args.Context)
 		if err != nil {
@@ -306,30 +439,81 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 		if err != nil {
 			return DriverRequest{}, err
 		}
-		messages = selected
-		request.EncodeInput = func(value any) ([]byte, error) {
+		inputMessages = selected
+		request.Input = &DriverInput{DriverDirection: driverDirection(inputChannel, inputTarget, inputAddress, inputMessages, driverDocument)}
+		request.Input.Encode = func(value any) ([]byte, error) {
 			encoded, err := encodeInput(codec, value)
 			return []byte(encoded), err
 		}
+		if operation.Reply != nil {
+			outputMessages = replyGoverningMessages(doc, operation)
+			outputChannel = replyChannel(doc, operation)
+			outputTarget, outputAddress = replyTarget, replyAddress
+		}
 	} else {
-		messages = governingMessages(doc, operation, ch)
-		contentType, err := resolveSubscriptionContentType(doc, messages, args.Context)
+		outputMessages = governingMessages(doc, operation, ch)
+		if operation.Reply != nil {
+			inputChannel = replyChannel(doc, operation)
+			inputTarget, inputAddress = replyTarget, replyAddress
+			selected, err := selectedReplyInputMessages(doc, operation, inputChannel, args.Context)
+			if err != nil {
+				return DriverRequest{}, err
+			}
+			codec, err := resolveInputCodec(doc, selected, args.Context)
+			if err != nil {
+				return DriverRequest{}, err
+			}
+			inputMessages = selected
+			request.Input = &DriverInput{DriverDirection: driverDirection(inputChannel, inputTarget, inputAddress, inputMessages, driverDocument)}
+			request.Input.Encode = func(value any) ([]byte, error) { return encodeInput(codec, value) }
+		}
+	}
+	if len(outputMessages) > 0 {
+		contentType, err := resolveSubscriptionContentType(doc, outputMessages, args.Context)
 		if err != nil {
 			return DriverRequest{}, err
 		}
-		request.DecodeOutput = func(payload []byte) (any, error) {
+		request.Output = &DriverOutput{DriverDirection: driverDirection(outputChannel, outputTarget, outputAddress, outputMessages, driverDocument)}
+		request.Output.Decode = func(payload []byte) (any, error) {
 			if int64(len(payload)) > args.DeliveryUnitLimit() {
 				return nil, fmt.Errorf("delivery unit exceeds configured %d-byte limit", args.DeliveryUnitLimit())
 			}
 			return args.Hooks.DecodeOutput(siteFor(args, target.ServerURL), RawResult{Body: payload}, builtinDecodeFor(contentType))
 		}
 	}
-	request.Messages = make([]map[string]any, len(messages))
-	for i := range messages {
-		request.Messages[i] = objectMapForDriver(messages[i])
-		resolveDriverBindingRefs(request.Messages[i], driverDocument)
-	}
 	return request, nil
+}
+
+func driverDirection(ch *channel, target resolvedTarget, address string, messages []message, document map[string]any) DriverDirection {
+	direction := DriverDirection{
+		Channel: objectMapForDriver(ch), Server: objectMapForDriver(target.SecurityServer),
+		Protocol: target.Protocol, ServerURL: target.ServerURL, Address: address,
+		Messages: make([]map[string]any, len(messages)),
+	}
+	resolveDriverBindingRefs(direction.Channel, document)
+	resolveDriverBindingRefs(direction.Server, document)
+	for i := range messages {
+		direction.Messages[i] = objectMapForDriver(messages[i])
+		resolveDriverBindingRefs(direction.Messages[i], document)
+	}
+	return direction
+}
+
+func replyChannel(doc *document, operation *asyncOperation) *channel {
+	if operation == nil || operation.Reply == nil || operation.Reply.Channel == nil {
+		return nil
+	}
+	if ch, ok := doc.Channels[extractRefName(operation.Reply.Channel.Ref)]; ok {
+		return &ch
+	}
+	return nil
+}
+
+func selectedReplyInputMessages(doc *document, operation *asyncOperation, ch *channel, bindCtx map[string]any) ([]message, error) {
+	copy := *operation
+	copy.Messages = operation.Reply.Messages
+	copy.Reply = nil
+	return selectedInputMessages(doc, &copy, ch, bindCtx)
 }
 
 func resolveDriverBindingRefs(owner map[string]any, document map[string]any) {
@@ -403,9 +587,6 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 		return err
 	}
 	if op.Action == "receive" {
-		if op.Reply != nil {
-			return fmt.Errorf("reply-bearing WebSocket receive operations require request/reply session semantics the built-in WebSocket driver does not implement")
-		}
 		selected, err := selectedInputMessages(doc, op, ch, bindCtx)
 		if err != nil {
 			return err
@@ -420,6 +601,10 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 		if messageType != "text" && messageType != "binary" {
 			return fmt.Errorf("configuration.websocketMessageType must select text or binary for a WebSocket publish")
 		}
+		if op.Reply != nil {
+			_, err = resolveSubscriptionContentType(doc, replyGoverningMessages(doc, op), bindCtx)
+			return err
+		}
 		return nil
 	}
 	if ch != nil {
@@ -429,11 +614,26 @@ func validateCell(doc *document, ch *channel, op *asyncOperation, protocol, bind
 			}
 		}
 	}
-	if op.Reply != nil {
-		return fmt.Errorf("reply-bearing WebSocket send operations require request/reply session semantics the built-in WebSocket driver does not implement")
-	}
 	_, err := resolveSubscriptionContentType(doc, governingMessages(doc, op, ch), bindCtx)
-	return err
+	if err != nil || op.Reply == nil {
+		return err
+	}
+	replyCh := replyChannel(doc, op)
+	selected, err := selectedReplyInputMessages(doc, op, replyCh, bindCtx)
+	if err != nil {
+		return err
+	}
+	if err := validateMessageBindingVersion(selected[0]); err != nil {
+		return err
+	}
+	if _, err := resolveInputCodec(doc, selected, bindCtx); err != nil {
+		return err
+	}
+	messageType, _ := contextConfiguration(bindCtx)["websocketMessageType"].(string)
+	if messageType != "text" && messageType != "binary" {
+		return fmt.Errorf("configuration.websocketMessageType must select text or binary for a WebSocket reply input")
+	}
+	return nil
 }
 
 func validateCredentialDestinations(doc *document, op *asyncOperation, server *server, protocol string, bindCtx map[string]any) error {
@@ -763,6 +963,8 @@ func resolveRequirementList(doc *document, requirements []securityRequirement, s
 			req.Description = scheme.Description
 		}
 		req.Name = securityRequirementName(entry)
+		durable := true
+		req.Durable = &durable
 		out = append(out, req)
 	}
 	return out
@@ -1284,9 +1486,24 @@ func decodeWSFrame(args *executionArgs, site invokeSite, contentType string, fra
 // Subscribe over WebSocket (`send` action): server-streaming, on a pooled socket
 // ---------------------------------------------------------------------------
 
-func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, address string, extraHeaders map[string]string, doc *document, ch *channel, asyncOp *asyncOperation, args *executionArgs, h handle) {
-	_ = h.CloseInput()
-	decodeCT, decodeErr := resolveSubscriptionContentType(doc, governingMessages(doc, asyncOp, ch), args.Context)
+type wsReplyExchange struct {
+	InputMessages  []message
+	OutputMessages []message
+	RequireInput   bool
+	IsolationKey   string
+	Prepared       *preparedInput
+	InputLane      wsReplyLane
+}
+
+func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, address string, extraHeaders map[string]string, doc *document, ch *channel, asyncOp *asyncOperation, args *executionArgs, h handle, exchange *wsReplyExchange) {
+	if exchange == nil {
+		_ = h.CloseInput()
+	}
+	outputMessages := governingMessages(doc, asyncOp, ch)
+	if exchange != nil {
+		outputMessages = exchange.OutputMessages
+	}
+	decodeCT, decodeErr := resolveSubscriptionContentType(doc, outputMessages, args.Context)
 	if decodeErr != nil {
 		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: decodeErr.Error()})
 		return
@@ -1295,8 +1512,12 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 	// The subscription is registered inside acquire (before the reader
 	// starts on a fresh dial) so no early server push can be lost.
 	sub := newWSSubscription()
+	isolationKey := ""
+	if exchange != nil {
+		isolationKey = exchange.IsolationKey
+	}
 	pw, unsubscribe, err := pool.acquire(ctx, target.ServerURL, address, doc, target.SecurityServer, asyncOp, args.Context, extraHeaders,
-		args.DeliveryUnitLimit(), &wsListener{onFrame: sub.push, onClose: sub.close})
+		args.DeliveryUnitLimit(), &wsListener{onFrame: sub.push, onClose: sub.close}, isolationKey)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -1306,6 +1527,75 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 	}
 	defer pw.release()
 	defer unsubscribe()
+	inputPW := pw
+	if exchange != nil && (exchange.InputLane.Target.ServerURL != target.ServerURL || exchange.InputLane.Address != address || !equalStringMap(exchange.InputLane.Headers, extraHeaders)) {
+		inputListener := &wsListener{onClose: func(closeErr error) {
+			if closeErr != nil && ctx.Err() == nil {
+				h.FireError(&ExecutionError{Code: ErrCodeStreamError, Message: closeErr.Error()})
+			}
+		}}
+		var removeInputListener func()
+		inputPW, removeInputListener, err = pool.acquire(
+			ctx, exchange.InputLane.Target.ServerURL, exchange.InputLane.Address, doc,
+			exchange.InputLane.Target.SecurityServer, asyncOp, args.Context, exchange.InputLane.Headers,
+			args.DeliveryUnitLimit(), inputListener, exchange.IsolationKey,
+		)
+		if err != nil {
+			if ctx.Err() == nil {
+				h.FireError(&ExecutionError{Code: ErrCodeConnectFailed, Message: err.Error()})
+			}
+			return
+		}
+		defer inputPW.release()
+		defer removeInputListener()
+	}
+
+	if exchange != nil {
+		codec, codecErr := resolveInputCodec(doc, exchange.InputMessages, args.Context)
+		if codecErr != nil {
+			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: codecErr.Error()})
+			return
+		}
+		go func() {
+			sent := 0
+			for {
+				var value any
+				var readErr error
+				if exchange.Prepared != nil {
+					value = exchange.Prepared.Value
+					exchange.Prepared = nil
+				} else {
+					value, readErr = h.ReadInput(ctx)
+				}
+				if readErr == io.EOF {
+					if exchange.RequireInput && sent == 0 {
+						h.FireError(&ExecutionError{Code: ErrCodeMissingInput, Message: "request/reply invocation requires at least one input message"})
+					}
+					return
+				}
+				if readErr != nil {
+					return
+				}
+				frame, encodeErr := encodeInput(codec, value)
+				if encodeErr != nil {
+					h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: encodeErr.Error()})
+					return
+				}
+				messageType, _ := contextConfiguration(args.Context)["websocketMessageType"].(string)
+				if messageType == "text" && !utf8.Valid(frame) {
+					h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: "WebSocket text message payload is not valid UTF-8"})
+					return
+				}
+				if sendErr := inputPW.sendType(ctx, frame, messageType); sendErr != nil {
+					if ctx.Err() == nil {
+						h.FireError(&ExecutionError{Code: ErrCodeStreamError, Message: sendErr.Error()})
+					}
+					return
+				}
+				sent++
+			}
+		}()
+	}
 
 	// Socket -> outputs. Owns the terminal transition: clean socket close ->
 	// CloseOutput; socket error or backpressure overflow -> ERR_STREAM_ERROR.
@@ -1702,27 +1992,27 @@ func applyCredentialsViaSecuritySchemes(req *http.Request, doc *document, secSrv
 		case "http":
 			switch strings.ToLower(s.Scheme) {
 			case "bearer":
-				if token := contextBearerToken(bindCtx); token != "" {
+				if token := contextBearerTokenFor(bindCtx, named.Name); token != "" {
 					req.Header.Set("Authorization", "Bearer "+token)
 					applied = true
 				}
 			case "basic":
-				if u, p, ok := contextBasicAuth(bindCtx); ok {
+				if u, p, ok := contextBasicAuthFor(bindCtx, named.Name); ok {
 					req.SetBasicAuth(u, p)
 					applied = true
 				}
 			}
 
 		case "httpBearer":
-			if token := contextBearerToken(bindCtx); token != "" {
+			if token := contextBearerTokenFor(bindCtx, named.Name); token != "" {
 				req.Header.Set("Authorization", "Bearer "+token)
 				applied = true
 			}
 
 		case "oauth2":
-			token := contextBearerToken(bindCtx)
+			token := contextAccessTokenFor(bindCtx, named.Name)
 			if token == "" {
-				token = contextString(bindCtx, "accessToken")
+				token = contextBearerTokenFor(bindCtx, named.Name)
 			}
 			if token != "" {
 				req.Header.Set("Authorization", "Bearer "+token)
@@ -1730,7 +2020,7 @@ func applyCredentialsViaSecuritySchemes(req *http.Request, doc *document, secSrv
 			}
 
 		case "userPassword":
-			if u, p, ok := contextBasicAuth(bindCtx); ok {
+			if u, p, ok := contextBasicAuthFor(bindCtx, named.Name); ok {
 				req.SetBasicAuth(u, p)
 				applied = true
 			}

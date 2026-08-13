@@ -124,7 +124,14 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (kafk
 	}
 
 	serverBinding := binding(request.Server, "kafka")
-	channelBinding := binding(request.Channel, "kafka")
+	direction := request.Input
+	if direction == nil && request.Output != nil {
+		direction = &asyncapiclient.DriverInput{DriverDirection: request.Output.DriverDirection}
+	}
+	if direction == nil {
+		return kafkaProfile{}, fmt.Errorf("Kafka request has no invocation direction")
+	}
+	channelBinding := binding(direction.Channel, "kafka")
 	operationBinding := binding(request.Operation, "kafka")
 	serverVersion, err := validateBinding("server", serverBinding)
 	if err != nil {
@@ -150,14 +157,14 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (kafk
 	configuration := kafkaConfiguration(request)
 	topic := stringValue(channelBinding["topic"])
 	if topic == "" {
-		topic = request.Address
+		topic = direction.Address
 	}
 	if err := validateTopic(topic); err != nil {
 		return kafkaProfile{}, err
 	}
 
 	var key []byte
-	for _, message := range request.Messages {
+	for _, message := range direction.Messages {
 		if _, exists := message["headers"]; exists {
 			return kafkaProfile{}, fmt.Errorf("Kafka message headers are outside the payload-only OpenBindings Kafka profile")
 		}
@@ -217,8 +224,8 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (kafk
 }
 
 func publishInputs(ctx context.Context, producer Producer, request asyncapiclient.DriverRequest, session asyncapiclient.DriverSession, profile kafkaProfile) error {
-	if request.EncodeInput == nil {
-		return fmt.Errorf("Kafka publish request has no artifact codec")
+	if request.Input == nil {
+		return fmt.Errorf("Kafka publish request has no artifact input lane")
 	}
 	if err := producer.Connect(ctx); err != nil {
 		return fmt.Errorf("connect Kafka producer: %w", err)
@@ -236,7 +243,7 @@ func publishInputs(ctx context.Context, producer Producer, request asyncapiclien
 			}
 			return err
 		}
-		payload, err := request.EncodeInput(value)
+		payload, err := request.Input.Encode(value)
 		if err != nil {
 			return err
 		}
@@ -252,8 +259,8 @@ func publishInputs(ctx context.Context, producer Producer, request asyncapiclien
 }
 
 func subscribeOutputs(ctx context.Context, consumer Consumer, request asyncapiclient.DriverRequest, session asyncapiclient.DriverSession, profile kafkaProfile) error {
-	if request.DecodeOutput == nil {
-		return fmt.Errorf("Kafka subscription request has no artifact codec")
+	if request.Output == nil {
+		return fmt.Errorf("Kafka subscription request has no artifact output lane")
 	}
 	if err := session.CloseInput(); err != nil {
 		return err
@@ -270,7 +277,7 @@ func subscribeOutputs(ctx context.Context, consumer Consumer, request asyncapicl
 		if message.Null {
 			return fmt.Errorf("Kafka tombstone records are outside the currently qualified payload profile")
 		}
-		value, err := request.DecodeOutput(message.Value)
+		value, err := request.Output.Decode(message.Value)
 		if err != nil {
 			return err
 		}

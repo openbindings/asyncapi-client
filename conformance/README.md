@@ -13,6 +13,7 @@ binding, then tested with a minimal specification-derived fixture and at least
 one held-out artifact when available.
 
 Protocol-driver matrices account separately for supported, excluded, and
-unqualified authority cells. Current matrices cover
+unqualified authority cells. Current matrices cover the built-in
+[`websocket-reply.json`](websocket-reply.json) session profile plus
 [`mqtt-3.1.1.json`](mqtt-3.1.1.json) and [`kafka.json`](kafka.json);
 completing a matrix is not the same as supporting every cell.

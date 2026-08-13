@@ -6,7 +6,8 @@ The OpenBindings AsyncAPI adapter is a thin bridge over this package. It owns:
 - conversion from an OBI source entry and binding ref to `PrepareOptions`;
 - translation between the Core invocation handle and `Execution`;
 - conversion of Core hook/context structures at the package boundary;
-- conversion of standalone prerequisites, errors, metadata, and completion into Core vocabulary.
+- conversion of standalone prerequisites, admitted application failure data,
+  error codes, and lifecycle completion into Core vocabulary.
 
 It does not own document parsing, reference resolution, target selection,
 message encoding, security placement, HTTP/WebSocket dispatch, response
@@ -18,5 +19,5 @@ know about nor generate the document model above it.
 
 Correct application behavior through OpenBindings must never require a caller
 to inspect HTTP status, headers, WebSocket framing, or another protocol-specific
-fact. Raw protocol evidence may be retained only through an explicit diagnostic
-escape hatch.
+fact. Raw protocol evidence remains on this standalone runtime's native surface
+or in protocol-native tooling and does not cross the abstract invocation boundary.

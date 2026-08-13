@@ -1,12 +1,32 @@
 package asyncapiclient
 
+import "strings"
+
 func contextBearerToken(ctx map[string]any) string { return contextString(ctx, "bearerToken") }
+
+func contextNamedCredential(ctx map[string]any, name string) any {
+	if ctx == nil || name == "" {
+		return nil
+	}
+	values, _ := ctx["credentials"].(map[string]any)
+	return values[name]
+}
+
+func contextBearerTokenFor(ctx map[string]any, name string) string {
+	if value, ok := contextNamedCredential(ctx, name).(string); ok && value != "" {
+		return value
+	}
+	return contextBearerToken(ctx)
+}
 
 func contextAPIKeyFor(ctx map[string]any, name string) string {
 	if ctx == nil {
 		return ""
 	}
 	if name != "" {
+		if value, ok := contextNamedCredential(ctx, name).(string); ok && value != "" {
+			return value
+		}
 		if values, ok := ctx["apiKeys"].(map[string]any); ok {
 			if value, ok := values[name].(string); ok && value != "" {
 				return value
@@ -14,6 +34,26 @@ func contextAPIKeyFor(ctx map[string]any, name string) string {
 		}
 	}
 	return contextString(ctx, "apiKey")
+}
+
+func contextBasicAuthFor(ctx map[string]any, name string) (string, string, bool) {
+	if value, ok := contextNamedCredential(ctx, name).(map[string]any); ok {
+		username, _ := value["username"].(string)
+		password, _ := value["password"].(string)
+		if username != "" || password != "" {
+			return username, password, true
+		}
+	}
+	return contextBasicAuth(ctx)
+}
+
+func contextAccessTokenFor(ctx map[string]any, name string) string {
+	if value, ok := contextNamedCredential(ctx, name).(map[string]any); ok {
+		if token, ok := value["accessToken"].(string); ok && token != "" {
+			return token
+		}
+	}
+	return contextString(ctx, "accessToken")
 }
 
 func contextBasicAuth(ctx map[string]any) (string, string, bool) {
@@ -80,7 +120,7 @@ func contextSatisfies(ctx map[string]any, details *Prerequisites) bool {
 		}
 		ok := true
 		for _, requirement := range alternative.Requirements {
-			if !contextSatisfiesRequirement(ctx, requirement) {
+			if !contextSatisfiesRequirement(ctx, requirement, flatRequirementIsUnambiguous(details, requirement)) {
 				ok = false
 				break
 			}
@@ -92,34 +132,95 @@ func contextSatisfies(ctx map[string]any, details *Prerequisites) bool {
 	return false
 }
 
-func contextSatisfiesRequirement(ctx map[string]any, requirement Requirement) bool {
+func flatRequirementIsUnambiguous(details *Prerequisites, requirement Requirement) bool {
+	identities := map[string]struct{}{}
+	unnamed := 0
+	for _, alternative := range details.Alternatives {
+		for _, candidate := range alternative.Requirements {
+			if candidate.Type != requirement.Type {
+				continue
+			}
+			if candidate.Name == "" {
+				unnamed++
+			} else {
+				identities[candidate.Name] = struct{}{}
+			}
+		}
+	}
+	return len(identities)+unnamed == 1
+}
+
+func contextSatisfiesRequirement(ctx map[string]any, requirement Requirement, allowFlatNamedCredential bool) bool {
 	switch requirement.Type {
 	case "auth.bearer":
-		return contextBearerToken(ctx) != ""
+		if value, ok := contextNamedCredential(ctx, requirement.Name).(string); ok && value != "" {
+			return true
+		}
+		return allowFlatNamedCredential && contextBearerToken(ctx) != ""
 	case "auth.apiKey":
-		return contextAPIKeyFor(ctx, requirement.Name) != ""
+		if value, ok := contextNamedCredential(ctx, requirement.Name).(string); ok && value != "" {
+			return true
+		}
+		if requirement.Name != "" {
+			if values, ok := ctx["apiKeys"].(map[string]any); ok {
+				if value, ok := values[requirement.Name].(string); ok && value != "" {
+					return true
+				}
+			}
+		}
+		return allowFlatNamedCredential && contextString(ctx, "apiKey") != ""
 	case "auth.basic":
-		_, _, ok := contextBasicAuth(ctx)
-		return ok
+		_, _, ok := contextBasicAuthFor(ctx, requirement.Name)
+		return ok && (contextNamedCredential(ctx, requirement.Name) != nil || allowFlatNamedCredential)
 	case "auth.oauth2":
-		return contextString(ctx, "accessToken") != "" || contextBearerToken(ctx) != ""
+		named := contextNamedCredential(ctx, requirement.Name)
+		if values, ok := named.(map[string]any); ok {
+			if token, ok := values["accessToken"].(string); ok && token != "" {
+				return true
+			}
+		}
+		return allowFlatNamedCredential && (contextString(ctx, "accessToken") != "" || contextBearerToken(ctx) != "")
 	case "config.value":
 		point, _ := requirement.Extra["point"].(string)
-		key, _ := requirement.Extra["key"].(string)
+		path, pathPresent := requirement.Extra["path"].(string)
 		value, present := contextConfiguration(ctx)[point]
-		if !present {
+		if !present || !pathPresent {
 			return false
 		}
-		if key == "" {
-			return value != nil
-		}
-		if record, ok := value.(map[string]any); ok {
-			candidate, present := record[key]
-			return present && candidate != nil && candidate != ""
-		}
-		return key == point && value != nil && value != ""
+		selected, selectedPresent := configurationValueAt(value, path)
+		return selectedPresent && selected != nil && selected != ""
 	default:
 		value, present := ctx[requirement.Type]
 		return present && value != nil && value != ""
 	}
+}
+
+func configurationValueAt(root any, path string) (any, bool) {
+	if path == "" {
+		return root, true
+	}
+	if !strings.HasPrefix(path, "/") {
+		return nil, false
+	}
+	current := root
+	for _, raw := range strings.Split(path[1:], "/") {
+		for index := 0; index < len(raw); index++ {
+			if raw[index] == '~' && (index+1 >= len(raw) || (raw[index+1] != '0' && raw[index+1] != '1')) {
+				return nil, false
+			}
+			if raw[index] == '~' {
+				index++
+			}
+		}
+		token := strings.ReplaceAll(strings.ReplaceAll(raw, "~1", "/"), "~0", "~")
+		record, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = record[token]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }

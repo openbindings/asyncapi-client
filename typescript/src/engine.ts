@@ -110,17 +110,32 @@ export interface AsyncAPIExecution<I = unknown, O = unknown> {
 export class AsyncAPIExecutionError extends Error {
   readonly code: string;
   readonly details?: unknown;
+  /**
+   * True only when `details` is a deliberately portable caller-owned value.
+   * Protocol-driver evidence does not acquire portable meaning merely by
+   * occupying the `details` field.
+   */
+  readonly detailsPresent: boolean;
   readonly evidence?: unknown;
 
   constructor(
     code: string,
     message: string,
-    options: { cause?: unknown; details?: unknown; evidence?: unknown } = {},
+    options: {
+      cause?: unknown;
+      details?: unknown;
+      detailsPresent?: boolean;
+      evidence?: unknown;
+    } = {},
   ) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "AsyncAPIExecutionError";
     this.code = code;
-    if (options.details !== undefined) this.details = options.details;
+    if (Object.hasOwn(options, "details")) this.details = options.details;
+    this.detailsPresent = options.detailsPresent === true;
+    if (this.detailsPresent && !Object.hasOwn(options, "details")) {
+      throw new TypeError("detailsPresent requires an explicit details value");
+    }
     if (options.evidence !== undefined) this.evidence = options.evidence;
   }
 }
@@ -395,8 +410,8 @@ function toExecutionError(error: unknown): AsyncAPIExecutionError {
   if (error instanceof InvocationError) {
     return new AsyncAPIExecutionError(error.code, error.message, {
       cause: error,
-      details: error.details,
-      evidence: error.diagnostics,
+      ...(Object.hasOwn(error, "details") ? { details: error.details } : {}),
+      ...(Object.hasOwn(error, "diagnostics") ? { evidence: error.diagnostics } : {}),
     });
   }
   return new AsyncAPIExecutionError("RUNTIME_ERROR", errorMessage(error), { cause: error });
@@ -405,7 +420,13 @@ function toExecutionError(error: unknown): AsyncAPIExecutionError {
 function toInternalError(error: unknown): InvocationError {
   if (error instanceof InvocationError) return error;
   if (error instanceof AsyncAPIExecutionError) {
-    return new InvocationError(error.code, error.message, error.details, error.evidence);
+    return new InvocationError(
+      error.code,
+      error.message,
+      error.details,
+      error.evidence,
+      error,
+    );
   }
   return new InvocationError("ERR_RUNTIME", errorMessage(error));
 }

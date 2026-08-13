@@ -159,7 +159,7 @@ func (d *Driver) dispatch(connection *mqttConnection, message paho.Message) {
 	}
 	d.mu.Unlock()
 	for _, subscriber := range subscribers {
-		value, err := subscriber.request.DecodeOutput(append([]byte(nil), message.Payload()...))
+		value, err := subscriber.request.Output.Decode(append([]byte(nil), message.Payload()...))
 		if err == nil {
 			err = subscriber.session.Emit(value)
 		}
@@ -199,6 +199,13 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (mqtt
 	if _, exists := request.Operation["reply"]; exists {
 		return mqttProfile{}, fmt.Errorf("the MQTT 3.1.1 driver does not admit AsyncAPI reply operations")
 	}
+	direction := request.Input
+	if direction == nil && request.Output != nil {
+		direction = &asyncapiclient.DriverInput{DriverDirection: request.Output.DriverDirection}
+	}
+	if direction == nil {
+		return mqttProfile{}, fmt.Errorf("MQTT request has no invocation direction")
+	}
 	version := stringValue(request.Server["protocolVersion"])
 	if version == "" {
 		version = stringValue(mqttConfiguration(request)["protocolVersion"])
@@ -212,7 +219,7 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (mqtt
 
 	serverBinding := binding(request.Server, "mqtt")
 	operationBinding := binding(request.Operation, "mqtt")
-	channelBinding := binding(request.Channel, "mqtt")
+	channelBinding := binding(direction.Channel, "mqtt")
 	if err := validateBindingVersion(serverBinding, "server"); err != nil {
 		return mqttProfile{}, err
 	}
@@ -228,7 +235,7 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (mqtt
 	if len(channelBinding) > 0 {
 		return mqttProfile{}, fmt.Errorf("the AsyncAPI MQTT 0.2.0 channel binding must be empty")
 	}
-	for _, message := range request.Messages {
+	for _, message := range direction.Messages {
 		messageBinding := binding(message, "mqtt")
 		if err := validateBindingVersion(messageBinding, "message"); err != nil {
 			return mqttProfile{}, err
@@ -244,7 +251,7 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (mqtt
 			return mqttProfile{}, fmt.Errorf("MQTT 3.1.1 cannot apply MQTT 5 message-binding fields: %s", strings.Join(mqtt5, ", "))
 		}
 	}
-	if err := validateTopic(request.Address, request.Action); err != nil {
+	if err := validateTopic(direction.Address, request.Action); err != nil {
 		return mqttProfile{}, err
 	}
 
@@ -337,8 +344,8 @@ func clientOptions(request asyncapiclient.DriverRequest, profile mqttProfile, op
 }
 
 func publishInputs(ctx context.Context, client paho.Client, request asyncapiclient.DriverRequest, session asyncapiclient.DriverSession, profile mqttProfile) error {
-	if request.EncodeInput == nil {
-		return fmt.Errorf("MQTT publish request has no artifact codec")
+	if request.Input == nil {
+		return fmt.Errorf("MQTT publish request has no artifact input lane")
 	}
 	count := 0
 	for {
@@ -352,11 +359,11 @@ func publishInputs(ctx context.Context, client paho.Client, request asyncapiclie
 			}
 			return err
 		}
-		payload, err := request.EncodeInput(value)
+		payload, err := request.Input.Encode(value)
 		if err != nil {
 			return err
 		}
-		if err := waitToken(ctx, client.Publish(request.Address, profile.QoS, profile.Retain, payload)); err != nil {
+		if err := waitToken(ctx, client.Publish(request.Input.Address, profile.QoS, profile.Retain, payload)); err != nil {
 			return fmt.Errorf("publish MQTT message: %w", err)
 		}
 		count++
@@ -368,18 +375,18 @@ func publishInputs(ctx context.Context, client paho.Client, request asyncapiclie
 }
 
 func (d *Driver) subscribeOutputs(ctx context.Context, connection *mqttConnection, request asyncapiclient.DriverRequest, session asyncapiclient.DriverSession, profile mqttProfile) error {
-	if request.DecodeOutput == nil {
-		return fmt.Errorf("MQTT subscription request has no artifact codec")
+	if request.Output == nil {
+		return fmt.Errorf("MQTT subscription request has no artifact output lane")
 	}
 	if err := session.CloseInput(); err != nil {
 		return err
 	}
 	subscriber := &mqttSubscriber{request: request, session: session, errors: make(chan error, 1)}
 	d.mu.Lock()
-	set := connection.subscribers[request.Address]
+	set := connection.subscribers[request.Output.Address]
 	if set == nil {
 		set = map[*mqttSubscriber]struct{}{}
-		connection.subscribers[request.Address] = set
+		connection.subscribers[request.Output.Address] = set
 	}
 	set[subscriber] = struct{}{}
 	d.mu.Unlock()
@@ -387,11 +394,11 @@ func (d *Driver) subscribeOutputs(ctx context.Context, connection *mqttConnectio
 		d.mu.Lock()
 		delete(set, subscriber)
 		if len(set) == 0 {
-			delete(connection.subscribers, request.Address)
+			delete(connection.subscribers, request.Output.Address)
 		}
 		d.mu.Unlock()
 	}()
-	if err := waitToken(ctx, connection.client.Subscribe(request.Address, profile.QoS, nil)); err != nil {
+	if err := waitToken(ctx, connection.client.Subscribe(request.Output.Address, profile.QoS, nil)); err != nil {
 		return fmt.Errorf("subscribe MQTT topic: %w", err)
 	}
 	if err := session.SetLeadingMetadata(asyncapiclient.Metadata{"mqtt-subscription": {"ready"}}); err != nil {

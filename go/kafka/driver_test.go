@@ -41,42 +41,42 @@ func TestResolveProfileRefusesUnsupportedCellsBeforeClientConstruction(t *testin
 		{
 			name: "undeclared channel field",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Channel["bindings"].(map[string]any)["kafka"].(map[string]any)["future"] = true
+				request.Output.Channel["bindings"].(map[string]any)["kafka"].(map[string]any)["future"] = true
 			},
 			want: "undeclared fields",
 		},
 		{
 			name: "pre-0.4 topic configuration",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Channel["bindings"].(map[string]any)["kafka"].(map[string]any)["bindingVersion"] = "0.3.0"
+				request.Output.Channel["bindings"].(map[string]any)["kafka"].(map[string]any)["bindingVersion"] = "0.3.0"
 			},
 			want: "predates topicConfiguration",
 		},
 		{
 			name: "Schema Registry framing",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)["schemaIdLocation"] = "header"
+				request.Output.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)["schemaIdLocation"] = "header"
 			},
 			want: "Schema Registry",
 		},
 		{
 			name: "headers",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Messages[0]["headers"] = map[string]any{"type": "object"}
+				request.Output.Messages[0]["headers"] = map[string]any{"type": "object"}
 			},
 			want: "message headers",
 		},
 		{
 			name: "dynamic key",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)["key"] = map[string]any{"type": "string"}
+				request.Output.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)["key"] = map[string]any{"type": "string"}
 			},
 			want: "does not select one value",
 		},
 		{
 			name: "invalid topic",
 			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Channel["bindings"].(map[string]any)["kafka"].(map[string]any)["topic"] = "orders/wild"
+				request.Output.Channel["bindings"].(map[string]any)["kafka"].(map[string]any)["topic"] = "orders/wild"
 			},
 			want: "Kafka topic",
 		},
@@ -98,7 +98,8 @@ func TestDriverDelegatesValuesAndPreservesOutputBeforeFailure(t *testing.T) {
 	driver := New(Options{ClientFactory: factory})
 	publish := profileRequest()
 	publish.Action = "receive"
-	publish.EncodeInput = func(value any) ([]byte, error) { return []byte(value.(string)), nil }
+	publish.Input = &asyncapiclient.DriverInput{DriverDirection: publish.Output.DriverDirection, Encode: func(value any) ([]byte, error) { return []byte(value.(string)), nil }}
+	publish.Output = nil
 	session := newFakeSession("first", "second")
 	if err := driver.Execute(context.Background(), publish, session); err != nil {
 		t.Fatal(err)
@@ -114,7 +115,7 @@ func TestDriverDelegatesValuesAndPreservesOutputBeforeFailure(t *testing.T) {
 	factory.consumer.failure = errors.New("Kafka broker connection lost")
 	subscribe := profileRequest()
 	subscribe.Action = "send"
-	subscribe.DecodeOutput = func(payload []byte) (any, error) { return string(payload), nil }
+	subscribe.Output.Decode = func(payload []byte) (any, error) { return string(payload), nil }
 	output := newFakeSession()
 	err := driver.Execute(context.Background(), subscribe, output)
 	if err == nil || !strings.Contains(err.Error(), "Kafka broker connection lost") {
@@ -155,7 +156,7 @@ func TestResolveProfileCompletesSchemasOnlyFromExplicitConfiguration(t *testing.
 	operation := request.Operation["bindings"].(map[string]any)["kafka"].(map[string]any)
 	operation["clientId"] = map[string]any{"type": "string", "pattern": "^cfg-"}
 	operation["groupId"] = map[string]any{"type": "string", "pattern": "^group-"}
-	message := request.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)
+	message := request.Output.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)
 	message["key"] = map[string]any{"type": "string", "pattern": "^key-"}
 	request.Context = map[string]any{"configuration": map[string]any{"kafka": map[string]any{
 		"clientId": "cfg-client", "groupId": "group-workers", "key": "key-tenant",
@@ -171,21 +172,24 @@ func TestResolveProfileCompletesSchemasOnlyFromExplicitConfiguration(t *testing.
 
 func profileRequest() asyncapiclient.DriverRequest {
 	return asyncapiclient.DriverRequest{
-		Action: "send", ServerURL: "kafka://broker.example.test:9092", Address: "orders/acme",
+		Action: "send", ServerURL: "kafka://broker.example.test:9092",
 		Server: map[string]any{"bindings": map[string]any{"kafka": map[string]any{"bindingVersion": "0.5.0"}}},
-		Channel: map[string]any{"bindings": map[string]any{"kafka": map[string]any{
-			"topic": "orders.v1", "partitions": float64(3), "replicas": float64(1),
-			"topicConfiguration": map[string]any{"cleanup.policy": "delete", "retention.ms": float64(86400000)},
-			"bindingVersion":     "0.5.0",
-		}}},
 		Operation: map[string]any{"bindings": map[string]any{"kafka": map[string]any{
 			"clientId":       map[string]any{"type": "string", "const": "orders-client"},
 			"groupId":        map[string]any{"type": "string", "const": "orders-workers"},
 			"bindingVersion": "0.5.0",
 		}}},
-		Messages: []map[string]any{{"bindings": map[string]any{"kafka": map[string]any{
-			"key": map[string]any{"type": "string", "const": "tenant-a"}, "bindingVersion": "0.5.0",
-		}}}},
+		Output: &asyncapiclient.DriverOutput{DriverDirection: asyncapiclient.DriverDirection{
+			Address: "orders/acme",
+			Channel: map[string]any{"bindings": map[string]any{"kafka": map[string]any{
+				"topic": "orders.v1", "partitions": float64(3), "replicas": float64(1),
+				"topicConfiguration": map[string]any{"cleanup.policy": "delete", "retention.ms": float64(86400000)},
+				"bindingVersion":     "0.5.0",
+			}}},
+			Messages: []map[string]any{{"bindings": map[string]any{"kafka": map[string]any{
+				"key": map[string]any{"type": "string", "const": "tenant-a"}, "bindingVersion": "0.5.0",
+			}}}},
+		}},
 		Context: map[string]any{},
 	}
 }

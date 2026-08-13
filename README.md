@@ -56,7 +56,7 @@ or synthesizing an OBI.
 - Exact AsyncAPI editions 2.0.0–2.6.0, 3.0.0, and 3.1.0 are accepted; other editions fail loudly.
 - `receive` is invoked as a publish interaction; `send` is invoked as a subscription, because the artifact describes the application rather than the caller.
 - Built-in HTTP/HTTPS execution uses the authored HTTP operation-binding method and message/reply declarations.
-- Built-in WebSocket execution preserves ordering, input half-close, cancellation, bounded backpressure, connection sharing, and isolated subscriber failure.
+- Built-in WebSocket execution preserves ordering, input half-close, cancellation, bounded backpressure, connection sharing, and isolated subscriber failure. Reply-bearing operations use isolated full-duplex sessions; both `receive`+reply and `send`+reply are live-qualified, including static reply channels on another endpoint of the same server. Cross-protocol/server replies and runtime-expression reply addresses remain loud exclusions recorded in `conformance/websocket-reply.json`.
 - Additional protocols are installed as drivers. A missing driver is a local pre-dispatch capability error; document inventory remains independent of installed drivers.
 - The optional `@openbindings/asyncapi-mqtt` package and Go `mqtt` subpackage provide the first qualified non-HTTP profile: MQTT 3.1.1 under AsyncAPI MQTT binding versions 0.1.0 and 0.2.0. Their exact admitted and refused cells are recorded in `conformance/mqtt-3.1.1.json`.
 - The optional `@openbindings/asyncapi-kafka` package and Go `kafka` subpackage interpret AsyncAPI Kafka binding versions 0.1.0–0.5.0, delegating wire behavior to Confluent's librdkafka-backed JavaScript client and franz-go. Their exact support boundary is `conformance/kafka.json`.
@@ -66,7 +66,17 @@ or synthesizing an OBI.
 
 The standalone API may expose AsyncAPI, HTTP, WebSocket, and transport facts.
 The OpenBindings adapter translates those facts into protocol-independent
-outputs, errors, metadata, and lifecycle behavior.
+outputs, unsuccessful completion, and lifecycle behavior without projecting
+native metadata.
+
+`AsyncAPIExecutionError.details` is protocol-aware standalone-runtime data.
+It is not portable merely because a driver supplied it. A driver implementing
+an incorporated artifact rule may set `detailsPresent: true` (Go:
+`DetailsPresent`) only for a deliberately admitted JSON-domain
+application-failure value; the flag also distinguishes an absent value from
+explicit JSON null. OpenBindings adapters preserve only that marked value (or
+their own caller-authored abstract error data) and discard ordinary driver
+details and diagnostics.
 
 Go consumers that maintain their own artifact AST can call
 `NormalizeDocument` to share the client's AsyncAPI envelope validation and
