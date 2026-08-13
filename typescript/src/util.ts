@@ -195,14 +195,32 @@ function tagMessageRefs(raw: unknown): void {
       lists.push((reply as Record<string, unknown>)["messages"]);
     }
     for (const list of lists) {
-      if (!Array.isArray(list)) continue;
-      for (const member of list) {
-        if (member == null || typeof member !== "object" || Array.isArray(member)) continue;
-        const ref = (member as Record<string, unknown>)["$ref"];
-        if (typeof ref === "string") {
-          (member as Record<string, unknown>)[MESSAGE_REF_TAG] = ref;
-        }
-      }
+      tagMessageListRefs(list);
+    }
+  }
+
+  // A Reply Object may itself be a Reference Object into components.replies, in
+  // which case the operation's own reply carries no messages at tagging time and
+  // the reusable reply's messages would reach coverage with their declared
+  // pointer already replaced by resolution. Tag those too, so a reply spelled by
+  // reference keeps the same message identity as an inline one.
+  const components = (raw as Record<string, unknown>)["components"];
+  if (components == null || typeof components !== "object" || Array.isArray(components)) return;
+  const replies = (components as Record<string, unknown>)["replies"];
+  if (replies == null || typeof replies !== "object" || Array.isArray(replies)) return;
+  for (const reply of Object.values(replies as Record<string, unknown>)) {
+    if (reply == null || typeof reply !== "object" || Array.isArray(reply)) continue;
+    tagMessageListRefs((reply as Record<string, unknown>)["messages"]);
+  }
+}
+
+function tagMessageListRefs(list: unknown): void {
+  if (!Array.isArray(list)) return;
+  for (const member of list) {
+    if (member == null || typeof member !== "object" || Array.isArray(member)) continue;
+    const ref = (member as Record<string, unknown>)["$ref"];
+    if (typeof ref === "string") {
+      (member as Record<string, unknown>)[MESSAGE_REF_TAG] = ref;
     }
   }
 }
