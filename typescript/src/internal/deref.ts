@@ -58,6 +58,13 @@ export interface DereferenceOptions {
     owner: Record<string, unknown>,
     key: string,
     value: unknown,
+    /**
+     * The key under which `owner` itself sits in its parent, when known.
+     * Position-aware callers need it: inside a map-of-schemas container
+     * (`properties`, `$defs`, ...) every child key is a member NAME, so a
+     * property literally named `enum` must still be traversed.
+     */
+    ownerKey?: string,
   ) => boolean;
 }
 
@@ -371,7 +378,7 @@ export async function dereference<T = unknown>(
     return target;
   }
 
-  async function walkAsync(node: unknown, document: DocumentContext): Promise<unknown> {
+  async function walkAsync(node: unknown, document: DocumentContext, ownerKey?: string): Promise<unknown> {
     if (node == null || typeof node !== "object") return node;
     if (resolvedNodes.has(node)) return resolvedNodes.get(node);
 
@@ -415,11 +422,11 @@ export async function dereference<T = unknown>(
               });
             }
           }
-          const resolved = await walkAsync(merged, document);
+          const resolved = await walkAsync(merged, document, ownerKey);
           resolvedNodes.set(obj, resolved);
           return resolved;
         }
-        const resolved = await walkAsync(target, document);
+        const resolved = await walkAsync(target, document, ownerKey);
         resolvedNodes.set(obj, resolved);
         return resolved;
       }
@@ -429,8 +436,8 @@ export async function dereference<T = unknown>(
 
     resolvedNodes.set(obj, obj);
     for (const key of Object.keys(obj)) {
-      if (shouldTraverseChild?.(obj, key, obj[key]) === false) continue;
-      obj[key] = await walkAsync(obj[key], document);
+      if (shouldTraverseChild?.(obj, key, obj[key], ownerKey) === false) continue;
+      obj[key] = await walkAsync(obj[key], document, key);
     }
     return obj;
   }

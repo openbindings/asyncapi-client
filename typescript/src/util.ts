@@ -20,6 +20,18 @@ import {
 // The u flag makes the class match whole code points, so an astral-plane
 // character replaces as one underscore, not one per surrogate half
 // (Go parity: SanitizeKey's regexp operates on runes).
+/**
+ * Keywords whose map values hold schemas under arbitrary member names. Inside
+ * one, every child key is a member NAME, not a keyword.
+ */
+const SCHEMA_MAP_CONTAINER_KEYS = new Set([
+  "properties",
+  "patternProperties",
+  "definitions",
+  "$defs",
+  "dependentSchemas",
+]);
+
 const NON_KEY_CHARS = /[^a-zA-Z0-9._-]/gu;
 
 /** Replaces non-alphanumeric characters with underscores to produce a valid key. */
@@ -341,9 +353,14 @@ export async function parseAsyncAPIDocument(
       // an enum or example must survive unchanged. Extension values are also
       // owned by their extension vocabulary, not by AsyncAPI's Reference
       // Object rules.
-      shouldTraverseChild: (_owner, key) =>
-        !["const", "default", "enum", "example", "examples"].includes(key)
-        && !key.toLowerCase().startsWith("x-"),
+      // Position-aware: inside a map-of-schemas container every child key is
+      // a member NAME, not a keyword — a property literally named `enum` is
+      // still reference-bearing schema structure (a corpus artifact carried
+      // exactly properties.enum.$ref, which the positionless skip dangled).
+      shouldTraverseChild: (_owner, key, _value, ownerKey) =>
+        (ownerKey !== undefined && SCHEMA_MAP_CONTAINER_KEYS.has(ownerKey))
+        || (!["const", "default", "enum", "example", "examples"].includes(key)
+          && !key.toLowerCase().startsWith("x-")),
       // AsyncAPI 3.0 Reference Objects cannot be extended; siblings are
       // ignored. Preserve only our private identity tags, which are removed
       // from projected operation schemas and exist solely to retain source
