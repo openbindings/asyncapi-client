@@ -16,12 +16,12 @@ import (
 // unambiguous.
 func decodeYAMLObject(data []byte) (map[string]any, error) {
 	var decoded any
-	if err := yaml.Unmarshal(data, &decoded); err != nil {
+	if err := decodeYAMLValue(data, &decoded); err != nil {
 		protected, sentinel, changed := protectBlockScalarLeadingTabs(data)
 		if !changed {
 			return nil, err
 		}
-		if retryErr := yaml.Unmarshal(protected, &decoded); retryErr != nil {
+		if retryErr := decodeYAMLValue(protected, &decoded); retryErr != nil {
 			return nil, err
 		}
 		decoded = restoreProtectedYAMLTabs(decoded, sentinel)
@@ -35,6 +35,47 @@ func decodeYAMLObject(data []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("document root is not an object")
 	}
 	return root, nil
+}
+
+// decodeYAMLValue decodes a YAML document through its node tree so that
+// implicitly resolved timestamps can be retagged as strings before the value is
+// built. Every other YAML semantic (anchors, aliases, merge keys, duplicate-key
+// refusal) still runs through the ordinary decoder.
+func decodeYAMLValue(data []byte, out *any) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	if document.Kind == 0 {
+		// An empty document has no root node to decode. Leave the value nil so
+		// the caller reports it as a non-object root.
+		*out = nil
+		return nil
+	}
+	retagTimestampScalarsAsStrings(&document)
+	return document.Decode(out)
+}
+
+// yaml.v3 implicitly resolves date-like plain scalars to !!timestamp. That type
+// does not exist in YAML 1.2's JSON schema or in AsyncAPI's data model, where
+// info.version is a string. Resolving it and reformatting the resulting
+// time.Time rewrites the artifact's own spelling: an authored "2026-03-01"
+// becomes "2026-03-01T00:00:00Z", inventing a precision the document never
+// declared and disagreeing with the TypeScript runtime on the same bytes.
+// Retagging before decode keeps the source scalar verbatim.
+func retagTimestampScalarsAsStrings(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!timestamp" {
+		node.Tag = "!!str"
+	}
+	// Aliases are not traversed: an alias points back at its anchor, which is
+	// visited at its definition site, and following it would not terminate on a
+	// recursive anchor.
+	for _, child := range node.Content {
+		retagTimestampScalarsAsStrings(child)
+	}
 }
 
 // yaml.v3 rejects a tab when it is the first content character of a block
