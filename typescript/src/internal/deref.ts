@@ -54,6 +54,18 @@ export interface DereferenceOptions {
    * `$ref`-shaped objects inside it. Format processors use this for literal
    * examples, enum members, defaults, and extension values.
    */
+  /**
+   * How fragment-only references in the ENTRY document's own root resource
+   * are handled. "inline" (default) replaces them with their targets.
+   * "preserve" keeps them untouched — the external-composition pre-pass uses
+   * this to mirror the reference semantics of the Go client's artifact
+   * resolver: external targets inline (and, once inside an external or
+   * $id-scoped resource, even its fragment refs inline against THAT
+   * resource), while the primary document's internal structure keeps its
+   * declared references for later, position-aware resolution.
+   */
+  internalRefs?: "inline" | "preserve";
+
   shouldTraverseChild?: (
     owner: Record<string, unknown>,
     key: string,
@@ -185,6 +197,7 @@ export async function dereference<T = unknown>(
   const mergeRefSiblings = options?.mergeRefSiblings;
   const prepareRefTarget = options?.prepareRefTarget;
   const shouldTraverseChild = options?.shouldTraverseChild;
+  const preserveEntryInternalRefs = options?.internalRefs === "preserve";
 
   // The single working tree. Internal refs resolve against THIS clone, never
   // the caller's `doc`: resolving against the original both mutates the
@@ -218,13 +231,25 @@ export async function dereference<T = unknown>(
       parentScopeByNode.set(object, parent);
       let scope = parent;
       if (typeof object.$id === "string") {
-        const resolvedID = resolveURI(parent.baseURI, object.$id);
-        scope = {
-          root: object,
-          baseURI: resolvedID ? withoutFragment(resolvedID) : undefined,
-          anchors: new Map(),
-        };
-        if (scope.baseURI) resourcesByURI.set(scope.baseURI, scope);
+        if (object.$id.startsWith("#")) {
+          // A fragment-only $id is Draft 07's plain-name location identifier
+          // — an anchor within the CURRENT resource, never a new resource
+          // boundary. Treating it as a base makes every sibling reference
+          // resolve against the wrong root (Go twin: scopedDocument's
+          // isDraft07PlainNameID guard).
+          const name = object.$id.slice(1);
+          if (name !== "" && /^[A-Za-z][A-Za-z0-9._:-]*$/.test(name)) {
+            parent.anchors.set(name, object);
+          }
+        } else {
+          const resolvedID = resolveURI(parent.baseURI, object.$id);
+          scope = {
+            root: object,
+            baseURI: resolvedID ? withoutFragment(resolvedID) : undefined,
+            anchors: new Map(),
+          };
+          if (scope.baseURI) resourcesByURI.set(scope.baseURI, scope);
+        }
       }
       scopeByNode.set(object, scope);
       if (typeof object.$anchor === "string") {
@@ -392,6 +417,21 @@ export async function dereference<T = unknown>(
 
     const obj = node as Record<string, unknown>;
     if (typeof obj.$ref === "string") {
+      if (
+        preserveEntryInternalRefs
+        && obj.$ref.startsWith("#")
+        && (scopeByNode.get(obj) ?? document.rootScope) === entryContext.rootScope
+      ) {
+        // Entry-document internal reference under preserve mode: keep the
+        // Reference Object, walking only its other members.
+        resolvedNodes.set(obj, obj);
+        for (const key of Object.keys(obj)) {
+          if (key === "$ref") continue;
+          if (shouldTraverseChild?.(obj, key, obj[key], ownerKey) === false) continue;
+          obj[key] = await walkAsync(obj[key], document, key);
+        }
+        return obj;
+      }
       // Reserve before following the edge so document-root and recursive
       // refs terminate. The reservation is replaced with the actual result
       // once the target (and any siblings) has resolved.

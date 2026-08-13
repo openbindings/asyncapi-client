@@ -14,15 +14,26 @@ export const SUPPORTED_ASYNCAPI_EDITIONS = Object.freeze([
   ...V3_EDITIONS,
 ]);
 
-export function normalizeAsyncAPIEnvelope(
-  source: Record<string, unknown>,
-): Record<string, unknown> {
+/**
+ * The exact-edition gate alone (ASYNC-P-01's discriminator): callable before
+ * any reference resolution so an unsupported edition refuses without
+ * fetching a closure this client will never interpret. Mirrors the Go
+ * pipeline's discriminate -> resolve externals -> normalize order.
+ */
+export function discriminateAsyncAPIEdition(source: Record<string, unknown>): string {
   const edition = source.asyncapi;
   if (typeof edition !== "string" || !SUPPORTED_ASYNCAPI_EDITIONS.includes(edition)) {
     throw new Error(
       `unsupported AsyncAPI version ${JSON.stringify(edition)}: this client accepts exactly ${SUPPORTED_ASYNCAPI_EDITIONS.join(", ")}`,
     );
   }
+  return edition;
+}
+
+export function normalizeAsyncAPIEnvelope(
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const edition = discriminateAsyncAPIEdition(source);
   if (V3_EDITIONS.has(edition)) return source;
   return normalizeV2(source, edition);
 }

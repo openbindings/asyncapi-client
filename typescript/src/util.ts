@@ -11,7 +11,9 @@ import {
   SERVER_NAME_TAG,
 } from "./constants.js";
 import { applyDocumentTraits } from "./traits.js";
+import { normalizeResolvedReferenceUnions } from "./compose.js";
 import {
+  discriminateAsyncAPIEdition,
   normalizeAsyncAPIEnvelope,
   parseV2OperationRef,
   refForNormalizedOperationKey,
@@ -325,6 +327,43 @@ export async function parseAsyncAPIDocument(
   if (declaredVersion === undefined) {
     throw new Error("not a valid AsyncAPI document (missing 'asyncapi' field)");
   }
+  // External-composition pre-pass, mirroring the Go client's artifact
+  // resolver: external references inline BEFORE edition normalization (so a
+  // v2 message declared as an external file ref is keyed by its resolved
+  // name/messageId, not a synthetic position key), and a fragment reference
+  // INSIDE an inlined external resource resolves against that resource's own
+  // root rather than dangling in the entry document's context. The entry
+  // document's internal references are preserved untouched for the ordinary
+  // position-aware resolution below. Skipped entirely when no external-form
+  // reference exists, which is the common case.
+  discriminateAsyncAPIEdition(raw as Record<string, unknown>);
+  if (containsExternalRef(raw)) {
+    // Tag source identity BEFORE inlining: the original reference spellings
+    // are the artifact's deepest declared addresses, and coverage reports
+    // them. The dereferencer's sibling merge carries these private tags onto
+    // each inlined target.
+    tagMessageRefs(raw);
+    raw = await dereference<Record<string, unknown>>(
+      raw as Record<string, unknown>,
+      {
+        baseUrl: location,
+        fetch: fetchFn ?? fetch,
+        parse: parseDocumentText,
+        signal: options?.signal,
+        internalRefs: "preserve",
+        // Fetch and parse failures are document-level errors (thrown); a
+        // missing fragment inside a fetched document is preserved for
+        // per-operation eligibility and coverage, exactly as in Go.
+        allowUnresolved: true,
+        shouldTraverseChild: literalAwareTraversal,
+      },
+    );
+    // AsyncAPI requires several positions to BE Reference Objects; re-hoist
+    // what inlining flattened, exactly as the Go client does (the synthetic
+    // key spellings must stay identical between the two implementations).
+    normalizeResolvedReferenceUnions(raw as Record<string, unknown>);
+  }
+
   raw = normalizeAsyncAPIEnvelope(raw as Record<string, unknown>);
 
   validateRawFixedFields(raw as Record<string, unknown>);
@@ -353,14 +392,7 @@ export async function parseAsyncAPIDocument(
       // an enum or example must survive unchanged. Extension values are also
       // owned by their extension vocabulary, not by AsyncAPI's Reference
       // Object rules.
-      // Position-aware: inside a map-of-schemas container every child key is
-      // a member NAME, not a keyword — a property literally named `enum` is
-      // still reference-bearing schema structure (a corpus artifact carried
-      // exactly properties.enum.$ref, which the positionless skip dangled).
-      shouldTraverseChild: (_owner, key, _value, ownerKey) =>
-        (ownerKey !== undefined && SCHEMA_MAP_CONTAINER_KEYS.has(ownerKey))
-        || (!["const", "default", "enum", "example", "examples"].includes(key)
-          && !key.toLowerCase().startsWith("x-")),
+      shouldTraverseChild: literalAwareTraversal,
       // AsyncAPI 3.0 Reference Objects cannot be extended; siblings are
       // ignored. Preserve only our private identity tags, which are removed
       // from projected operation schemas and exist solely to retain source
@@ -397,6 +429,44 @@ export async function parseAsyncAPIDocument(
 }
 
 /** Parse JSON-looking documents as strict JSON and YAML as YAML 1.2's JSON schema. */
+/**
+ * Position-aware traversal filter shared by the external-composition
+ * pre-pass and the ordinary dereference: literal-value keys (`const`,
+ * `default`, `enum`, `example`, `examples`) and extension values carry
+ * application data, not reference-bearing structure — EXCEPT inside a
+ * map-of-schemas container, where every child key is a member NAME, not a
+ * keyword (a corpus artifact carried exactly `properties.enum.$ref`, which a
+ * positionless skip leaves dangling).
+ */
+function literalAwareTraversal(
+  _owner: Record<string, unknown>,
+  key: string,
+  _value: unknown,
+  ownerKey?: string,
+): boolean {
+  return (
+    (ownerKey !== undefined && SCHEMA_MAP_CONTAINER_KEYS.has(ownerKey))
+    || (!["const", "default", "enum", "example", "examples"].includes(key)
+      && !key.toLowerCase().startsWith("x-"))
+  );
+}
+
+/**
+ * Whether any external-form `$ref` (one with a non-fragment part) exists,
+ * outside literal-value positions. Gates the external-composition pre-pass.
+ */
+function containsExternalRef(value: unknown, ownerKey?: string): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((child) => containsExternalRef(child, ownerKey));
+  const object = value as Record<string, unknown>;
+  if (typeof object.$ref === "string" && !object.$ref.startsWith("#")) return true;
+  for (const [key, child] of Object.entries(object)) {
+    if (!literalAwareTraversal(object, key, child, ownerKey)) continue;
+    if (containsExternalRef(child, key)) return true;
+  }
+  return false;
+}
+
 function parseDocumentText(text: string): unknown {
   const normalized = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const first = normalized.trimStart()[0];
