@@ -189,7 +189,32 @@ function tagChannelMessageNames(raw: unknown): void {
 /** Retains the source spelling of operation and reply message references. */
 function tagMessageRefs(raw: unknown): void {
   if (raw == null || typeof raw !== "object") return;
-  const operations = (raw as Record<string, unknown>)["operations"];
+  // An operation may be declared inline in the operations map OR in
+  // components.operations and referenced from the map; both spellings carry
+  // taggable message references (the reply twin of this rule lives below,
+  // and the same lesson applied: a form the walk does not visit loses its
+  // declared identity silently).
+  const owners: unknown[] = [(raw as Record<string, unknown>)["operations"]];
+  const components = (raw as Record<string, unknown>)["components"];
+  if (components != null && typeof components === "object" && !Array.isArray(components)) {
+    owners.push((components as Record<string, unknown>)["operations"]);
+  }
+  for (const operations of owners) {
+    tagOperationsMessageRefs(operations);
+  }
+  const componentsReplies =
+    components != null && typeof components === "object" && !Array.isArray(components)
+      ? (components as Record<string, unknown>)["replies"]
+      : undefined;
+  if (componentsReplies != null && typeof componentsReplies === "object" && !Array.isArray(componentsReplies)) {
+    for (const reply of Object.values(componentsReplies as Record<string, unknown>)) {
+      if (reply == null || typeof reply !== "object" || Array.isArray(reply)) continue;
+      tagMessageListRefs((reply as Record<string, unknown>)["messages"]);
+    }
+  }
+}
+
+function tagOperationsMessageRefs(operations: unknown): void {
   if (operations == null || typeof operations !== "object" || Array.isArray(operations)) return;
   for (const operation of Object.values(operations as Record<string, unknown>)) {
     if (operation == null || typeof operation !== "object" || Array.isArray(operation)) continue;
@@ -211,20 +236,6 @@ function tagMessageRefs(raw: unknown): void {
     for (const list of lists) {
       tagMessageListRefs(list);
     }
-  }
-
-  // A Reply Object may itself be a Reference Object into components.replies, in
-  // which case the operation's own reply carries no messages at tagging time and
-  // the reusable reply's messages would reach coverage with their declared
-  // pointer already replaced by resolution. Tag those too, so a reply spelled by
-  // reference keeps the same message identity as an inline one.
-  const components = (raw as Record<string, unknown>)["components"];
-  if (components == null || typeof components !== "object" || Array.isArray(components)) return;
-  const replies = (components as Record<string, unknown>)["replies"];
-  if (replies == null || typeof replies !== "object" || Array.isArray(replies)) return;
-  for (const reply of Object.values(replies as Record<string, unknown>)) {
-    if (reply == null || typeof reply !== "object" || Array.isArray(reply)) continue;
-    tagMessageListRefs((reply as Record<string, unknown>)["messages"]);
   }
 }
 
