@@ -436,7 +436,30 @@ export async function parseAsyncAPIDocument(
     throw new Error("not a valid AsyncAPI document (info.title and info.version are required strings)");
   }
 
-  return applyDocumentTraits(resolved);
+  const parsed = applyDocumentTraits(resolved);
+  // Retain the raw artifact tree beside the resolved document. The shared
+  // dereferencer works on its own clone, so `raw` still carries the
+  // artifact's literal internal `$ref` spellings (post external composition
+  // and edition normalization, pre trait merge). Consumers that must derive
+  // schemas with the artifact's own reference identities — the OpenBindings
+  // synthesis boundary, whose Go twin resolves against exactly this form
+  // (resolve_refs.go) — read it back via rawParsedDocument.
+  rawDocumentByParsed.set(parsed as unknown as object, raw as Record<string, unknown>);
+  return parsed;
+}
+
+const rawDocumentByParsed = new WeakMap<object, Record<string, unknown>>();
+
+/**
+ * Returns the retained raw (pre-dereference) document tree for a document
+ * produced by {@link parseAsyncAPIDocument} in this process, or undefined
+ * for any other object. The tree is edition-normalized and carries the
+ * loader's private x-ob-asyncapi-* identity tags, but its internal `$ref`
+ * pointers are the artifact's own literal spellings and traits are NOT yet
+ * merged.
+ */
+export function rawParsedDocument(document: AsyncAPIDocument): Record<string, unknown> | undefined {
+  return rawDocumentByParsed.get(document as unknown as object);
 }
 
 /** Parse JSON-looking documents as strict JSON and YAML as YAML 1.2's JSON schema. */

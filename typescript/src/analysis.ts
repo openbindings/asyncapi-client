@@ -3,6 +3,7 @@ export {
   operationRef,
   parseAsyncAPIDocument,
   parseRef,
+  rawParsedDocument,
   validateDocumentAddress,
 } from "./util.js";
 export {
