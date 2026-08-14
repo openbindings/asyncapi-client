@@ -32,11 +32,14 @@ export interface PooledWS {
   /** The underlying WebSocket. */
   ws: WebSocket;
   /**
-   * Add a raw-frame listener. A binary frame that is not valid UTF-8 is
-   * delivered as decodeError rather than silently replacement-decoded.
-   * Returns a removal function.
+   * Add a raw-frame listener. A text frame arrives as a string, a binary
+   * frame as its exact octets (Uint8Array) — the pool never coerces bytes
+   * to text; the decode site owns the declared-content-type judgment.
+   * frameError is reserved for a platform violation (a binary message not
+   * exposed as an ArrayBuffer despite binaryType). Returns a removal
+   * function.
    */
-  onMessage(handler: (data: string, decodeError?: Error) => void): () => void;
+  onMessage(handler: (data: string | Uint8Array, frameError?: Error) => void): () => void;
   /**
    * Add a close listener; called with an Error for socket errors and with
    * undefined for a clean close. Returns a removal function.
@@ -91,11 +94,11 @@ interface PoolEntry {
   ws: WebSocket;
   refCount: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
-  messageHandlers: Set<(data: string, decodeError?: Error) => void>;
+  messageHandlers: Set<(data: string | Uint8Array, frameError?: Error) => void>;
   closeHandlers: Set<(err?: Error) => void>;
   ready: Promise<void>;
   key: string;
-  pendingMessages: Array<{ data: string; decodeError?: Error }>;
+  pendingMessages: Array<{ data: string | Uint8Array; frameError?: Error }>;
   captureInitialMessages: boolean;
 }
 
@@ -205,12 +208,12 @@ export class WSPool {
     // Node implementations.
     ws.binaryType = "arraybuffer";
 
-    const messageHandlers = new Set<(data: string, decodeError?: Error) => void>();
+    const messageHandlers = new Set<(data: string | Uint8Array, frameError?: Error) => void>();
     const closeHandlers = new Set<(err?: Error) => void>();
 
     ws.addEventListener("message", (ev) => {
       try {
-        const data = strictUTF8Frame(ev.data);
+        const data = rawFrame(ev.data);
         if (captureInitialMessages && entry.refCount === 0) {
           entry.pendingMessages.push({ data });
         } else {
@@ -219,7 +222,7 @@ export class WSPool {
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
         if (captureInitialMessages && entry.refCount === 0) {
-          entry.pendingMessages.push({ data: "", decodeError: err });
+          entry.pendingMessages.push({ data: "", frameError: err });
         } else {
           for (const handler of messageHandlers) handler("", err);
         }
@@ -279,10 +282,10 @@ export class WSPool {
     return {
       ws: entry.ws,
 
-      onMessage(handler: (data: string, decodeError?: Error) => void): () => void {
+      onMessage(handler: (data: string | Uint8Array, frameError?: Error) => void): () => void {
         entry.messageHandlers.add(handler);
         const pending = entry.pendingMessages.splice(0);
-        for (const message of pending) handler(message.data, message.decodeError);
+        for (const message of pending) handler(message.data, message.frameError);
         return () => {
           entry.messageHandlers.delete(handler);
         };
@@ -334,23 +337,20 @@ export class WSPool {
  * carry JSON/text bytes, but the current value profile has no opaque bytes value, so they
  * must be strict UTF-8 rather than implementation stringification.
  */
-function strictUTF8Frame(data: unknown): string {
+/**
+ * Normalizes one incoming frame: a text frame stays a string; a binary
+ * frame becomes its exact octets, COPIED out of the event's buffer (the
+ * frames are buffered past this callback, and the runtime may reuse the
+ * underlying memory). No UTF-8 judgment happens here — whether bytes are
+ * text is the DECLARED content type's call, made at the decode site.
+ */
+function rawFrame(data: unknown): string | Uint8Array {
   if (typeof data === "string") return data;
-
-  let bytes: Uint8Array;
-  if (data instanceof ArrayBuffer) {
-    bytes = new Uint8Array(data);
-  } else if (ArrayBuffer.isView(data)) {
-    bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  } else {
-    throw new Error("WebSocket binary message was not exposed as an ArrayBuffer");
+  if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
   }
-
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    throw new Error("WebSocket message payload is not valid UTF-8");
-  }
+  throw new Error("WebSocket binary message was not exposed as an ArrayBuffer");
 }
 
 // ---------------------------------------------------------------------------

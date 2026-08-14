@@ -1586,26 +1586,17 @@ async function runWSSubscribe(
     return;
   }
 
-  // The Avro correspondence's binary wire over WebSocket is unqualified in
-  // this build: the frame pool delivers incoming frames as text, which
-  // cannot carry Avro binary octets faithfully. Refused pre-dial (the
-  // codec-capability rule) — a JSON-family declaration (the Avro-JSON
-  // wire) proceeds through the ordinary lane.
-  if (!isJSONContentType(wsContentType)) {
-    let wsAvro: AvroBinaryCodec | undefined;
-    try {
-      wsAvro = AvroBinaryCodec.resolve(exchange?.outputMessages ?? governingMessages(asyncOp, ch), args.context);
-    } catch (e: unknown) {
-      h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
-      return;
-    }
-    if (wsAvro !== undefined) {
-      h.fireError(new InvocationError(
-        ERR_REFUSED,
-        "the governing messages declare the Avro correspondence with a binary wire; this build's WebSocket lane delivers frames as text and has no qualified Avro binary carriage",
-      ));
-      return;
-    }
+  // The output-side Avro codec resolves BEFORE any socket is dialed: an
+  // unqualifiable declaration (invalid schema, ambiguous candidates, bad
+  // framing configuration) refuses with the never-dispatched guarantee.
+  // The pool delivers binary frames as exact octets, so the qualified
+  // codec carries the Avro binary wire over WebSocket.
+  let wsAvro: AvroBinaryCodec | undefined;
+  try {
+    wsAvro = AvroBinaryCodec.resolve(exchange?.outputMessages ?? governingMessages(asyncOp, ch), args.context);
+  } catch (e: unknown) {
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
+    return;
   }
 
   const material = wsUpgradeMaterial(target, dialAddress, asyncOp, wsHeaders, args.context);
@@ -1664,7 +1655,7 @@ async function runWSSubscribe(
   // message) are consumer configuration riding this duplex cell as an
   // ordinary input frame, never a built-in.
 
-  const frames: string[] = [];
+  const frames: (string | Uint8Array)[] = [];
   // Parallel to `frames`: the byte length of each still-buffered frame, so
   // the running bufferedBytes total can be decremented in the output pump
   // without re-encoding the frame just to measure it again.
@@ -1689,14 +1680,14 @@ async function runWSSubscribe(
   // never tears down the shared pooled socket under sibling subscriptions.
   const maxUnitBytes = resolveDeliveryUnitLimit(args);
 
-  const removeMsg = pooled.onMessage((data, decodeError) => {
+  const removeMsg = pooled.onMessage((data, frameError) => {
     if (overflowed || frameDecodeError) return;
-    if (decodeError) {
-      frameDecodeError = decodeError;
+    if (frameError) {
+      frameDecodeError = frameError;
       notify();
       return;
     }
-    const frameBytes = byteEncoder.encode(data).length;
+    const frameBytes = typeof data === "string" ? byteEncoder.encode(data).length : data.byteLength;
     if (frameBytes > maxUnitBytes) {
       // Refuse loudly: mark terminal (the output pump drains what was
       // already buffered, then fails the stream) and drop this and every
@@ -1760,8 +1751,10 @@ async function runWSSubscribe(
           out = await decodeThroughHooks(
             args.hooks,
             wsSite,
-            { status: null, body: frame, meta: {} },
-            builtinDecodeFor(wsContentType),
+            typeof frame === "string"
+              ? { status: null, body: frame, meta: {} }
+              : { status: null, body: "", bodyBytes: frame, meta: {} },
+            builtinDecodeFor(wsContentType, wsAvro),
           );
         } catch (e: unknown) {
           // A decode error mid-stream is terminal; already-emitted
@@ -2051,10 +2044,25 @@ export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): O
       if (octets.byteLength === 0) return null;
       return encodeBase64(octets);
     }
-    if (raw.body.length === 0) return null;
+    // A textual lane over a byte-delivered frame (a WS binary frame, a
+    // driver payload) decodes strictly here: whether bytes are text is the
+    // DECLARED content type's judgment, and a frame that fails it is a
+    // lying producer — ERR_RESPONSE_ERROR, matching the Go builtin.
+    let body = raw.body;
+    if (raw.bodyBytes !== undefined) {
+      try {
+        body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw.bodyBytes);
+      } catch {
+        throw new InvocationError(
+          ERR_RESPONSE_ERROR,
+          `message declares ${JSON.stringify(contentType)} but the payload is not valid UTF-8`,
+        );
+      }
+    }
+    if (body.length === 0) return null;
     if (isJSON) {
       try {
-        return JSON.parse(raw.body);
+        return JSON.parse(body);
       } catch (e: unknown) {
         throw new InvocationError(
           ERR_RESPONSE_ERROR,
@@ -2062,13 +2070,13 @@ export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): O
         );
       }
     }
-    if (!isWellFormedUnicode(raw.body)) {
+    if (!isWellFormedUnicode(body)) {
       throw new InvocationError(
         ERR_RESPONSE_ERROR,
         `message declares ${JSON.stringify(contentType)} but the payload is not valid UTF-8`,
       );
     }
-    return raw.body;
+    return body;
   };
 }
 

@@ -7,8 +7,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestIsAvroSchemaFormat(t *testing.T) {
@@ -206,5 +210,57 @@ func TestClientCarriesAvroJSONMediaThroughTheJSONLane(t *testing.T) {
 	}
 	if payload["id"] != float64(7) {
 		t.Fatalf("wire payload = %#v", payload)
+	}
+}
+
+// The Avro binary wire over WebSocket (TS twin: avro.test.ts): binary
+// frames carry the correspondence across a live socket — logical value
+// out, exact Avro binary octets on the wire, logical value back.
+// (Wire bytes hand-derived: Record{id:long}=7 → 0x0E; =8 → 0x10.)
+func TestClientAvroBinaryOverWebSocket(t *testing.T) {
+	var seenWire []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		kind, payload, err := conn.Read(r.Context())
+		if err != nil || kind != websocket.MessageBinary {
+			return
+		}
+		seenWire = payload
+		_ = conn.Write(r.Context(), websocket.MessageBinary, []byte{0x10})
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+
+	doc := string(avroArtifact("avro/binary", true))
+	doc = strings.Replace(doc, `"host":"api.example.test","protocol":"https"`, `"host":"`+strings.TrimPrefix(server.URL, "http://")+`","protocol":"ws"`, 1)
+	doc = strings.Replace(doc, `"bindings":{"http":{"method":"POST"}},`, "", 1)
+	doc = strings.Replace(doc, `"reply":{"messages":`, `"reply":{"channel":{"$ref":"#/channels/records"},"messages":`, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Load(ctx, Source{Content: []byte(doc)}, LoadOptions{
+		Context: map[string]any{"configuration": map[string]any{"websocketMessageType": "binary"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	events, err := client.Publish(ctx, "store", map[string]any{"id": 7}, InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(seenWire, avroWireID7) {
+		t.Fatalf("wire = %#v, want %#v", seenWire, avroWireID7)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	value, _ := events[0].Value.(map[string]any)
+	if value["id"] != float64(8) {
+		t.Fatalf("decoded value = %#v", events[0].Value)
 	}
 }

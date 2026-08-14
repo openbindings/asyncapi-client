@@ -162,3 +162,49 @@ describe("the named Avro correspondence at invocation", () => {
     }
   });
 });
+
+// The Avro binary wire over WebSocket: the pool delivers binary frames as
+// exact octets, so the qualified codec carries the correspondence across a
+// live socket — logical value out, Avro binary on the wire, logical value
+// back. (Wire bytes hand-derived: Record{id:long}=7 → 0x0E; =8 → 0x10.)
+describe("the Avro correspondence over WebSocket", () => {
+  it("round-trips logical values as Avro binary frames", async () => {
+    const { createServer } = await import("node:http");
+    const { WebSocket: NodeWebSocket, WebSocketServer } = await import("ws");
+    const httpServer = createServer();
+    const wsServer = new WebSocketServer({ server: httpServer });
+    let seenWire: Uint8Array | undefined;
+    wsServer.on("connection", (socket) => {
+      socket.on("message", (data, isBinary) => {
+        if (!isBinary || !(data instanceof Buffer)) {
+          socket.close(1011);
+          return;
+        }
+        seenWire = new Uint8Array(data);
+        socket.send(new Uint8Array([0x10]), { binary: true });
+        socket.close(1000);
+      });
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const bound = httpServer.address();
+    if (!bound || typeof bound === "string") throw new Error("test server did not bind TCP");
+    const previous = globalThis.WebSocket;
+    globalThis.WebSocket = NodeWebSocket as unknown as typeof WebSocket;
+    const document = avroDocument("avro/binary", true) as any;
+    document.servers.production = { host: `127.0.0.1:${bound.port}`, protocol: "ws" };
+    delete document.operations.store.bindings;
+    document.operations.store.reply.channel = { $ref: "#/channels/records" };
+    const client = await AsyncAPIClient.load(document, {
+      context: { configuration: { websocketMessageType: "binary" } },
+    });
+    try {
+      await expect(client.publish("store", { id: 7 })).resolves.toEqual([{ id: 8 }]);
+      expect(seenWire).toEqual(AVRO_WIRE_ID_7);
+    } finally {
+      client.close();
+      globalThis.WebSocket = previous;
+      await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    }
+  });
+});
