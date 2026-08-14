@@ -373,7 +373,8 @@ func requiredCodecLane(bindCtx map[string]any, point string) (inputCodec, error)
 	}
 }
 
-func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[string]any) (string, error) {
+func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[string]any, headersCarried ...bool) (string, error) {
+	carried := len(headersCarried) > 0 && headersCarried[0]
 	if len(msgs) == 0 {
 		return "", fmt.Errorf("operation has no resolved output message declaration")
 	}
@@ -385,11 +386,11 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 		if err := validateMessageBindingVersion(m); err != nil {
 			return "", err
 		}
-		if m.Headers != nil {
-			// Subscription lanes in this build (SSE events, raw WebSocket
-			// frames, driver protocols) have no native header carriage; a
-			// headers-declaring output refuses per cell (§9.2), never a
-			// silent drop.
+		if m.Headers != nil && !carried {
+			// Header carriage is per protocol cell (§9.2): a lane without
+			// native carriage (SSE events, raw WebSocket frames, a driver
+			// that does not declare HeaderCarriage) refuses a
+			// headers-declaring output — never a silent drop.
 			return "", fmt.Errorf("the output message declares application headers; this build has no header carriage for the subscription's protocol cell")
 		}
 		ct := m.ContentType

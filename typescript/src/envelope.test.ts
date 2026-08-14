@@ -133,3 +133,90 @@ describe("reply headers projection", () => {
     }
   });
 });
+
+// The driver-seam headers channel (Go twin:
+// TestKafkaCarriesRecordHeadersBothDirections): a driver declaring
+// carriesMessageHeaders receives each publish value as a wire unit —
+// payload octets plus sorted application-header pairs — and its received
+// units project declared headers into the output envelope.
+describe("driver-seam header carriage", () => {
+  const artifact = (action: string) => ({
+    asyncapi: "3.0.0",
+    info: { title: "Record headers", version: "1" },
+    servers: { broker: { host: "broker.example:9092", protocol: "kafka" } },
+    channels: {
+      orders: {
+        address: "orders.v1",
+        messages: {
+          Order: {
+            contentType: "application/json",
+            payload: { type: "object" },
+            headers: { type: "object", properties: { traceId: { type: "string" }, attempt: { type: "integer" } } },
+          },
+        },
+      },
+    },
+    operations: {
+      op: {
+        action,
+        channel: { $ref: "#/channels/orders" },
+        messages: [{ $ref: "#/channels/orders/messages/Order" }],
+      },
+    },
+  });
+
+  it("carries publish headers as unit pairs and projects received units", async () => {
+    const sent: Array<{ payload: string; headers: Record<string, string> }> = [];
+    const decoder = new TextDecoder();
+    const driver = {
+      protocols: ["kafka"],
+      carriesMessageHeaders: true,
+      async execute(request: any, session: any) {
+        if (request.action === "receive") {
+          for await (const value of session.inputs) {
+            const unit = await request.input.encodeUnit(value);
+            const headers: Record<string, string> = {};
+            for (const pair of unit.headers) headers[pair.key] = decoder.decode(pair.value);
+            sent.push({ payload: decoder.decode(unit.payload), headers });
+          }
+          return;
+        }
+        await session.closeInput();
+        const encoder = new TextEncoder();
+        await session.emit(await request.output.decodeUnit({
+          payload: encoder.encode(JSON.stringify({ id: 9 })),
+          headers: [
+            { key: "traceId", value: encoder.encode("t-9") },
+            { key: "attempt", value: encoder.encode("5") },
+            { key: "x-infra", value: encoder.encode("never-projected") },
+          ],
+        }));
+        session.complete();
+      },
+    };
+
+    const publisher = await AsyncAPIClient.load(artifact("receive"), { drivers: [driver] });
+    try {
+      await expect(publisher.publish("op", {
+        payload: { id: 4 },
+        headers: { traceId: "t-7", attempt: 2 },
+      })).resolves.toEqual([]);
+    } finally {
+      publisher.close();
+    }
+    expect(sent).toEqual([{ payload: '{"id":4}', headers: { traceId: "t-7", attempt: "2" } }]);
+
+    const subscriber = await AsyncAPIClient.load(artifact("send"), { drivers: [driver] });
+    try {
+      const execution = await subscriber.start("op");
+      const outputs: unknown[] = [];
+      for await (const event of execution.events) outputs.push(event.value);
+      await execution.completed;
+      expect(outputs).toEqual([
+        { payload: { id: 9 }, headers: { traceId: "t-9", attempt: 5 } },
+      ]);
+    } finally {
+      subscriber.close();
+    }
+  });
+});

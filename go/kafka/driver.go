@@ -48,7 +48,7 @@ type Client interface {
 
 type Producer interface {
 	Connect(context.Context) error
-	Send(context.Context, string, []byte, []byte) error
+	Send(context.Context, string, []byte, []byte, []asyncapiclient.DriverHeader) error
 	Disconnect()
 }
 
@@ -58,9 +58,10 @@ type ConsumerOptions struct {
 }
 
 type ConsumerMessage struct {
-	Value []byte
-	Key   []byte
-	Null  bool
+	Value   []byte
+	Key     []byte
+	Null    bool
+	Headers []asyncapiclient.DriverHeader
 }
 
 type Consumer interface {
@@ -75,6 +76,11 @@ type Driver struct {
 }
 
 func New(options Options) *Driver { return &Driver{options: options} }
+
+// CarriesMessageHeaders declares the Kafka cell's native per-message
+// header carriage (record headers): the routed envelope's application
+// headers ride the unit seam (§9.2 per-cell capability).
+func (d *Driver) CarriesMessageHeaders() bool { return true }
 
 func (d *Driver) Protocols() []string {
 	if len(d.options.Protocols) > 0 {
@@ -165,9 +171,9 @@ func resolveProfile(request asyncapiclient.DriverRequest, options Options) (kafk
 
 	var key []byte
 	for _, message := range direction.Messages {
-		if _, exists := message["headers"]; exists {
-			return kafkaProfile{}, fmt.Errorf("Kafka message headers are outside the payload-only OpenBindings Kafka profile")
-		}
+		// Declared Message headers ride the routed envelope through the
+		// unit seam as Kafka record headers (§9.2 per-cell capability,
+		// qualified by this driver) — no longer a profile exclusion.
 		messageBinding := binding(message, "kafka")
 		version, err := validateBinding("message", messageBinding)
 		if err != nil {
@@ -243,11 +249,11 @@ func publishInputs(ctx context.Context, producer Producer, request asyncapiclien
 			}
 			return err
 		}
-		payload, err := request.Input.Encode(value)
+		unit, err := encodeUnit(request.Input, value)
 		if err != nil {
 			return err
 		}
-		if err := producer.Send(ctx, profile.Topic, profile.Key, payload); err != nil {
+		if err := producer.Send(ctx, profile.Topic, profile.Key, unit.Payload, unit.Headers); err != nil {
 			return fmt.Errorf("publish Kafka record: %w", err)
 		}
 		count++
@@ -277,7 +283,7 @@ func subscribeOutputs(ctx context.Context, consumer Consumer, request asyncapicl
 		if message.Null {
 			return fmt.Errorf("Kafka tombstone records are outside the currently qualified payload profile")
 		}
-		value, err := request.Output.Decode(message.Value)
+		value, err := decodeUnit(request.Output, asyncapiclient.DriverUnit{Payload: message.Value, Headers: message.Headers})
 		if err != nil {
 			return err
 		}
@@ -287,6 +293,39 @@ func subscribeOutputs(ctx context.Context, consumer Consumer, request asyncapicl
 		return nil
 	}
 	return err
+}
+
+func recordHeaders(headers []kgo.RecordHeader) []asyncapiclient.DriverHeader {
+	out := make([]asyncapiclient.DriverHeader, 0, len(headers))
+	for _, pair := range headers {
+		out = append(out, asyncapiclient.DriverHeader{
+			Key: pair.Key, Value: append([]byte(nil), pair.Value...),
+		})
+	}
+	return out
+}
+
+// encodeUnit prefers the unit seam (payload + record headers); a request
+// built without it falls back to the payload-only seam.
+func encodeUnit(input *asyncapiclient.DriverInput, value any) (asyncapiclient.DriverUnit, error) {
+	if input.EncodeUnit != nil {
+		return input.EncodeUnit(value)
+	}
+	payload, err := input.Encode(value)
+	if err != nil {
+		return asyncapiclient.DriverUnit{}, err
+	}
+	return asyncapiclient.DriverUnit{Payload: payload}, nil
+}
+
+// decodeUnit prefers the unit seam (record headers project into the routed
+// envelope); a request built without it falls back to the payload-only
+// seam, dropping no headers because none were contracted.
+func decodeUnit(output *asyncapiclient.DriverOutput, unit asyncapiclient.DriverUnit) (any, error) {
+	if output.DecodeUnit != nil {
+		return output.DecodeUnit(unit)
+	}
+	return output.Decode(unit.Payload)
 }
 
 type franzFactory struct{}
@@ -316,10 +355,15 @@ func (p *franzProducer) Connect(ctx context.Context) error {
 	return client.Ping(ctx)
 }
 
-func (p *franzProducer) Send(ctx context.Context, topic string, key, value []byte) error {
+func (p *franzProducer) Send(ctx context.Context, topic string, key, value []byte, headers []asyncapiclient.DriverHeader) error {
 	record := &kgo.Record{Topic: topic, Value: append([]byte(nil), value...)}
 	if key != nil {
 		record.Key = append([]byte(nil), key...)
+	}
+	for _, pair := range headers {
+		record.Headers = append(record.Headers, kgo.RecordHeader{
+			Key: pair.Key, Value: append([]byte(nil), pair.Value...),
+		})
 	}
 	return p.client.ProduceSync(ctx, record).FirstErr()
 }
@@ -374,9 +418,10 @@ func (c *franzConsumer) Run(ctx context.Context, deliver func(ConsumerMessage) e
 				continue
 			}
 			if err := deliver(ConsumerMessage{
-				Value: append([]byte(nil), record.Value...),
-				Key:   append([]byte(nil), record.Key...),
-				Null:  record.Value == nil,
+				Value:   append([]byte(nil), record.Value...),
+				Key:     append([]byte(nil), record.Key...),
+				Null:    record.Value == nil,
+				Headers: recordHeaders(record.Headers),
 			}); err != nil {
 				return err
 			}

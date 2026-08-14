@@ -43,11 +43,52 @@ type DriverDirection struct {
 type DriverInput struct {
 	DriverDirection
 	Encode func(any) ([]byte, error)
+	// EncodeUnit renders one caller input value into its complete wire
+	// unit: payload octets plus the routed envelope's application headers
+	// as protocol header pairs (empty when the governing message declares
+	// none). A driver whose protocol has native per-message header
+	// carriage uses this seam and declares it via HeaderCarriage; Encode
+	// remains for headerless lanes and refuses a headers-bearing value
+	// rather than dropping it.
+	EncodeUnit func(any) (DriverUnit, error)
 }
 
 type DriverOutput struct {
 	DriverDirection
 	Decode func([]byte) (any, error)
+	// DecodeUnit decodes one received wire unit: the client pairs the
+	// payload with the DECLARED application headers projected from the
+	// received pairs (the routed envelope on the output direction).
+	DecodeUnit func(DriverUnit) (any, error)
+}
+
+// DriverUnit is one message crossing the driver seam: the payload octets
+// and the protocol's per-message header pairs.
+type DriverUnit struct {
+	Payload []byte
+	Headers []DriverHeader
+}
+
+// DriverHeader is one protocol header pair. Values are raw octets — the
+// protocol's spelling (Kafka record headers carry arbitrary bytes); the
+// client renders and projects application scalars at the envelope
+// boundary.
+type DriverHeader struct {
+	Key   string
+	Value []byte
+}
+
+// HeaderCarriage is optionally implemented by protocol drivers whose
+// protocol has native per-message header carriage and whose implementation
+// consumes the unit seam. Without it, a headers-declaring direction
+// refuses before dispatch (the §9.2 per-cell capability bound).
+type HeaderCarriage interface {
+	CarriesMessageHeaders() bool
+}
+
+func driverCarriesHeaders(driver ProtocolDriver) bool {
+	carriage, ok := driver.(HeaderCarriage)
+	return ok && carriage.CarriesMessageHeaders()
 }
 
 type DriverSecurityScheme struct {

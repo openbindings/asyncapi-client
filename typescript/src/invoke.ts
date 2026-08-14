@@ -143,6 +143,8 @@ function configOrSourceError(e: unknown, serverURL: string): InvocationError {
 import { parseRef, errorMessage } from "./util.js";
 import type { PooledWS, WSPool } from "./ws-pool.js";
 import type {
+  AsyncAPIDriverHeader,
+  AsyncAPIDriverUnit,
   AsyncAPIProtocolDriver,
   AsyncAPIProtocolDriverSession,
 } from "./driver.js";
@@ -277,6 +279,15 @@ export async function runBinding(
   let address: string;
   let preparedInput: { ok: true; value: unknown } | undefined;
   let preparedHeaders: Record<string, unknown> | undefined;
+  let resolvedAddrParams: Record<string, string> = {};
+  let inputHeadersDeclared = false;
+  if (asyncOp.action === "receive") {
+    try {
+      inputHeadersDeclared = selectedInputMessages(asyncOp, ch, args.context).some((m) => m.headers !== undefined);
+    } catch {
+      // Selection defects surface at codec resolution with their own codes.
+    }
+  }
   try {
     const addrCfg = addressConfiguration(args.context);
     const needsPayload = channelNeedsOutgoingPayload(ch);
@@ -284,14 +295,6 @@ export async function runBinding(
     // arrives as {payload, <params>}; the parameter fields must be read
     // before the address can be spelled, exactly like a payload-derived
     // location expression.
-    let inputHeadersDeclared = false;
-    if (asyncOp.action === "receive") {
-      try {
-        inputHeadersDeclared = selectedInputMessages(asyncOp, ch, args.context).some((m) => m.headers !== undefined);
-      } catch {
-        // Selection defects surface at codec resolution with their own codes.
-      }
-    }
     const needsEnvelopeSplit = asyncOp.action === "receive"
       && (locationlessParamNames(ch).length > 0 || inputHeadersDeclared)
       && !noInputDeclared(args);
@@ -319,10 +322,19 @@ export async function runBinding(
       }
       const split = splitInputEnvelope(ch, selected, preparedInput.value);
       if (split.envelope) {
-        preparedInput = { ok: true, value: split.payload };
-        if (split.headers !== undefined) preparedHeaders = split.headers;
         addrCfg.parameters = { ...addrCfg.parameters, ...split.params };
+        resolvedAddrParams = { ...addrCfg.parameters };
+        if (externalDriver === undefined) {
+          preparedInput = { ok: true, value: split.payload };
+          if (split.headers !== undefined) preparedHeaders = split.headers;
+        }
+        // A driver lane keeps the RAW envelope value: its per-unit seam
+        // splits every unit uniformly (the first pre-read unit must not
+        // arrive pre-split while later units arrive whole).
       }
+    }
+    if (Object.keys(resolvedAddrParams).length === 0 && addrCfg.parameters) {
+      resolvedAddrParams = { ...addrCfg.parameters };
     }
     address = resolveAddress(ch, channelName, addrCfg, preparedInput?.value);
   } catch (e: unknown) {
@@ -334,12 +346,17 @@ export async function runBinding(
   // carries the envelope's headers as HTTP fields; every other cell in
   // this build (driver protocols, raw WebSocket frames) has no native
   // carriage qualified yet and refuses before dispatch.
-  if (preparedHeaders !== undefined && (externalDriver !== undefined || (target.protocol !== "http" && target.protocol !== "https"))) {
-    h.fireError(new InvocationError(
-      ERR_REFUSED,
-      `the input declares application headers; this build has no header carriage for the ${JSON.stringify(target.protocol)} protocol cell`,
-    ));
-    return;
+  if (inputHeadersDeclared) {
+    const carried = externalDriver !== undefined
+      ? externalDriver.carriesMessageHeaders === true
+      : target.protocol === "http" || target.protocol === "https";
+    if (!carried) {
+      h.fireError(new InvocationError(
+        ERR_REFUSED,
+        `the input declares application headers; this build has no header carriage for the ${JSON.stringify(target.protocol)} protocol cell`,
+      ));
+      return;
+    }
   }
 
   // The complementary perspective (ASYNC-P-02): `receive` means the
@@ -366,6 +383,7 @@ export async function runBinding(
       ch,
       target,
       address,
+      resolvedAddrParams,
       preparedInput,
     );
     return;
@@ -509,6 +527,7 @@ async function runExternalDriver(
   channel: AsyncAPIChannel | undefined,
   target: ResolvedTarget,
   address: string,
+  resolvedAddrParams: Record<string, string>,
   preparedInput: { ok: true; value: unknown } | undefined,
 ): Promise<void> {
   let input: {
@@ -519,6 +538,7 @@ async function runExternalDriver(
     address?: string;
     messages: readonly Readonly<Record<string, unknown>>[];
     encode: (value: unknown) => Uint8Array | Promise<Uint8Array>;
+    encodeUnit: (value: unknown) => AsyncAPIDriverUnit | Promise<AsyncAPIDriverUnit>;
   } | undefined;
   let output: {
     channel?: Readonly<Record<string, unknown>>;
@@ -528,6 +548,7 @@ async function runExternalDriver(
     address?: string;
     messages: readonly Readonly<Record<string, unknown>>[];
     decode: (payload: Uint8Array) => Promise<unknown>;
+    decodeUnit: (unit: AsyncAPIDriverUnit) => Promise<unknown>;
   } | undefined;
   try {
     const replyChannel = resolvedChannel(operation.reply?.channel);
@@ -552,6 +573,25 @@ async function runExternalDriver(
         : [];
     if (inputMessages.length > 0) {
       const codec = resolveInputCodec(doc, inputMessages, args.context);
+      // Every unit splits the routed envelope uniformly: the payload rides
+      // the codec lanes, per-unit address parameters must match the
+      // invocation's resolved addressing, and application headers become
+      // protocol pairs on the unit seam (Go twin: installDriverInputSeams).
+      const splitUnit = (value: unknown): { payload: unknown; headers?: Record<string, unknown> } => {
+        const split = splitInputEnvelope(inputChannel, inputMessages, value);
+        if (!split.envelope) return { payload: value };
+        for (const [name, supplied] of Object.entries(split.params)) {
+          if (resolvedAddrParams[name] !== supplied) {
+            throw new Error(`envelope parameter ${JSON.stringify(name)} = ${JSON.stringify(supplied)} does not match the invocation's resolved addressing (${JSON.stringify(resolvedAddrParams[name])}): an address cannot vary per unit within one dispatch`);
+          }
+        }
+        return split.headers !== undefined ? { payload: split.payload, headers: split.headers } : { payload: split.payload };
+      };
+      const encodePayload = (payload: unknown) =>
+        encodeThroughHooks(args.hooks, siteFor(args, target.serverURL), payload, (v) => {
+          const out = encodeInput(codec, v);
+          return typeof out === "string" ? new TextEncoder().encode(out) : out;
+        });
       input = {
         ...(inputChannel
           ? { channel: inputChannel as unknown as Readonly<Record<string, unknown>> }
@@ -563,11 +603,22 @@ async function runExternalDriver(
         serverURL: inputTarget?.serverURL ?? target.serverURL,
         ...(inputAddress !== undefined ? { address: inputAddress } : {}),
         messages: inputMessages as unknown as readonly Readonly<Record<string, unknown>>[],
-        encode: (value) =>
-          encodeThroughHooks(args.hooks, siteFor(args, target.serverURL), value, (v) => {
-            const out = encodeInput(codec, v);
-            return typeof out === "string" ? new TextEncoder().encode(out) : out;
-          }),
+        encode: async (value) => {
+          const unit = splitUnit(value);
+          if (unit.headers !== undefined) {
+            throw new Error("the value carries application headers; this driver lane consumes the payload-only seam and cannot carry them");
+          }
+          return encodePayload(unit.payload);
+        },
+        encodeUnit: async (value) => {
+          const unit = splitUnit(value);
+          const payload = await encodePayload(unit.payload);
+          const pairs: AsyncAPIDriverHeader[] = [];
+          for (const name of Object.keys(unit.headers ?? {}).sort()) {
+            pairs.push({ key: name, value: new TextEncoder().encode(headerFieldText(name, unit.headers![name])) });
+          }
+          return { payload, headers: pairs };
+        },
       };
     }
 
@@ -578,9 +629,10 @@ async function runExternalDriver(
       ? governingMessages(operation, channel)
       : replyMessages;
     if (outputMessages.length > 0) {
-      const contentType = decodeContentType(doc, outputMessages, args.context);
+      const contentType = decodeContentType(doc, outputMessages, args.context, driver.carriesMessageHeaders === true);
       const outputAvro = AvroBinaryCodec.resolve(outputMessages, args.context);
       const limit = resolveDeliveryUnitLimit(args);
+      const outputHeadersDeclared = outputMessages.some((m) => m.headers !== undefined);
       output = {
         ...(outputChannel
           ? { channel: outputChannel as unknown as Readonly<Record<string, unknown>> }
@@ -592,22 +644,35 @@ async function runExternalDriver(
         serverURL: outputTarget?.serverURL ?? target.serverURL,
         ...(outputAddress !== undefined ? { address: outputAddress } : {}),
         messages: outputMessages as unknown as readonly Readonly<Record<string, unknown>>[],
-        decode: async (payload) => {
-          if (payload.byteLength > limit) {
-            throw new Error(`delivery unit exceeds configured ${limit}-byte limit`);
+        decode: decodePayloadUnit,
+        decodeUnit: async (unit) => {
+          const value = await decodePayloadUnit(unit.payload);
+          if (!outputHeadersDeclared) return value;
+          // The routed envelope on the output direction: the payload pairs
+          // with the DECLARED application headers projected from the
+          // received protocol pairs (§9.2).
+          const received = new Headers();
+          for (const pair of unit.headers) {
+            received.set(pair.key, new TextDecoder("utf-8", { fatal: true }).decode(pair.value));
           }
-          const raw: RawResult = isBytesContentType(contentType)
-            // The byte boundary: exact octets, never a UTF-8 text decode.
-            ? { status: null, body: "", bodyBytes: payload, meta: {} }
-            : { status: null, body: new TextDecoder("utf-8", { fatal: true }).decode(payload), meta: {} };
-          return decodeThroughHooks(
-            args.hooks,
-            siteFor(args, target.serverURL),
-            raw,
-            builtinDecodeFor(contentType, outputAvro),
-          );
+          return { payload: value, headers: projectResponseHeaders(outputMessages, received) };
         },
       };
+      async function decodePayloadUnit(payload: Uint8Array): Promise<unknown> {
+        if (payload.byteLength > limit) {
+          throw new Error(`delivery unit exceeds configured ${limit}-byte limit`);
+        }
+        const raw: RawResult = isBytesContentType(contentType)
+          // The byte boundary: exact octets, never a UTF-8 text decode.
+          ? { status: null, body: "", bodyBytes: payload, meta: {} }
+          : { status: null, body: new TextDecoder("utf-8", { fatal: true }).decode(payload), meta: {} };
+        return decodeThroughHooks(
+          args.hooks,
+          siteFor(args, target.serverURL),
+          raw,
+          builtinDecodeFor(contentType, outputAvro),
+        );
+      }
     }
   } catch (error: unknown) {
     h.fireError(new InvocationError(ERR_REFUSED, errorMessage(error)));

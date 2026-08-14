@@ -136,15 +136,17 @@ export function decodeContentType(
   doc: AsyncAPIDocument,
   msgs: AsyncAPIMessage[],
   context?: Record<string, unknown>,
+  headersCarried = false,
 ): string {
   if (msgs.length === 0) throw new Error("operation has no resolved output message declaration");
   for (const message of msgs) {
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("output message has an unresolved trait reference");
     validateMessageBindingVersion(message);
-    // Subscription lanes in this build (SSE events, raw WebSocket frames,
-    // driver protocols) have no native header carriage; a headers-declaring
-    // output refuses per cell (§9.2), never a silent drop.
-    if (message.headers !== undefined) throw new Error("the output message declares application headers; this build has no header carriage for the subscription's protocol cell");
+    // Header carriage is per protocol cell (§9.2): a lane without native
+    // carriage (SSE events, raw WebSocket frames, a driver that does not
+    // declare carriesMessageHeaders) refuses a headers-declaring output —
+    // never a silent drop.
+    if (message.headers !== undefined && !headersCarried) throw new Error("the output message declares application headers; this build has no header carriage for the subscription's protocol cell");
     carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
   const types = completeEffectiveTypes(doc, msgs);

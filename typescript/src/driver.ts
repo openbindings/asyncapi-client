@@ -1,10 +1,31 @@
 /** A protocol-native execution plug-in for one or more AsyncAPI server protocols. */
 export interface AsyncAPIProtocolDriver {
   readonly protocols: readonly string[];
+  /** Declares native per-message header carriage: the driver consumes the
+   *  unit seam (encodeUnit/decodeUnit), so the routed envelope's
+   *  application headers ride the protocol (§9.2 per-cell capability).
+   *  Absent or false, a headers-declaring direction refuses before
+   *  dispatch. */
+  readonly carriesMessageHeaders?: boolean;
   execute(
     request: AsyncAPIProtocolDriverRequest,
     session: AsyncAPIProtocolDriverSession,
   ): void | Promise<void>;
+}
+
+/** One message crossing the driver seam: payload octets plus the
+ *  protocol's per-message header pairs. */
+export interface AsyncAPIDriverUnit {
+  readonly payload: Uint8Array;
+  readonly headers: readonly AsyncAPIDriverHeader[];
+}
+
+/** One protocol header pair. Values are raw octets — the protocol's
+ *  spelling; the client renders and projects application scalars at the
+ *  envelope boundary. */
+export interface AsyncAPIDriverHeader {
+  readonly key: string;
+  readonly value: Uint8Array;
 }
 
 /** Artifact and target facts supplied to a protocol driver. */
@@ -43,12 +64,21 @@ export interface AsyncAPIProtocolDriverDirection {
 export interface AsyncAPIProtocolDriverInput extends AsyncAPIProtocolDriverDirection {
   /** Serializes one application value to the exact wire octets, consulting
    *  the consumer codec seam before the built-in lane (so it may resolve
-   *  asynchronously, like decode). */
+   *  asynchronously, like decode). Refuses a headers-bearing value rather
+   *  than dropping it — a header-carrying driver uses encodeUnit. */
   readonly encode: (value: unknown) => Uint8Array | Promise<Uint8Array>;
+  /** Renders one caller input value into its complete wire unit: payload
+   *  octets plus the routed envelope's application headers as protocol
+   *  header pairs (empty when the governing message declares none). */
+  readonly encodeUnit: (value: unknown) => AsyncAPIDriverUnit | Promise<AsyncAPIDriverUnit>;
 }
 
 export interface AsyncAPIProtocolDriverOutput extends AsyncAPIProtocolDriverDirection {
   readonly decode: (payload: Uint8Array) => Promise<unknown>;
+  /** Decodes one received wire unit: the client pairs the payload with the
+   *  DECLARED application headers projected from the received pairs (the
+   *  routed envelope on the output direction). */
+  readonly decodeUnit: (unit: AsyncAPIDriverUnit) => Promise<unknown>;
 }
 
 export interface AsyncAPIResolvedSecurityScheme {

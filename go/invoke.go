@@ -223,8 +223,6 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 			return
 		}
 		if isEnvelope {
-			prepared.Value = payload
-			prepared.Headers = envelopeHeaders
 			merged := map[string]string{}
 			for name, value := range addrCfg.Parameters {
 				merged[name] = value
@@ -233,6 +231,13 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 				merged[name] = value
 			}
 			addrCfg.Parameters = merged
+			if driver == nil {
+				prepared.Value = payload
+				prepared.Headers = envelopeHeaders
+			}
+			// A driver lane keeps the RAW envelope value: its per-unit
+			// seam splits every unit uniformly (the first pre-read unit
+			// must not arrive pre-split while later units arrive whole).
 		}
 	}
 	var outgoing any
@@ -271,13 +276,19 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 				}
 			}
 		}
-		if inputHeadersDeclared && (driver != nil || (target.Protocol != "http" && target.Protocol != "https")) {
-			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: fmt.Sprintf("the input declares application headers; this build has no header carriage for the %q protocol cell", target.Protocol)})
-			return
+		if inputHeadersDeclared {
+			carried := target.Protocol == "http" || target.Protocol == "https"
+			if driver != nil {
+				carried = driverCarriesHeaders(driver)
+			}
+			if !carried {
+				h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: fmt.Sprintf("the input declares application headers; this build has no header carriage for the %q protocol cell", target.Protocol)})
+				return
+			}
 		}
 	}
 	if driver != nil {
-		runProtocolDriver(ctx, driver, target, opID, &asyncOp, ch, address, prepared, args, h, doc)
+		runProtocolDriver(ctx, driver, target, opID, &asyncOp, ch, address, addrCfg.Parameters, prepared, args, h, doc)
 		return
 	}
 
@@ -424,8 +435,8 @@ func channelNeedsOutgoingPayload(ch *channel) bool {
 	return false
 }
 
-func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, prepared *preparedInput, args *executionArgs, h handle, doc *document) {
-	request, err := prepareProtocolDriverRequest(target, operationKey, operation, ch, address, args, doc)
+func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, addrParams map[string]string, prepared *preparedInput, args *executionArgs, h handle, doc *document) {
+	request, err := prepareProtocolDriverRequest(target, operationKey, operation, ch, address, addrParams, driverCarriesHeaders(driver), args, doc)
 	if err != nil {
 		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error(), Cause: err})
 		return
@@ -441,7 +452,7 @@ func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolv
 	session.Complete()
 }
 
-func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, args *executionArgs, doc *document) (DriverRequest, error) {
+func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, addrParams map[string]string, headersCarried bool, args *executionArgs, doc *document) (DriverRequest, error) {
 	driverDocument := objectMapForDriver(doc)
 	request := DriverRequest{
 		Artifact: append([]byte(nil), doc.raw...), Document: driverDocument,
@@ -490,9 +501,7 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 		}
 		inputMessages = selected
 		request.Input = &DriverInput{DriverDirection: driverDirection(inputChannel, inputTarget, inputAddress, inputMessages, driverDocument)}
-		request.Input.Encode = func(value any) ([]byte, error) {
-			return args.Hooks.EncodeInput(siteFor(args, ""), value, func(v any) ([]byte, error) { return encodeInput(codec, v) })
-		}
+		installDriverInputSeams(request.Input, ch, selected, codec, addrParams, args)
 		if operation.Reply != nil {
 			outputMessages = replyGoverningMessages(doc, operation)
 			outputChannel = replyChannel(doc, operation)
@@ -513,13 +522,11 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 			}
 			inputMessages = selected
 			request.Input = &DriverInput{DriverDirection: driverDirection(inputChannel, inputTarget, inputAddress, inputMessages, driverDocument)}
-			request.Input.Encode = func(value any) ([]byte, error) {
-				return args.Hooks.EncodeInput(siteFor(args, ""), value, func(v any) ([]byte, error) { return encodeInput(codec, v) })
-			}
+			installDriverInputSeams(request.Input, inputChannel, selected, codec, nil, args)
 		}
 	}
 	if len(outputMessages) > 0 {
-		contentType, err := resolveSubscriptionContentType(doc, outputMessages, args.Context)
+		contentType, err := resolveSubscriptionContentType(doc, outputMessages, args.Context, headersCarried)
 		if err != nil {
 			return DriverRequest{}, err
 		}
@@ -528,11 +535,42 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 			return DriverRequest{}, err
 		}
 		request.Output = &DriverOutput{DriverDirection: driverDirection(outputChannel, outputTarget, outputAddress, outputMessages, driverDocument)}
-		request.Output.Decode = func(payload []byte) (any, error) {
+		decodePayload := func(payload []byte) (any, error) {
 			if int64(len(payload)) > args.DeliveryUnitLimit() {
 				return nil, fmt.Errorf("delivery unit exceeds configured %d-byte limit", args.DeliveryUnitLimit())
 			}
 			return args.Hooks.DecodeOutput(siteFor(args, target.ServerURL), RawResult{Body: payload}, builtinDecodeFor(contentType, outputAvro))
+		}
+		request.Output.Decode = decodePayload
+		outputHeadersDeclared := false
+		for _, m := range outputMessages {
+			if m.Headers != nil {
+				outputHeadersDeclared = true
+			}
+		}
+		capturedOutputs := outputMessages
+		request.Output.DecodeUnit = func(unit DriverUnit) (any, error) {
+			value, err := decodePayload(unit.Payload)
+			if err != nil {
+				return nil, err
+			}
+			if !outputHeadersDeclared {
+				return value, nil
+			}
+			// The routed envelope on the output direction: the payload
+			// pairs with the DECLARED application headers projected from
+			// the received protocol pairs (§9.2).
+			received := map[string][]string{}
+			for _, pair := range unit.Headers {
+				if !utf8.Valid(pair.Value) {
+					return nil, fmt.Errorf("received header %q is not valid UTF-8; the declared application-headers contract has no faithful value", pair.Key)
+				}
+				received[pair.Key] = append(received[pair.Key], string(pair.Value))
+			}
+			return map[string]any{
+				"payload": value,
+				"headers": projectResponseHeaders(capturedOutputs, received),
+			}, nil
 		}
 	}
 	return request, nil

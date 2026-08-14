@@ -116,7 +116,7 @@ func headerFieldText(name string, value any) (string, error) {
 	switch v := value.(type) {
 	case string:
 		return v, nil
-	case bool, float64, json.Number:
+	case bool, float64, int, int64, json.Number:
 		encoded, err := json.Marshal(v)
 		if err != nil {
 			return "", err
@@ -193,7 +193,7 @@ func parameterText(value any) (string, error) {
 	switch v := value.(type) {
 	case string:
 		return v, nil
-	case bool, float64, json.Number:
+	case bool, float64, int, int64, json.Number:
 		encoded, err := json.Marshal(v)
 		if err != nil {
 			return "", err
@@ -201,5 +201,67 @@ func parameterText(value any) (string, error) {
 		return string(encoded), nil
 	default:
 		return "", fmt.Errorf("an address parameter value must be a scalar, got %T", value)
+	}
+}
+
+// installDriverInputSeams wires one driver input lane's Encode and
+// EncodeUnit closures. Every unit splits the routed envelope uniformly:
+// the payload rides the codec lanes, per-unit address parameters must
+// match the invocation's resolved addressing (a topic or address cannot
+// vary per unit within one dispatch), and application headers become
+// protocol pairs on the unit seam. The legacy Encode seam refuses a
+// headers-bearing value rather than dropping it.
+func installDriverInputSeams(input *DriverInput, ch *channel, msgs []message, codec inputCodec, resolvedParams map[string]string, args *executionArgs) {
+	split := func(value any) (any, map[string]any, error) {
+		payload, params, headers, isEnvelope, err := splitInputEnvelope(ch, msgs, value)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !isEnvelope {
+			return value, nil, nil
+		}
+		for name, supplied := range params {
+			if resolved, present := resolvedParams[name]; !present || resolved != supplied {
+				return nil, nil, fmt.Errorf("envelope parameter %q = %q does not match the invocation's resolved addressing (%q): an address cannot vary per unit within one dispatch", name, supplied, resolvedParams[name])
+			}
+		}
+		return payload, headers, nil
+	}
+	encodePayload := func(payload any) ([]byte, error) {
+		return args.Hooks.EncodeInput(siteFor(args, ""), payload, func(v any) ([]byte, error) { return encodeInput(codec, v) })
+	}
+	input.Encode = func(value any) ([]byte, error) {
+		payload, headers, err := split(value)
+		if err != nil {
+			return nil, err
+		}
+		if headers != nil {
+			return nil, fmt.Errorf("the value carries application headers; this driver lane consumes the payload-only seam and cannot carry them")
+		}
+		return encodePayload(payload)
+	}
+	input.EncodeUnit = func(value any) (DriverUnit, error) {
+		payload, headers, err := split(value)
+		if err != nil {
+			return DriverUnit{}, err
+		}
+		encoded, err := encodePayload(payload)
+		if err != nil {
+			return DriverUnit{}, err
+		}
+		unit := DriverUnit{Payload: encoded}
+		names := make([]string, 0, len(headers))
+		for name := range headers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			text, herr := headerFieldText(name, headers[name])
+			if herr != nil {
+				return DriverUnit{}, herr
+			}
+			unit.Headers = append(unit.Headers, DriverHeader{Key: name, Value: []byte(text)})
+		}
+		return unit, nil
 	}
 }

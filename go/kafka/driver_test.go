@@ -60,13 +60,6 @@ func TestResolveProfileRefusesUnsupportedCellsBeforeClientConstruction(t *testin
 			want: "Schema Registry",
 		},
 		{
-			name: "headers",
-			mutate: func(request *asyncapiclient.DriverRequest) {
-				request.Output.Messages[0]["headers"] = map[string]any{"type": "object"}
-			},
-			want: "message headers",
-		},
-		{
 			name: "dynamic key",
 			mutate: func(request *asyncapiclient.DriverRequest) {
 				request.Output.Messages[0]["bindings"].(map[string]any)["kafka"].(map[string]any)["key"] = map[string]any{"type": "string"}
@@ -195,9 +188,10 @@ func profileRequest() asyncapiclient.DriverRequest {
 }
 
 type sentRecord struct {
-	topic string
-	key   []byte
-	value []byte
+	topic   string
+	key     []byte
+	value   []byte
+	headers []asyncapiclient.DriverHeader
 }
 
 type fakeFactory struct {
@@ -219,8 +213,8 @@ func (f fakeClient) Consumer(ConsumerOptions) Consumer { return &f.factory.consu
 type fakeProducer struct{ sent []sentRecord }
 
 func (f *fakeProducer) Connect(context.Context) error { return nil }
-func (f *fakeProducer) Send(_ context.Context, topic string, key, value []byte) error {
-	f.sent = append(f.sent, sentRecord{topic: topic, key: append([]byte(nil), key...), value: append([]byte(nil), value...)})
+func (f *fakeProducer) Send(_ context.Context, topic string, key, value []byte, headers []asyncapiclient.DriverHeader) error {
+	f.sent = append(f.sent, sentRecord{topic: topic, key: append([]byte(nil), key...), value: append([]byte(nil), value...), headers: headers})
 	return nil
 }
 func (f *fakeProducer) Disconnect() {}
@@ -268,3 +262,98 @@ func (f *fakeSession) SetLeadingMetadata(asyncapiclient.Metadata) error { return
 func (f *fakeSession) SetTrailingMetadata(asyncapiclient.Metadata)      {}
 func (f *fakeSession) Complete()                                        {}
 func (f *fakeSession) Done() <-chan struct{}                            { return f.done }
+
+// Kafka record-header carriage (§9.2 per-cell capability, qualified here):
+// the routed envelope's application headers ride the unit seam as record
+// headers on publish, and received record headers project into the output
+// envelope on subscribe — end to end through the client.
+func TestKafkaCarriesRecordHeadersBothDirections(t *testing.T) {
+	artifact := func(action string) []byte {
+		return []byte(`{
+  "asyncapi":"3.0.0",
+  "info":{"title":"Record headers","version":"1"},
+  "servers":{"broker":{"host":"broker.example:9092","protocol":"kafka"}},
+  "channels":{"orders":{"address":"orders.v1","messages":{
+    "Order":{"contentType":"application/json","payload":{"type":"object"},
+      "headers":{"type":"object","properties":{"traceId":{"type":"string"},"attempt":{"type":"integer"}}}}
+  }}},
+  "operations":{"op":{
+    "action":"` + action + `",
+    "channel":{"$ref":"#/channels/orders"},
+    "messages":[{"$ref":"#/channels/orders/messages/Order"}]
+  }}
+}`)
+	}
+
+	factory := &fakeFactory{}
+	client, err := asyncapiclient.Load(context.Background(), asyncapiclient.Source{Content: artifact("receive")}, asyncapiclient.LoadOptions{
+		Drivers: []asyncapiclient.ProtocolDriver{New(Options{ClientFactory: factory})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.Publish(context.Background(), "op",
+		map[string]any{"payload": map[string]any{"id": 4}, "headers": map[string]any{"traceId": "t-7", "attempt": 2}},
+		asyncapiclient.InvocationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(factory.producer.sent) != 1 {
+		t.Fatalf("sent = %#v", factory.producer.sent)
+	}
+	record := factory.producer.sent[0]
+	if string(record.value) != `{"id":4}` {
+		t.Fatalf("record value = %q, want the bare payload", record.value)
+	}
+	got := map[string]string{}
+	for _, pair := range record.headers {
+		got[pair.Key] = string(pair.Value)
+	}
+	if got["traceId"] != "t-7" || got["attempt"] != "2" {
+		t.Fatalf("record headers = %#v", got)
+	}
+
+	subFactory := &fakeFactory{}
+	subFactory.consumer.messages = []ConsumerMessage{{
+		Value: []byte(`{"id":9}`),
+		Headers: []asyncapiclient.DriverHeader{
+			{Key: "traceId", Value: []byte("t-9")},
+			{Key: "attempt", Value: []byte("5")},
+			{Key: "x-infra", Value: []byte("never-projected")},
+		},
+	}}
+	subscriber, err := asyncapiclient.Load(context.Background(), asyncapiclient.Source{Content: artifact("send")}, asyncapiclient.LoadOptions{
+		Drivers: []asyncapiclient.ProtocolDriver{New(Options{ClientFactory: subFactory})},
+		Context: map[string]any{"configuration": map[string]any{"kafka": map[string]any{"groupId": "g-1"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = subscriber.Close() }()
+	execution, err := subscriber.Start(context.Background(), "op", asyncapiclient.InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outputs []any
+	for event := range execution.Events() {
+		outputs = append(outputs, event.Value)
+	}
+	if err := execution.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if len(outputs) != 1 {
+		t.Fatalf("outputs = %#v", outputs)
+	}
+	envelope, _ := outputs[0].(map[string]any)
+	payload, _ := envelope["payload"].(map[string]any)
+	headers, _ := envelope["headers"].(map[string]any)
+	if payload["id"] != float64(9) {
+		t.Fatalf("payload = %#v", envelope)
+	}
+	if headers["traceId"] != "t-9" || headers["attempt"] != float64(5) {
+		t.Fatalf("headers = %#v, want declared projection with integer parsing", headers)
+	}
+	if _, leaked := headers["x-infra"]; leaked {
+		t.Fatalf("undeclared record header leaked: %#v", headers)
+	}
+}
