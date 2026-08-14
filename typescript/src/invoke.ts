@@ -63,6 +63,7 @@ import {
   type InvokeSite,
   type OutputDecoder,
   type RawResult,
+  ERR_REFUSED,
 } from "./internal/index.js";
 import type {
   AsyncAPIChannel,
@@ -134,7 +135,7 @@ function configOrSourceError(e: unknown, serverURL: string): InvocationError {
       ],
     });
   }
-  return new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e));
+  return new InvocationError(ERR_REFUSED, errorMessage(e));
 }
 import { parseRef, errorMessage } from "./util.js";
 import type { PooledWS, WSPool } from "./ws-pool.js";
@@ -215,7 +216,7 @@ export async function runBinding(
   )) {
     h.fireError(
       new InvocationError(
-        ERR_SOURCE_CONFIG_ERROR,
+        ERR_REFUSED,
         "the built-in driver cannot preserve this AsyncAPI 2.x multi-scheme security conjunction",
       ),
     );
@@ -226,7 +227,7 @@ export async function runBinding(
     try {
       validateCell(doc, ch, asyncOp, target.protocol, args.source.profile, args.context);
     } catch (e: unknown) {
-      h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+      h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
       return;
     }
   }
@@ -249,7 +250,7 @@ export async function runBinding(
     try {
       validateCredentialDestinations(asyncOp, target.securityServer, target.protocol, args.context);
     } catch (e: unknown) {
-      h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+      h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
       return;
     }
   }
@@ -262,7 +263,7 @@ export async function runBinding(
     try {
       preparedWSReplyLane = resolveWebSocketReplyLane(doc, asyncOp, target, args.context);
     } catch (e: unknown) {
-      h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+      h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
       return;
     }
   }
@@ -298,7 +299,7 @@ export async function runBinding(
   if (asyncOp.action !== "receive" && asyncOp.action !== "send") {
     h.fireError(
       new InvocationError(
-        ERR_SOURCE_CONFIG_ERROR,
+        ERR_REFUSED,
         `unknown action "${(asyncOp as { action: string }).action}"`,
       ),
     );
@@ -333,7 +334,7 @@ export async function runBinding(
         const fields = protocolFieldValues(args.context);
         up = resolveWSUpgrade(ch, channelName, fields.webSocketQuery, fields.webSocketHeaders);
       } catch (e: unknown) {
-        h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+        h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
         return;
       }
       const dialAddress = mergeQuery(address, up.query);
@@ -355,7 +356,7 @@ export async function runBinding(
             ? replyGoverningMessages(asyncOp)
             : governingMessages(asyncOp, ch);
         } catch (e: unknown) {
-          h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+          h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
           return;
         }
         const operationLane: WebSocketReplyLane = { target, dialAddress, headers: up.headers };
@@ -400,7 +401,7 @@ export async function runBinding(
       // resolveTarget only yields bound protocols; defensive.
       h.fireError(
         new InvocationError(
-          ERR_SOURCE_CONFIG_ERROR,
+          ERR_REFUSED,
           `protocol "${target.protocol}" is not bound by the supported openbindings.asyncapi revisions (supported: http, https, ws, wss)`,
         ),
       );
@@ -559,7 +560,7 @@ async function runExternalDriver(
       };
     }
   } catch (error: unknown) {
-    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(error)));
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(error)));
     return;
   }
 
@@ -1130,7 +1131,7 @@ async function runUnaryPublish(
   if (noInputDeclared(args)) {
     h.fireError(
       new InvocationError(
-        ERR_MISSING_INPUT,
+        ERR_REFUSED,
         "publish invocation requires an input message (the input is the message; the operation declares no input)",
       ),
     );
@@ -1143,14 +1144,14 @@ async function runUnaryPublish(
   try {
     codec = resolveInputCodec(doc, selectedInputMessages(asyncOp, ch, args.context), args.context);
   } catch (e: unknown) {
-    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
     return;
   }
 
   const first = preparedInput ?? await readFirstInput(h);
   if (!first.ok) {
     h.fireError(
-      new InvocationError(ERR_MISSING_INPUT, "publish invocation requires an input message"),
+      new InvocationError(ERR_REFUSED, "publish invocation requires an input message"),
     );
     return;
   }
@@ -1163,7 +1164,7 @@ async function runUnaryPublish(
       return typeof out === "string" ? new TextEncoder().encode(out) : out;
     });
   } catch (e: unknown) {
-    h.fireError(new InvocationError(ERR_VALIDATION_FAILED, errorMessage(e)));
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
     return;
   }
 
@@ -1176,7 +1177,7 @@ async function runUnaryPublish(
   try {
     requestQuery = resolveHTTPQuery(asyncOp, fields.httpQuery);
   } catch (e: unknown) {
-    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
     return;
   }
   if (requestQuery) url = appendQuery(url, requestQuery);
@@ -1184,7 +1185,7 @@ async function runUnaryPublish(
   if (authQueryParams) {
     for (const name of Object.keys(authQueryParams)) {
       if (requestQuery?.[name] !== undefined) {
-        h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, `credential query destination ${JSON.stringify(name)} collides with an HTTP protocol field`));
+        h.fireError(new InvocationError(ERR_REFUSED, `credential query destination ${JSON.stringify(name)} collides with an HTTP protocol field`));
         return;
       }
     }
@@ -1559,6 +1560,13 @@ async function runWSSubscribe(
   } catch (e: unknown) {
     codecErr = e;
   }
+  // The reply-input codec refusal fires BEFORE any socket is dialed: a
+  // known-bad codec must refuse with the never-dispatched guarantee, not
+  // dial and then fail post-upgrade (Go twin: runWSSubscribe).
+  if (exchange && (codecErr !== undefined || !codec)) {
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(codecErr)));
+    return;
+  }
 
   const material = wsUpgradeMaterial(target, dialAddress, asyncOp, wsHeaders, args.context);
   let pooled: PooledWS;
@@ -1838,7 +1846,7 @@ async function runWSPublish(
   if (noInputDeclared(args)) {
     h.fireError(
       new InvocationError(
-        ERR_MISSING_INPUT,
+        ERR_REFUSED,
         "publish invocation requires an input message (the input is the message; the operation declares no input)",
       ),
     );
@@ -1852,7 +1860,7 @@ async function runWSPublish(
   try {
     codec = resolveInputCodec(doc, selectedInputMessages(asyncOp, ch, args.context), args.context);
   } catch (e: unknown) {
-    h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(e)));
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
     return;
   }
 

@@ -434,7 +434,10 @@ func TestReplyBearingWebSocketRefusesHeaderAddressBeforeDial(t *testing.T) {
 	for range execution.Events() {
 	}
 	var failure *ExecutionError
-	if !errors.As(execution.Wait(), &failure) || failure.Code != ErrCodeSourceConfigError {
+	// A pre-dial refusal carries the never-dispatched guarantee (ERR_REFUSED,
+	// ruled 2026-08-14) — and the zero-request assertion below is that
+	// guarantee, wire-proven.
+	if !errors.As(execution.Wait(), &failure) || failure.Code != ErrCodeRefused {
 		t.Fatalf("failure = %#v", failure)
 	}
 	if requests != 0 {

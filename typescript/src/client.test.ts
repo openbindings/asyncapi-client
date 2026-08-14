@@ -388,7 +388,7 @@ describe("AsyncAPIClient", () => {
       const execution = await client.start("submit");
       const failure = execution.completed.catch((error: unknown) => error);
       await expect(failure).resolves.toEqual(expect.objectContaining<Partial<AsyncAPIExecutionError>>({
-        code: "ERR_SOURCE_CONFIG_ERROR",
+        code: "ERR_REFUSED",
       }));
       expect(opened).not.toHaveBeenCalled();
     } finally {

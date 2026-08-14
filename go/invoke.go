@@ -107,7 +107,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	asyncOp, ok := doc.Operations[opID]
 	if !ok {
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeRefNotFound,
+			Code:    ErrCodeRefused,
 			Message: fmt.Sprintf("operation %q not in AsyncAPI doc", opID),
 		})
 		return
@@ -117,7 +117,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 		// through it before the operation-object test (ASYNC-D-03);
 		// resolveRefs leaves Ref set only when the reference dangles.
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeRefNotFound,
+			Code:    ErrCodeRefused,
 			Message: fmt.Sprintf("operation %q contains an unresolved reference", opID),
 		})
 		return
@@ -146,18 +146,18 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	}
 	if driver == nil && (asyncOp.V2SecurityConjunction != nil || (target.SecurityServer != nil && target.SecurityServer.V2SecurityConjunction != nil)) {
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeSourceConfigError,
+			Code:    ErrCodeRefused,
 			Message: "the built-in driver cannot preserve this AsyncAPI 2.x multi-scheme security conjunction",
 		})
 		return
 	}
 	if driver == nil {
 		if err := validateCell(doc, ch, &asyncOp, target.Protocol, args.Source.Profile, args.Context); err != nil {
-			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error()})
 			return
 		}
 		if err := validateCredentialDestinations(doc, &asyncOp, target.SecurityServer, target.Protocol, args.Context); err != nil {
-			h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: err.Error()})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error()})
 			return
 		}
 	}
@@ -174,7 +174,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	// unresolved expression is a pre-dispatch refusal, never a guess.
 	addrCfg, err := addressConfiguration(args.Context)
 	if err != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error()})
 		return
 	}
 	// A reply route is artifact/configuration authority, not an application
@@ -185,19 +185,19 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	if driver == nil && (target.Protocol == "ws" || target.Protocol == "wss") && asyncOp.Reply != nil {
 		preparedWSReplyLane, err = resolveWebSocketReplyLane(doc, &asyncOp, target, args.Context)
 		if err != nil {
-			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error()})
 			return
 		}
 	}
 	var prepared *preparedInput
 	if asyncOp.Action == "receive" && (driver == nil || channelNeedsOutgoingPayload(ch)) {
 		if args.AcceptsInput != nil && !*args.AcceptsInput {
-			h.FireError(&ExecutionError{Code: ErrCodeMissingInput, Message: "publish invocation requires an input message"})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: "publish invocation requires an input message"})
 			return
 		}
 		value, readErr := h.ReadInput(ctx)
 		if readErr == io.EOF {
-			h.FireError(&ExecutionError{Code: ErrCodeMissingInput, Message: "publish invocation requires an input message"})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: "publish invocation requires an input message"})
 			return
 		}
 		if readErr != nil {
@@ -222,7 +222,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	case "receive", "send":
 	default:
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeSourceConfigError,
+			Code:    ErrCodeRefused,
 			Message: fmt.Sprintf("unknown action %q", asyncOp.Action),
 		})
 		return
@@ -241,19 +241,19 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 		// pre-dispatch refusal.
 		fields, ferr := protocolFieldValues(args.Context)
 		if ferr != nil {
-			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: ferr.Error()})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: ferr.Error()})
 			return
 		}
 		up, uerr := resolveWSUpgrade(ch, channelName, fields.WebSocketQuery, fields.WebSocketHeaders)
 		if uerr != nil {
-			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: uerr.Error()})
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: uerr.Error()})
 			return
 		}
 		dialAddress := mergeQuery(address, up.Query)
 		if asyncOp.Reply != nil {
 			replyLane := preparedWSReplyLane
 			if replyLane == nil {
-				h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: "WebSocket reply route was not prepared"})
+				h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: "WebSocket reply route was not prepared"})
 				return
 			}
 			var inputMessages, outputMessages []message
@@ -265,7 +265,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 				outputMessages = governingMessages(doc, &asyncOp, ch)
 			}
 			if err != nil {
-				h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error()})
+				h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error()})
 				return
 			}
 			operationLane := wsReplyLane{Target: target, Address: dialAddress, Headers: up.Headers}
@@ -295,7 +295,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	default:
 		// resolveTarget only yields bound protocols; defensive.
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeSourceConfigError,
+			Code:    ErrCodeRefused,
 			Message: fmt.Sprintf("protocol %q is not bound by the supported asyncapi revisions (supported: http, https, ws, wss)", target.Protocol),
 		})
 	}
@@ -379,7 +379,7 @@ func channelNeedsOutgoingPayload(ch *channel) bool {
 func runProtocolDriver(ctx context.Context, driver ProtocolDriver, target resolvedTarget, operationKey string, operation *asyncOperation, ch *channel, address string, prepared *preparedInput, args *executionArgs, h handle, doc *document) {
 	request, err := prepareProtocolDriverRequest(target, operationKey, operation, ch, address, args, doc)
 	if err != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: err.Error(), Cause: err})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error(), Cause: err})
 		return
 	}
 	session := &handleDriverSession{handle: h, prepared: prepared}
@@ -1059,7 +1059,7 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 	// callers of no-input operations never write, so reading would park.
 	if args.AcceptsInput != nil && !*args.AcceptsInput {
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeMissingInput,
+			Code:    ErrCodeRefused,
 			Message: "publish invocation requires an input message (the input is the message; the operation declares no input)",
 		})
 		return
@@ -1069,12 +1069,12 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 	// (ASYNC-P-03); an excluded declared family refuses BEFORE dispatch.
 	selected, cerr := selectedInputMessages(doc, asyncOp, ch, args.Context)
 	if cerr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: cerr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: cerr.Error()})
 		return
 	}
 	codec, cerr := resolveInputCodec(doc, selected, args.Context)
 	if cerr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: cerr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: cerr.Error()})
 		return
 	}
 
@@ -1087,7 +1087,7 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 	}
 	if rerr == io.EOF {
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeMissingInput,
+			Code:    ErrCodeRefused,
 			Message: "publish invocation requires an input message",
 		})
 		return
@@ -1099,7 +1099,7 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 
 	body, err := args.Hooks.EncodeInput(siteFor(args, target.ServerURL), first, func(v any) ([]byte, error) { return encodeInput(codec, v) })
 	if err != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: err.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: err.Error()})
 		return
 	}
 
@@ -1108,12 +1108,12 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 	requestURL := joinURL(target.ServerURL, address)
 	fields, ferr := protocolFieldValues(args.Context)
 	if ferr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: ferr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: ferr.Error()})
 		return
 	}
 	query, qerr := resolveHTTPQuery(asyncOp, fields.HTTPQuery)
 	if qerr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: qerr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: qerr.Error()})
 		return
 	}
 	if len(query) > 0 {
@@ -1507,8 +1507,21 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 	}
 	decodeCT, decodeErr := resolveSubscriptionContentType(doc, outputMessages, args.Context)
 	if decodeErr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: decodeErr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: decodeErr.Error()})
 		return
+	}
+
+	// The reply-input codec resolves BEFORE any socket is dialed: a
+	// known-bad codec must refuse with the never-dispatched guarantee, not
+	// dial and then fail post-upgrade.
+	var exchangeCodec inputCodec
+	if exchange != nil {
+		var codecErr error
+		exchangeCodec, codecErr = resolveInputCodec(doc, exchange.InputMessages, args.Context)
+		if codecErr != nil {
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: codecErr.Error()})
+			return
+		}
 	}
 
 	// The subscription is registered inside acquire (before the reader
@@ -1553,11 +1566,7 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 	}
 
 	if exchange != nil {
-		codec, codecErr := resolveInputCodec(doc, exchange.InputMessages, args.Context)
-		if codecErr != nil {
-			h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: codecErr.Error()})
-			return
-		}
+		codec := exchangeCodec
 		go func() {
 			sent := 0
 			for {
@@ -1766,7 +1775,7 @@ func runWSPublish(ctx context.Context, pool *wsPool, target resolvedTarget, addr
 	// (callers of no-input operations never write, so reading would park).
 	if args.AcceptsInput != nil && !*args.AcceptsInput {
 		h.FireError(&ExecutionError{
-			Code:    ErrCodeMissingInput,
+			Code:    ErrCodeRefused,
 			Message: "publish invocation requires an input message (the input is the message; the operation declares no input)",
 		})
 		return
@@ -1777,12 +1786,12 @@ func runWSPublish(ctx context.Context, pool *wsPool, target resolvedTarget, addr
 	// before any socket is dialed.
 	selected, cerr := selectedInputMessages(doc, asyncOp, ch, args.Context)
 	if cerr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: cerr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: cerr.Error()})
 		return
 	}
 	codec, cerr := resolveInputCodec(doc, selected, args.Context)
 	if cerr != nil {
-		h.FireError(&ExecutionError{Code: ErrCodeSourceConfigError, Message: cerr.Error()})
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: cerr.Error()})
 		return
 	}
 
@@ -1826,7 +1835,7 @@ func runWSPublish(ctx context.Context, pool *wsPool, target resolvedTarget, addr
 		if rerr != nil {
 			return // invocation already terminal (or cancelled)
 		}
-		frame, merr := encodeInput(codec, msg)
+		frame, merr := args.Hooks.EncodeInput(siteFor(args, target.ServerURL), msg, func(v any) ([]byte, error) { return encodeInput(codec, v) })
 		if merr != nil {
 			h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: merr.Error()})
 			return
