@@ -200,8 +200,12 @@ export function resolveInputCodec(
   if (isTextContentType(t)) return { json: false, contentType: effective };
   // The artifact-authorized byte rule: any other syntactically valid
   // declared media carries exact octets, the caller's canonical Base64
-  // string being the boundary value. A malformed declaration refuses.
-  parseMedia(effective);
+  // string being the boundary value. A malformed declaration refuses —
+  // including a bare token without type/subtype.
+  const parsedEffective = parseMedia(effective);
+  if (!parsedEffective.type.includes("/")) {
+    throw new Error(`invalid media type ${JSON.stringify(effective)}`);
+  }
   return { json: false, bytes: true, contentType: effective };
 }
 
@@ -240,6 +244,10 @@ export function isBytesContentType(contentType: string): boolean {
 export function carriableMessageContentType(contentType: string): void {
   if (contentType.trim() === "") return;
   const parsed = parseMedia(contentType);
+  // A bare token without type/subtype is malformed; never guessed at.
+  if (!parsed.type.includes("/")) {
+    throw new Error(`invalid media type ${JSON.stringify(contentType)}`);
+  }
   const textual = isJSONMediaType(parsed.type) || parsed.type.startsWith("text/");
   if (textual) supportedMessageContentType(contentType);
 }

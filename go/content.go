@@ -242,10 +242,13 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 	default:
 		// The artifact-authorized byte rule: any other syntactically valid
 		// declared media carries exact octets, the caller's canonical Base64
-		// string being the boundary value. A malformed declaration refuses.
+		// string being the boundary value. A malformed declaration refuses —
+		// including a bare token without type/subtype, which
+		// mime.ParseMediaType tolerates.
 		effective := messageEffectiveContentType(doc, msgs[0])
-		if _, _, err := mime.ParseMediaType(effective); err != nil {
-			return inputCodec{}, fmt.Errorf("invalid media type %q: %v", effective, err)
+		mediaType, _, err := mime.ParseMediaType(effective)
+		if err != nil || !strings.Contains(mediaType, "/") {
+			return inputCodec{}, fmt.Errorf("invalid media type %q", effective)
 		}
 		return inputCodec{Bytes: true, ContentType: effective}, nil
 	}
@@ -289,15 +292,19 @@ func carriableMessageContentType(contentType string) error {
 		return nil
 	}
 	if err := supportedMessageContentType(contentType); err != nil {
-		if _, _, perr := mime.ParseMediaType(contentType); perr != nil {
+		mediaType, _, perr := mime.ParseMediaType(contentType)
+		if perr != nil {
 			return fmt.Errorf("invalid media type %q: %v", contentType, perr)
 		}
-		mediaType, params, _ := mime.ParseMediaType(contentType)
 		mediaType = strings.ToLower(mediaType)
+		// A bare token without type/subtype is malformed (mime.ParseMediaType
+		// tolerates it); never guessed at.
+		if !strings.Contains(mediaType, "/") {
+			return fmt.Errorf("invalid media type %q", contentType)
+		}
 		textual := mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") || strings.HasPrefix(mediaType, "text/")
 		if textual {
 			// The textual lanes' charset constraint still governs.
-			_ = params
 			return err
 		}
 		return nil
