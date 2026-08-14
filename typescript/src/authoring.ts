@@ -14,7 +14,6 @@ export function messageBindable(
   message: AsyncAPIMessage,
 ): boolean {
   if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) return false;
-  if (message.headers !== undefined) return false;
   const version = message.bindings?.http?.bindingVersion;
   if (version !== undefined && version !== "0.3.0") return false;
   try {

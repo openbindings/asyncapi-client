@@ -79,3 +79,57 @@ describe("the routed envelope at invocation", () => {
     }
   });
 });
+
+// Output-direction carriage (Go twin: TestClientProjectsReplyHeadersIntoOutputEnvelope):
+// a headers-declaring reply rides the routed envelope — the decoded payload
+// pairs with the declared application headers projected from the HTTP
+// response's fields, declared-type parsing applied, transport fields never
+// leaking.
+describe("reply headers projection", () => {
+  it("projects declared reply headers into the output envelope", async () => {
+    const document = {
+      asyncapi: "3.0.0",
+      info: { title: "Reply headers", version: "1.0.0" },
+      servers: { production: { host: "api.example.test", protocol: "https" } },
+      channels: {
+        commands: {
+          address: "/commands",
+          messages: {
+            Command: { contentType: "application/json", payload: { type: "object" } },
+            Result: {
+              contentType: "application/json",
+              payload: { type: "object" },
+              headers: { type: "object", properties: { requestId: { type: "string" }, attempt: { type: "integer" } } },
+            },
+          },
+        },
+      },
+      operations: {
+        submit: {
+          action: "receive",
+          channel: { $ref: "#/channels/commands" },
+          messages: [{ $ref: "#/channels/commands/messages/Command" }],
+          bindings: { http: { method: "POST" } },
+          reply: { messages: [{ $ref: "#/channels/commands/messages/Result" }] },
+        },
+      },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ accepted: true }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        requestid: "r-42",
+        attempt: "3",
+        "x-transport": "never-projected",
+      },
+    }));
+    const client = await AsyncAPIClient.load(document, { fetch: fetch as unknown as typeof globalThis.fetch });
+    try {
+      await expect(client.publish("submit", { id: 1 })).resolves.toEqual([
+        { payload: { accepted: true }, headers: { requestId: "r-42", attempt: 3 } },
+      ]);
+    } finally {
+      client.close();
+    }
+  });
+});

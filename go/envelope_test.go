@@ -114,3 +114,67 @@ func TestClientEnvelopeParameterPreFillAndRefusal(t *testing.T) {
 		t.Fatalf("bare value: failure = %#v (err %v)", failure, err)
 	}
 }
+
+// Output-direction carriage: a headers-declaring reply rides the routed
+// envelope — the decoded payload pairs with the declared application
+// headers projected from the HTTP response's fields, declared-type parsing
+// applied (declaration-driven, never sniffing), transport fields never
+// leaking.
+func TestClientProjectsReplyHeadersIntoOutputEnvelope(t *testing.T) {
+	artifact := []byte(`{
+  "asyncapi":"3.0.0",
+  "info":{"title":"Reply headers","version":"1.0.0"},
+  "servers":{"production":{"host":"api.example.test","protocol":"https"}},
+  "channels":{"commands":{"address":"/commands","messages":{
+    "Command":{"contentType":"application/json","payload":{"type":"object"}},
+    "Result":{"contentType":"application/json","payload":{"type":"object"},
+      "headers":{"type":"object","properties":{"requestId":{"type":"string"},"attempt":{"type":"integer"}}}}
+  }}},
+  "operations":{"submit":{
+    "action":"receive",
+    "channel":{"$ref":"#/channels/commands"},
+    "messages":[{"$ref":"#/channels/commands/messages/Command"}],
+    "bindings":{"http":{"method":"POST"}},
+    "reply":{"messages":[{"$ref":"#/channels/commands/messages/Result"}]}
+  }}
+}`)
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200, Status: "200 OK",
+			Header: http.Header{
+				"Content-Type": {"application/json"},
+				"Requestid":    {"r-42"},
+				"Attempt":      {"3"},
+				"X-Transport":  {"never-projected"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"accepted":true}`)), Request: request,
+		}, nil
+	})}
+	client, err := Load(context.Background(), Source{Content: artifact}, LoadOptions{HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	events, err := client.Publish(context.Background(), "submit", map[string]any{"id": 1}, InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	envelope, _ := events[0].Value.(map[string]any)
+	payload, _ := envelope["payload"].(map[string]any)
+	if payload["accepted"] != true {
+		t.Fatalf("payload = %#v", envelope)
+	}
+	headers, _ := envelope["headers"].(map[string]any)
+	if headers["requestId"] != "r-42" {
+		t.Fatalf("headers = %#v, want requestId projected case-insensitively", headers)
+	}
+	if headers["attempt"] != float64(3) {
+		t.Fatalf("headers = %#v, want attempt parsed as the declared integer", headers)
+	}
+	if _, leaked := headers["X-Transport"]; leaked {
+		t.Fatalf("transport field leaked into application headers: %#v", headers)
+	}
+}

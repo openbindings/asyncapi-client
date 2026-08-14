@@ -60,7 +60,6 @@ export function selectedInputMessages(
     selected = matches[0]!;
   }
   if (selected["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("selected message has an unresolved trait reference");
-  if (selected.headers !== undefined) throw new Error("selected message declares headers, which this AsyncAPI binding revision cannot carry");
   return [selected];
 }
 
@@ -142,7 +141,10 @@ export function decodeContentType(
   for (const message of msgs) {
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("output message has an unresolved trait reference");
     validateMessageBindingVersion(message);
-    if (message.headers !== undefined) throw new Error("output message declares headers, which the application-value boundary cannot carry");
+    // Subscription lanes in this build (SSE events, raw WebSocket frames,
+    // driver protocols) have no native header carriage; a headers-declaring
+    // output refuses per cell (§9.2), never a silent drop.
+    if (message.headers !== undefined) throw new Error("the output message declares application headers; this build has no header carriage for the subscription's protocol cell");
     carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
   const types = completeEffectiveTypes(doc, msgs);
@@ -316,7 +318,6 @@ export function resolveReplyContentType(
   for (const message of candidates) {
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("selected reply message has an unresolved trait reference");
     validateMessageBindingVersion(message);
-    if (message.headers !== undefined) throw new Error("selected reply message declares headers, which the application-value boundary cannot carry");
     carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
 
@@ -511,34 +512,120 @@ function clientEnvelopeFieldName(reserved: string, params: string[]): string {
 
 /**
  * Separates a publish input riding the routed envelope into its payload
- * value and address-parameter values. envelope=false means the channel
- * declares no location-less parameters and the value is the bare wholesale
- * payload, unchanged.
+ * value, address-parameter values, and (when the selected input message
+ * declares a headers contract) the application-headers value.
+ * envelope=false means neither condition holds and the value is the bare
+ * wholesale payload, unchanged. Whether the selected protocol cell can
+ * CARRY the headers value is the dispatch site's per-cell capability
+ * judgment, not this split's. (Go twin: splitInputEnvelope.)
  */
 export function splitInputEnvelope(
   ch: AsyncAPIChannel | undefined,
+  msgs: readonly AsyncAPIMessage[],
   value: unknown,
-): { payload: unknown; params: Record<string, string>; envelope: boolean } {
+): { payload: unknown; params: Record<string, string>; headers?: Record<string, unknown>; envelope: boolean } {
   const names = locationlessParamNames(ch);
-  if (names.length === 0) return { payload: value, params: {}, envelope: false };
+  const headersDeclared = msgs.some((m) => m.headers !== undefined);
+  if (names.length === 0 && !headersDeclared) return { payload: value, params: {}, envelope: false };
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`the parameterized channel's input is the routed envelope: supply one object carrying "payload" and the channel parameters, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`);
+    throw new Error(`this operation's input is the routed envelope: supply one object carrying "payload" and the declared envelope fields, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`);
   }
   const object = value as Record<string, unknown>;
   const payloadField = clientEnvelopeFieldName("payload", names);
+  const headersField = clientEnvelopeFieldName("headers", names);
   const declared = new Set([payloadField, ...names]);
+  if (headersDeclared) declared.add(headersField);
   const params: Record<string, string> = {};
+  let headers: Record<string, unknown> | undefined;
   for (const [field, member] of Object.entries(object)) {
     if (!declared.has(field)) {
-      throw new Error(`the routed envelope is closed: field ${JSON.stringify(field)} matches neither ${JSON.stringify(payloadField)} nor a location-less channel parameter`);
+      throw new Error(`the routed envelope is closed: field ${JSON.stringify(field)} matches no declared envelope field`);
     }
     if (field === payloadField) continue;
+    if (headersDeclared && field === headersField) {
+      if (member === null || typeof member !== "object" || Array.isArray(member)) {
+        throw new Error(`the envelope's ${JSON.stringify(headersField)} field must be an object valued under the artifact's headers schema`);
+      }
+      headers = member as Record<string, unknown>;
+      continue;
+    }
     params[field] = envelopeParameterText(field, member);
   }
   if (!(payloadField in object)) {
     throw new Error(`the routed envelope requires the ${JSON.stringify(payloadField)} field carrying the message payload`);
   }
-  return { payload: object[payloadField], params, envelope: true };
+  if (headersDeclared && headers === undefined) {
+    throw new Error(`the selected message declares a headers contract: the routed envelope requires the ${JSON.stringify(headersField)} field`);
+  }
+  return headers !== undefined
+    ? { payload: object[payloadField], params, headers, envelope: true }
+    : { payload: object[payloadField], params, envelope: true };
+}
+
+/**
+ * Renders one application-header value as an HTTP field value: strings ride
+ * as-is, other scalars ride their JSON text; a structured value has no
+ * faithful field spelling and refuses. (Go twin: headerFieldText.)
+ */
+export function headerFieldText(name: string, value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  throw new Error(`application header ${JSON.stringify(name)}: a header value must be a scalar, got ${value === null ? "null" : typeof value}`);
+}
+
+/**
+ * Derives the output envelope's headers value from a carried protocol
+ * response: only the DECLARED top-level properties of the governing headers
+ * contracts are application data (transport fields never leak), matched
+ * case-insensitively per HTTP. A property whose declared schema types it
+ * number/integer/boolean parses its field text as that JSON type when the
+ * text conforms — declaration-driven, never sniffing. (Go twin:
+ * projectResponseHeaders.)
+ */
+export function projectResponseHeaders(
+  msgs: readonly AsyncAPIMessage[],
+  header: Headers,
+): Record<string, unknown> {
+  const projected: Record<string, unknown> = {};
+  for (const m of msgs) {
+    if (m.headers === undefined) continue;
+    let declared = m.headers as Record<string, unknown>;
+    if (typeof declared["schemaFormat"] === "string") {
+      const inner = declared["schema"];
+      if (inner !== null && typeof inner === "object" && !Array.isArray(inner)) declared = inner as Record<string, unknown>;
+    }
+    const properties = declared["properties"];
+    if (properties === null || typeof properties !== "object" || Array.isArray(properties)) continue;
+    for (const [name, memberSchema] of Object.entries(properties as Record<string, unknown>)) {
+      const text = header.get(name);
+      if (text === null) continue;
+      projected[name] = parseDeclaredScalar(memberSchema, text);
+    }
+  }
+  return projected;
+}
+
+function parseDeclaredScalar(memberSchema: unknown, text: string): unknown {
+  const schema = memberSchema !== null && typeof memberSchema === "object" && !Array.isArray(memberSchema)
+    ? (memberSchema as Record<string, unknown>)
+    : {};
+  const declaredType = schema["type"];
+  if (declaredType === "integer" || declaredType === "number") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    if (typeof parsed === "number" && Number.isFinite(parsed)) {
+      if (declaredType === "number" || Number.isInteger(parsed)) return parsed;
+    }
+  }
+  if (declaredType === "boolean") {
+    if (text === "true") return true;
+    if (text === "false") return false;
+  }
+  return text;
 }
 
 /** Strings ride as-is; other scalars ride their JSON text; structured

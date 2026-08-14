@@ -117,25 +117,44 @@ func TestClientAppliesOperationAndMessageTraitsBeforeInvocation(t *testing.T) {
 	}
 }
 
-func TestClientRefusesMessageHeadersInheritedFromTrait(t *testing.T) {
+// Headers carriage on the HTTP cell (§9.2): a trait-inherited headers
+// declaration makes the input the routed envelope, and the envelope's
+// headers members ride the request as HTTP fields. A bare non-envelope
+// value refuses loudly.
+func TestClientCarriesTraitHeadersOverHTTP(t *testing.T) {
 	doc := strings.Replace(string(httpArtifact()), `"Command":{"payload":{"type":"object"}}`, `"Command":{"payload":{"type":"object"},"traits":[{"$ref":"#/components/messageTraits/traced"}]}`, 1)
-	doc = strings.Replace(doc, `"operations":{"submit":{`, `"components":{"messageTraits":{"traced":{"headers":{"type":"object"}}}},"operations":{"submit":{`, 1)
-	requests := 0
+	doc = strings.Replace(doc, `"operations":{"submit":{`, `"components":{"messageTraits":{"traced":{"headers":{"type":"object","properties":{"traceId":{"type":"string"}}}}}},"operations":{"submit":{`, 1)
+	var seen http.Header
+	var body []byte
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		requests++
-		return nil, errors.New("must not dispatch")
+		seen = request.Header
+		body, _ = io.ReadAll(request.Body)
+		return &http.Response{
+			StatusCode: 204, Status: "204 No Content", Header: http.Header{},
+			Body: io.NopCloser(strings.NewReader("")), Request: request,
+		}, nil
 	})}
 	client, err := Load(context.Background(), Source{Content: []byte(doc)}, LoadOptions{HTTPClient: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Close() }()
-	_, err = client.Publish(context.Background(), "submit", map[string]any{"id": 7}, InvocationOptions{})
-	if err == nil || !strings.Contains(err.Error(), "declares application headers") {
-		t.Fatalf("error = %v", err)
+	if _, err := client.Publish(context.Background(), "submit",
+		map[string]any{"payload": map[string]any{"id": 7}, "headers": map[string]any{"traceId": "abc-1"}}, InvocationOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	if requests != 0 {
-		t.Fatalf("network requests = %d, want 0", requests)
+	if seen.Get("traceId") != "abc-1" {
+		t.Fatalf("request headers = %v, want the envelope's traceId field carried", seen)
+	}
+	if string(body) != `{"id":7}` {
+		t.Fatalf("body = %q, want the bare payload", body)
+	}
+
+	// A bare non-envelope value on a headers-declaring operation refuses.
+	_, err = client.Publish(context.Background(), "submit", map[string]any{"id": 7}, InvocationOptions{})
+	var failure *ExecutionError
+	if !errors.As(err, &failure) || failure.Code != ErrCodeRefused {
+		t.Fatalf("bare value: failure = %#v (err %v)", failure, err)
 	}
 }
 

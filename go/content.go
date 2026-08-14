@@ -95,13 +95,6 @@ func selectedInputMessages(doc *document, op *asyncOperation, ch *channel, bindC
 	if selected.message.UnresolvedTrait != "" {
 		return nil, fmt.Errorf("selected message has an unresolved trait reference")
 	}
-	if selected.message.Headers != nil {
-		// The routed envelope carries declared headers on protocol cells
-		// with native header carriage (§9.2, ruled 2026-08-14); this build
-		// has not yet qualified a carriage cell, so the direction refuses
-		// before dispatch as a per-cell capability — never a silent drop.
-		return nil, fmt.Errorf("the selected message declares application headers; this build has no header carriage for the selected protocol cell")
-	}
 	return []message{selected.message}, nil
 }
 
@@ -393,7 +386,11 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 			return "", err
 		}
 		if m.Headers != nil {
-			return "", fmt.Errorf("output message declares headers, which the application-value boundary cannot carry")
+			// Subscription lanes in this build (SSE events, raw WebSocket
+			// frames, driver protocols) have no native header carriage; a
+			// headers-declaring output refuses per cell (§9.2), never a
+			// silent drop.
+			return "", fmt.Errorf("the output message declares application headers; this build has no header carriage for the subscription's protocol cell")
 		}
 		ct := m.ContentType
 		if ct == "" {
@@ -456,9 +453,6 @@ func resolveReplyContentType(doc *document, op *asyncOperation, status int, actu
 		}
 		if err := validateMessageBindingVersion(m); err != nil {
 			return "", err
-		}
-		if m.Headers != nil {
-			return "", fmt.Errorf("selected reply message declares headers, which the application-value boundary cannot carry")
 		}
 		if err := carriableMessageContentType(messageEffectiveContentType(doc, m)); err != nil {
 			return "", err

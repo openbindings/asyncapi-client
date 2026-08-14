@@ -85,7 +85,7 @@ import {
   resolveWSUpgrade,
 } from "./bindings.js";
 import { AvroBinaryCodec } from "./avro.js";
-import { locationlessParamNames, splitInputEnvelope } from "./content.js";
+import { headerFieldText, locationlessParamNames, projectResponseHeaders, splitInputEnvelope } from "./content.js";
 import {
   decodeContentType,
   encodeInput,
@@ -276,6 +276,7 @@ export async function runBinding(
   // expression is a pre-dispatch refusal, never a guess.
   let address: string;
   let preparedInput: { ok: true; value: unknown } | undefined;
+  let preparedHeaders: Record<string, unknown> | undefined;
   try {
     const addrCfg = addressConfiguration(args.context);
     const needsPayload = channelNeedsOutgoingPayload(ch);
@@ -283,8 +284,16 @@ export async function runBinding(
     // arrives as {payload, <params>}; the parameter fields must be read
     // before the address can be spelled, exactly like a payload-derived
     // location expression.
+    let inputHeadersDeclared = false;
+    if (asyncOp.action === "receive") {
+      try {
+        inputHeadersDeclared = selectedInputMessages(asyncOp, ch, args.context).some((m) => m.headers !== undefined);
+      } catch {
+        // Selection defects surface at codec resolution with their own codes.
+      }
+    }
     const needsEnvelopeSplit = asyncOp.action === "receive"
-      && locationlessParamNames(ch).length > 0
+      && (locationlessParamNames(ch).length > 0 || inputHeadersDeclared)
       && !noInputDeclared(args);
     if (needsPayload || needsEnvelopeSplit) {
       if (needsPayload && asyncOp.action !== "receive") throw new Error("subscription address uses a message runtime expression before any outgoing message exists");
@@ -301,15 +310,35 @@ export async function runBinding(
       preparedInput = first;
     }
     if (needsEnvelopeSplit && preparedInput !== undefined) {
-      const split = splitInputEnvelope(ch, preparedInput.value);
+      let selected: AsyncAPIMessage[] = [];
+      try {
+        selected = selectedInputMessages(asyncOp, ch, args.context);
+      } catch {
+        // Selection defects surface at codec resolution with their own
+        // codes; the split only needs the headers declaration.
+      }
+      const split = splitInputEnvelope(ch, selected, preparedInput.value);
       if (split.envelope) {
         preparedInput = { ok: true, value: split.payload };
+        if (split.headers !== undefined) preparedHeaders = split.headers;
         addrCfg.parameters = { ...addrCfg.parameters, ...split.params };
       }
     }
     address = resolveAddress(ch, channelName, addrCfg, preparedInput?.value);
   } catch (e: unknown) {
     h.fireError(configOrSourceError(e, target.serverURL));
+    return;
+  }
+
+  // Header carriage is per protocol cell (§9.2): the built-in HTTP lane
+  // carries the envelope's headers as HTTP fields; every other cell in
+  // this build (driver protocols, raw WebSocket frames) has no native
+  // carriage qualified yet and refuses before dispatch.
+  if (preparedHeaders !== undefined && (externalDriver !== undefined || (target.protocol !== "http" && target.protocol !== "https"))) {
+    h.fireError(new InvocationError(
+      ERR_REFUSED,
+      `the input declares application headers; this build has no header carriage for the ${JSON.stringify(target.protocol)} protocol cell`,
+    ));
     return;
   }
 
@@ -412,7 +441,7 @@ export async function runBinding(
     case "http":
     case "https":
       if (asyncOp.action === "receive") {
-        await runUnaryPublish(target, address, doc, ch, asyncOp, args, h, preparedInput);
+        await runUnaryPublish(target, address, doc, ch, asyncOp, args, h, preparedInput, preparedHeaders);
       } else {
         await runSSESubscribe(target, address, doc, ch, asyncOp, args, h);
       }
@@ -1142,6 +1171,7 @@ async function runUnaryPublish(
   args: BindingInvocationArgs,
   h: Handle,
   preparedInput?: { ok: true; value: unknown },
+  preparedHeaders?: Record<string, unknown>,
 ): Promise<void> {
   // Unary: the one input IS the message payload (ASYNC-P-03). A publish
   // invocation requires an input value — this family defines no empty
@@ -1193,6 +1223,18 @@ async function runUnaryPublish(
 
   const headers = new Headers();
   if (codec.contentType !== "") headers.set("Content-Type", codec.contentType);
+  // The routed envelope's application headers ride the HTTP cell's native
+  // carriage (§9.2): each member becomes one request field.
+  if (preparedHeaders !== undefined) {
+    try {
+      for (const [name, value] of Object.entries(preparedHeaders)) {
+        headers.set(name, headerFieldText(name, value));
+      }
+    } catch (e: unknown) {
+      h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
+      return;
+    }
+  }
   const fields = protocolFieldValues(args.context);
   let requestQuery: Record<string, string> | undefined;
   try {
@@ -1315,6 +1357,13 @@ async function runUnaryPublish(
         AvroBinaryCodec.resolve(messagesForDecodeCT(doc, replyGoverningMessages(asyncOp), replyDecode), args.context),
       ),
     );
+    // A headers-declaring reply rides the routed envelope on the output
+    // direction too: the payload pairs with the declared application
+    // headers projected from the HTTP response's fields (§9.2).
+    const replyCandidates = messagesForDecodeCT(doc, replyGoverningMessages(asyncOp), replyDecode);
+    if (replyCandidates.some((m) => m.headers !== undefined)) {
+      output = { payload: output, headers: projectResponseHeaders(replyCandidates, resp.headers) };
+    }
   } catch (e: unknown) {
     h.fireError(toInvocationError(e));
     return;
@@ -1585,6 +1634,15 @@ async function runWSSubscribe(
     exchange?.outputMessages ?? governingMessages(asyncOp, ch),
     args.context,
   );
+  // Raw WebSocket frames have no native header carriage; a
+  // headers-declaring input refuses per cell (§9.2) before any dial.
+  if (exchange !== undefined && exchange.inputMessages.some((m) => m.headers !== undefined)) {
+    h.fireError(new InvocationError(
+      ERR_REFUSED,
+      "the reply input declares application headers; this build has no header carriage for the WebSocket cell",
+    ));
+    return;
+  }
   let codec: InputCodec | undefined;
   let codecErr: unknown;
   try {

@@ -155,16 +155,32 @@ describe("AsyncAPIClient", () => {
     client.close();
   });
 
-  it("refuses invocation when a message trait declares uncarried headers", async () => {
+  // Headers carriage on the HTTP cell (§9.2): a trait-inherited headers
+  // declaration makes the input the routed envelope, and the envelope's
+  // headers members ride the request as HTTP fields (Go twin:
+  // TestClientCarriesTraitHeadersOverHTTP). A bare non-envelope value
+  // refuses loudly.
+  it("carries trait-declared headers over HTTP as request fields", async () => {
     const document = httpDocument() as any;
     document.components = {
-      messageTraits: { traced: { headers: { type: "object" } } },
+      messageTraits: { traced: { headers: { type: "object", properties: { traceId: { type: "string" } } } } },
     };
     document.channels.commands.messages.Command.traits = [{ $ref: "#/components/messageTraits/traced" }];
-    const fetch = vi.fn();
-    const client = await AsyncAPIClient.load(document, { fetch });
-    await expect(client.publish("submit", { id: 7 })).rejects.toThrow("declares headers");
-    expect(fetch).not.toHaveBeenCalled();
+    let seen: Headers | undefined;
+    let body = "";
+    const fetch = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(String(input), init);
+      seen = request.headers;
+      body = await request.text();
+      return new Response(null, { status: 204 });
+    });
+    const client = await AsyncAPIClient.load(document, { fetch: fetch as unknown as typeof globalThis.fetch });
+    await expect(
+      client.publish("submit", { payload: { id: 7 }, headers: { traceId: "abc-1" } }),
+    ).resolves.toEqual([]);
+    expect(seen?.get("traceId")).toBe("abc-1");
+    expect(JSON.parse(body)).toEqual({ id: 7 });
+    await expect(client.publish("submit", { id: 7 })).rejects.toThrow("routed envelope");
     client.close();
   });
 

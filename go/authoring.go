@@ -61,23 +61,8 @@ func operationExclusion(doc *document, op *asyncOperation, bindingSpec string) *
 	if op.Action == "send" {
 		inputMessages, outputMessages = replyMessages, operationMessages
 	}
-	if len(inputMessages) > 0 {
-		allHaveHeaders := true
-		for _, message := range inputMessages {
-			if message.Headers == nil {
-				allHaveHeaders = false
-				break
-			}
-		}
-		if allHaveHeaders {
-			return &authoringExclusion{"excluded", "asyncapi.message_headers", "ASYNC-P-03", "every caller-input message declares application headers the current value boundary cannot carry"}
-		}
-	}
-	for _, message := range outputMessages {
-		if message.Headers != nil {
-			return &authoringExclusion{"excluded", "asyncapi.message_headers", "ASYNC-P-03", "a possible caller-output message declares application headers the current value boundary cannot carry"}
-		}
-	}
+	_ = inputMessages
+	_ = outputMessages
 	return nil
 }
 
@@ -87,9 +72,6 @@ func authoringInputMessages(doc *document, op *asyncOperation, ch *channel) []me
 
 func messageBindable(doc *document, m message) bool {
 	if m.UnresolvedTrait != "" {
-		return false
-	}
-	if m.Headers != nil {
 		return false
 	}
 	if m.Bindings != nil && m.Bindings.HTTP != nil {
