@@ -475,12 +475,16 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 		if err != nil {
 			return DriverRequest{}, err
 		}
+		outputAvro, err := resolveAvroBinaryCodec(outputMessages, args.Context)
+		if err != nil {
+			return DriverRequest{}, err
+		}
 		request.Output = &DriverOutput{DriverDirection: driverDirection(outputChannel, outputTarget, outputAddress, outputMessages, driverDocument)}
 		request.Output.Decode = func(payload []byte) (any, error) {
 			if int64(len(payload)) > args.DeliveryUnitLimit() {
 				return nil, fmt.Errorf("delivery unit exceeds configured %d-byte limit", args.DeliveryUnitLimit())
 			}
-			return args.Hooks.DecodeOutput(siteFor(args, target.ServerURL), RawResult{Body: payload}, builtinDecodeFor(contentType))
+			return args.Hooks.DecodeOutput(siteFor(args, target.ServerURL), RawResult{Body: payload}, builtinDecodeFor(contentType, outputAvro))
 		}
 	}
 	return request, nil
@@ -1195,11 +1199,16 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 		h.FireError(&ExecutionError{Code: ErrCodeProtocol, Message: rderr.Error()})
 		return
 	}
+	replyAvro, raerr := resolveAvroBinaryCodec(messagesForDecodeCT(doc, replyGoverningMessages(doc, asyncOp), replyDecode), args.Context)
+	if raerr != nil {
+		h.FireError(&ExecutionError{Code: ErrCodeProtocol, Message: raerr.Error()})
+		return
+	}
 
 	status := resp.StatusCode
 	raw := RawResult{Status: &status, Body: respBody, Meta: headerMetadata(resp.Header)}
 	output, derr := args.Hooks.DecodeOutput(siteFor(args, target.ServerURL), raw,
-		builtinDecodeFor(replyDecode))
+		builtinDecodeFor(replyDecode, replyAvro))
 	if derr != nil {
 		h.FireError(asExecutionError(derr))
 		return
@@ -1226,6 +1235,16 @@ func runSSESubscribe(ctx context.Context, client *http.Client, target resolvedTa
 	// takes no input: input closes on entry, and a late write rejects
 	// non-terminally at the handle (the refusal surface for supplied input).
 	_ = h.CloseInput()
+
+	// The decode codec resolves BEFORE the request: an unqualifiable Avro
+	// declaration (invalid schema, ambiguous candidates, bad framing
+	// configuration) refuses with the never-dispatched guarantee.
+	sseMessages := governingMessages(doc, asyncOp, ch)
+	decodeAvro, avroErr := resolveAvroBinaryCodec(sseMessages, args.Context)
+	if avroErr != nil {
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: avroErr.Error()})
+		return
+	}
 
 	// The subscription framing is this specification's own pin (§8): the
 	// request is a GET unless the http operation binding declares otherwise
@@ -1271,7 +1290,7 @@ func runSSESubscribe(ctx context.Context, client *http.Client, target resolvedTa
 	// One transport, one invocation: transport close COMPLETES the
 	// subscription — reconnection (`retry`, `Last-Event-ID`) is excluded
 	// from the built-in SSE profile, so no reconnect is ever attempted here.
-	streamSSE(ctx, resp, decodeContentType(doc, governingMessages(doc, asyncOp, ch)), args, siteFor(args, target.ServerURL), h)
+	streamSSE(ctx, resp, decodeContentType(doc, sseMessages), decodeAvro, args, siteFor(args, target.ServerURL), h)
 }
 
 // streamSSE reads an established text/event-stream response per the WHATWG
@@ -1294,7 +1313,7 @@ func runSSESubscribe(ctx context.Context, client *http.Client, target resolvedTa
 //     reconnection is a built-in-driver exclusion
 //   - an incomplete final event (end of stream before its dispatching
 //     blank line) is discarded, never flushed
-func streamSSE(ctx context.Context, resp *http.Response, decodeCT string, args *executionArgs, site invokeSite, h handle) {
+func streamSSE(ctx context.Context, resp *http.Response, decodeCT string, decodeAvro *avroBinaryCodec, args *executionArgs, site invokeSite, h handle) {
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), sseMaxLineBytes)
 	scanner.Split(scanSSELines)
@@ -1343,7 +1362,7 @@ func streamSSE(ctx context.Context, resp *http.Response, decodeCT string, args *
 		}
 
 		raw := RawResult{Status: &status, Body: []byte(rawData), Meta: meta}
-		ev, derr := args.Hooks.DecodeOutput(site, raw, builtinDecodeFor(decodeCT))
+		ev, derr := args.Hooks.DecodeOutput(site, raw, builtinDecodeFor(decodeCT, decodeAvro))
 		if derr != nil {
 			// A decode error mid-stream is terminal; already-emitted
 			// outputs stand (drain-before-terminal).
@@ -1479,9 +1498,9 @@ func scanSSELines(data []byte, atEOF bool) (advance int, token []byte, err error
 // it is the hook channel's business now (a returned decode error is
 // terminal, which is exactly the override channel for error-frame
 // conventions).
-func decodeWSFrame(args *executionArgs, site invokeSite, contentType string, frame []byte) (any, error) {
+func decodeWSFrame(args *executionArgs, site invokeSite, contentType string, avro *avroBinaryCodec, frame []byte) (any, error) {
 	raw := RawResult{Body: frame}
-	return args.Hooks.DecodeOutput(site, raw, builtinDecodeFor(contentType))
+	return args.Hooks.DecodeOutput(site, raw, builtinDecodeFor(contentType, avro))
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,6 +1527,11 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 	decodeCT, decodeErr := resolveSubscriptionContentType(doc, outputMessages, args.Context)
 	if decodeErr != nil {
 		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: decodeErr.Error()})
+		return
+	}
+	decodeAvro, avroErr := resolveAvroBinaryCodec(outputMessages, args.Context)
+	if avroErr != nil {
+		h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: avroErr.Error()})
 		return
 	}
 
@@ -1629,7 +1653,7 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 			}
 			return
 		}
-		out, derr := decodeWSFrame(args, siteFor(args, target.ServerURL), decodeCT, res.Frame)
+		out, derr := decodeWSFrame(args, siteFor(args, target.ServerURL), decodeCT, decodeAvro, res.Frame)
 		if derr != nil {
 			// A decode error mid-stream is terminal; already-emitted
 			// outputs stand (drain-before-terminal).
@@ -2049,12 +2073,23 @@ func applyCredentialsViaSecuritySchemes(req *http.Request, doc *document, secSrv
 // (round-4 unification): a consumer whose stream speaks it attaches an
 // outputDecoder — a returned error is terminal, which IS the override
 // channel for error-frame conventions.
-func builtinDecodeFor(contentType string) outputDecoder {
+func builtinDecodeFor(contentType string, avro *avroBinaryCodec) outputDecoder {
 	isJSON := isJSONContentType(contentType)
 	isBytes := contentType != "" && !isJSON && !isTextContentType(contentType)
 	return func(_ invokeSite, raw RawResult) (any, error) {
 		if len(raw.Body) == 0 {
 			return nil, nil
+		}
+		if avro != nil && !isJSON {
+			// The named Avro correspondence's binary wire: octets decode to
+			// the logical value through the qualified codec (a JSON-family
+			// declaration instead carries the Avro-JSON encoding, which the
+			// ordinary JSON branch below parses).
+			value, err := avro.decode(raw.Body)
+			if err != nil {
+				return nil, &ExecutionError{Code: ErrCodeResponseError, Message: err.Error()}
+			}
+			return value, nil
 		}
 		if isBytes {
 			// The byte boundary: exact octets as the canonical Base64 string.

@@ -168,6 +168,21 @@ func distinctEffectiveTypes(doc *document, msgs []message) []string {
 	return out
 }
 
+// messagesForDecodeCT filters a governing set to the members whose
+// effective declaration matches the resolved decode content type (or
+// declare none), so a per-status reply winner's Avro codec never absorbs a
+// non-governing sibling's schema.
+func messagesForDecodeCT(doc *document, msgs []message, ct string) []message {
+	var out []message
+	for _, m := range msgs {
+		effective := messageEffectiveContentType(doc, m)
+		if effective == "" || effective == ct {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // decodeContentType collapses a governing set to the declaration the decode
 // point consults (§9.3, ASYNC-P-05). Runtime callers additionally validate
 // that the result belongs to the supported JSON or UTF-8 text carriage.
@@ -191,6 +206,10 @@ type inputCodec struct {
 	// 2026-08-13): the input value is the canonical RFC 4648 §4 Base64
 	// string of the exact octets the wire carries.
 	Bytes bool
+	// Avro selects the named Avro correspondence's binary wire: the input
+	// value is the logical Avro-JSON value, encoded to Avro binary octets
+	// by the qualified codec.
+	Avro *avroBinaryCodec
 	// ContentType is the declared type the wire carries ("" when the
 	// declaration is ambiguous and names no one type).
 	ContentType string
@@ -226,8 +245,14 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		if err != nil {
 			return inputCodec{}, err
 		}
-		if err := avroMediaGuard(msgs[0], lane.ContentType); err != nil {
-			return inputCodec{}, err
+		if !lane.JSON {
+			codec, err := resolveAvroBinaryCodec(msgs, ctx)
+			if err != nil {
+				return inputCodec{}, err
+			}
+			if codec != nil {
+				return inputCodec{Avro: codec, ContentType: lane.ContentType}, nil
+			}
 		}
 		return lane, nil
 	case isJSONContentType(t):
@@ -238,8 +263,16 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		return inputCodec{JSON: true, ContentType: effective}, nil
 	case isTextContentType(t):
 		effective := messageEffectiveContentType(doc, msgs[0])
-		if err := avroMediaGuard(msgs[0], effective); err != nil {
+		var bindCtx map[string]any
+		if len(contexts) > 0 {
+			bindCtx = contexts[0]
+		}
+		codec, err := resolveAvroBinaryCodec(msgs, bindCtx)
+		if err != nil {
 			return inputCodec{}, err
+		}
+		if codec != nil {
+			return inputCodec{Avro: codec, ContentType: effective}, nil
 		}
 		if err := supportedMessageContentType(effective); err != nil {
 			return inputCodec{}, err
@@ -251,11 +284,19 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		// string being the boundary value. A malformed declaration refuses —
 		// including a bare token without type/subtype, which
 		// mime.ParseMediaType tolerates. An Avro-declared payload never
-		// reaches this lane: its non-JSON wire is the Avro binary encoding,
-		// an unqualified codec capability here.
+		// reaches the base64 boundary: its non-JSON wire is the Avro binary
+		// encoding through the qualified codec.
 		effective := messageEffectiveContentType(doc, msgs[0])
-		if err := avroMediaGuard(msgs[0], effective); err != nil {
-			return inputCodec{}, err
+		var bindCtx map[string]any
+		if len(contexts) > 0 {
+			bindCtx = contexts[0]
+		}
+		codec, cerr := resolveAvroBinaryCodec(msgs, bindCtx)
+		if cerr != nil {
+			return inputCodec{}, cerr
+		}
+		if codec != nil {
+			return inputCodec{Avro: codec, ContentType: effective}, nil
 		}
 		mediaType, _, err := mime.ParseMediaType(effective)
 		if err != nil || !strings.Contains(mediaType, "/") {
@@ -354,9 +395,6 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 		if ct == "" {
 			ct = doc.DefaultContentType
 		}
-		if err := avroMediaGuard(m, ct); err != nil {
-			return "", err
-		}
 		if err := carriableMessageContentType(ct); err != nil {
 			return "", err
 		}
@@ -380,11 +418,6 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 		lane, err := requiredCodecLane(bindCtx, "decode")
 		if err != nil {
 			return "", err
-		}
-		for _, m := range msgs {
-			if err := avroMediaGuard(m, lane.ContentType); err != nil {
-				return "", err
-			}
 		}
 		return lane.ContentType, nil
 	}
@@ -422,9 +455,6 @@ func resolveReplyContentType(doc *document, op *asyncOperation, status int, actu
 		}
 		if m.Headers != nil {
 			return "", fmt.Errorf("selected reply message declares headers, which the application-value boundary cannot carry")
-		}
-		if err := avroMediaGuard(m, messageEffectiveContentType(doc, m)); err != nil {
-			return "", err
 		}
 		if err := carriableMessageContentType(messageEffectiveContentType(doc, m)); err != nil {
 			return "", err
@@ -534,6 +564,9 @@ func canonicalMedia(value string) (string, map[string]string, error) {
 // resolved codec: the JSON lane marshals; the text lane requires a string
 // value and sends it raw — a non-string value there is refused (§9.1).
 func encodeInput(codec inputCodec, v any) ([]byte, error) {
+	if codec.Avro != nil {
+		return codec.Avro.encode(v)
+	}
 	if codec.Bytes {
 		s, ok := v.(string)
 		if !ok {

@@ -84,10 +84,12 @@ import {
   resolveHTTPQuery,
   resolveWSUpgrade,
 } from "./bindings.js";
+import { AvroBinaryCodec } from "./avro.js";
 import {
   decodeContentType,
   encodeInput,
   governingMessages,
+  messagesForDecodeCT,
   isWellFormedUnicode,
   normalizeMediaType,
   resolveReplyContentType,
@@ -530,6 +532,7 @@ async function runExternalDriver(
       : replyMessages;
     if (outputMessages.length > 0) {
       const contentType = decodeContentType(doc, outputMessages, args.context);
+      const outputAvro = AvroBinaryCodec.resolve(outputMessages, args.context);
       const limit = resolveDeliveryUnitLimit(args);
       output = {
         ...(outputChannel
@@ -554,7 +557,7 @@ async function runExternalDriver(
             args.hooks,
             siteFor(args, target.serverURL),
             raw,
-            builtinDecodeFor(contentType),
+            builtinDecodeFor(contentType, outputAvro),
           );
         },
       };
@@ -1289,7 +1292,10 @@ async function runUnaryPublish(
       args.hooks,
       siteFor(args, target.serverURL),
       raw,
-      builtinDecodeFor(replyDecode),
+      builtinDecodeFor(
+        replyDecode,
+        AvroBinaryCodec.resolve(messagesForDecodeCT(doc, replyGoverningMessages(asyncOp), replyDecode), args.context),
+      ),
     );
   } catch (e: unknown) {
     h.fireError(toInvocationError(e));
@@ -1324,6 +1330,18 @@ async function runSSESubscribe(
   // takes no input: input closes on entry, and a late write rejects
   // non-terminally at the handle (the refusal surface for supplied input).
   void h.closeInput();
+
+  // The decode codec resolves BEFORE the request: an unqualifiable Avro
+  // declaration (invalid schema, ambiguous candidates, bad framing
+  // configuration) refuses with the never-dispatched guarantee.
+  const sseMessages = governingMessages(asyncOp, ch);
+  let sseAvro: AvroBinaryCodec | undefined;
+  try {
+    sseAvro = AvroBinaryCodec.resolve(sseMessages, args.context);
+  } catch (e: unknown) {
+    h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
+    return;
+  }
 
   let url = joinURL(target.serverURL, address);
   const headers = new Headers({ Accept: "text/event-stream" });
@@ -1387,14 +1405,14 @@ async function runSSESubscribe(
   // the built-in SSE profile, so no reconnect is ever attempted here. Outputs decode
   // by the operation's own message declarations (direction-correct decode,
   // ASYNC-P-05).
-  const decodeCT = decodeContentType(doc, governingMessages(asyncOp, ch));
+  const decodeCT = decodeContentType(doc, sseMessages);
   await streamSSE(
     resp,
     args,
     siteFor(args, target.serverURL),
     h,
     invocationMeta,
-    builtinDecodeFor(decodeCT),
+    builtinDecodeFor(decodeCT, sseAvro),
   );
 }
 
@@ -1566,6 +1584,28 @@ async function runWSSubscribe(
   if (exchange && (codecErr !== undefined || !codec)) {
     h.fireError(new InvocationError(ERR_REFUSED, errorMessage(codecErr)));
     return;
+  }
+
+  // The Avro correspondence's binary wire over WebSocket is unqualified in
+  // this build: the frame pool delivers incoming frames as text, which
+  // cannot carry Avro binary octets faithfully. Refused pre-dial (the
+  // codec-capability rule) — a JSON-family declaration (the Avro-JSON
+  // wire) proceeds through the ordinary lane.
+  if (!isJSONContentType(wsContentType)) {
+    let wsAvro: AvroBinaryCodec | undefined;
+    try {
+      wsAvro = AvroBinaryCodec.resolve(exchange?.outputMessages ?? governingMessages(asyncOp, ch), args.context);
+    } catch (e: unknown) {
+      h.fireError(new InvocationError(ERR_REFUSED, errorMessage(e)));
+      return;
+    }
+    if (wsAvro !== undefined) {
+      h.fireError(new InvocationError(
+        ERR_REFUSED,
+        "the governing messages declare the Avro correspondence with a binary wire; this build's WebSocket lane delivers frames as text and has no qualified Avro binary carriage",
+      ));
+      return;
+    }
   }
 
   const material = wsUpgradeMaterial(target, dialAddress, asyncOp, wsHeaders, args.context);
@@ -1988,10 +2028,23 @@ async function readErrorBody(resp: Response): Promise<unknown> {
  * that fails to parse is loud), text otherwise; an empty body is a null
  * output. Content-independent — the declaration decides, never the bytes.
  */
-export function builtinDecodeFor(contentType: string): OutputDecoder {
+export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): OutputDecoder {
   const isJSON = isJSONContentType(contentType);
   const isBytes = isBytesContentType(contentType);
   return (_site: InvokeSite, raw: RawResult): unknown => {
+    if (avro !== undefined && !isJSON) {
+      // The named Avro correspondence's binary wire: octets decode to the
+      // logical value through the qualified codec (a JSON-family
+      // declaration instead carries the Avro-JSON encoding, which the
+      // ordinary JSON branch below parses).
+      const octets = raw.bodyBytes ?? new TextEncoder().encode(raw.body);
+      if (octets.byteLength === 0) return null;
+      try {
+        return avro.decode(octets);
+      } catch (e: unknown) {
+        throw new InvocationError(ERR_RESPONSE_ERROR, errorMessage(e));
+      }
+    }
     if (isBytes) {
       // The byte boundary: exact octets as the canonical Base64 string.
       const octets = raw.bodyBytes ?? new TextEncoder().encode(raw.body);
