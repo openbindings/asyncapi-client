@@ -16,6 +16,7 @@ import type {
   AsyncAPIMessage,
   AsyncAPIOperation,
 } from "./asyncapi-types.js";
+import { avroMediaGuard } from "./avro.js";
 import { contextConfiguration } from "./internal/index.js";
 import { MESSAGE_NAME_TAG } from "./constants.js";
 
@@ -142,13 +143,16 @@ export function decodeContentType(
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("output message has an unresolved trait reference");
     validateMessageBindingVersion(message);
     if (message.headers !== undefined) throw new Error("output message declares headers, which the application-value boundary cannot carry");
+    avroMediaGuard(message, messageEffectiveContentType(doc, message));
     carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
   const types = completeEffectiveTypes(doc, msgs);
   if (types.length > 1) throw new Error("output messages declare conflicting effective content types");
   const only = types[0] ?? "";
   if (only !== "") return only;
-  return requiredLane(context, "decode");
+  const lane = requiredLane(context, "decode");
+  for (const message of msgs) avroMediaGuard(message, lane);
+  return lane;
 }
 
 /**
@@ -192,16 +196,20 @@ export function resolveInputCodec(
   const t = types[0] ?? "";
   if (t === "") {
     const lane = requiredLane(context, "encode");
+    avroMediaGuard(msgs[0]!, lane);
     return { json: lane === "application/json", contentType: lane === "application/json" ? "application/json" : "text/plain; charset=utf-8" };
   }
   const effective = messageEffectiveContentType(doc, msgs[0]!);
+  avroMediaGuard(msgs[0]!, effective);
   if (isJSONMediaType(t) || isTextContentType(t)) supportedMessageContentType(effective);
   if (isJSONMediaType(t)) return { json: true, contentType: effective };
   if (isTextContentType(t)) return { json: false, contentType: effective };
   // The artifact-authorized byte rule: any other syntactically valid
   // declared media carries exact octets, the caller's canonical Base64
   // string being the boundary value. A malformed declaration refuses —
-  // including a bare token without type/subtype.
+  // including a bare token without type/subtype. An Avro-declared payload
+  // never reaches this lane: the guard above refused its binary wire as an
+  // unqualified codec capability.
   const parsedEffective = parseMedia(effective);
   if (!parsedEffective.type.includes("/")) {
     throw new Error(`invalid media type ${JSON.stringify(effective)}`);
@@ -281,6 +289,7 @@ export function resolveReplyContentType(
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("selected reply message has an unresolved trait reference");
     validateMessageBindingVersion(message);
     if (message.headers !== undefined) throw new Error("selected reply message declares headers, which the application-value boundary cannot carry");
+    avroMediaGuard(message, messageEffectiveContentType(doc, message));
     carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
 

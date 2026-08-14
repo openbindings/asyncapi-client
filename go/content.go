@@ -226,6 +226,9 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		if err != nil {
 			return inputCodec{}, err
 		}
+		if err := avroMediaGuard(msgs[0], lane.ContentType); err != nil {
+			return inputCodec{}, err
+		}
 		return lane, nil
 	case isJSONContentType(t):
 		effective := messageEffectiveContentType(doc, msgs[0])
@@ -235,6 +238,9 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		return inputCodec{JSON: true, ContentType: effective}, nil
 	case isTextContentType(t):
 		effective := messageEffectiveContentType(doc, msgs[0])
+		if err := avroMediaGuard(msgs[0], effective); err != nil {
+			return inputCodec{}, err
+		}
 		if err := supportedMessageContentType(effective); err != nil {
 			return inputCodec{}, err
 		}
@@ -244,8 +250,13 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		// declared media carries exact octets, the caller's canonical Base64
 		// string being the boundary value. A malformed declaration refuses —
 		// including a bare token without type/subtype, which
-		// mime.ParseMediaType tolerates.
+		// mime.ParseMediaType tolerates. An Avro-declared payload never
+		// reaches this lane: its non-JSON wire is the Avro binary encoding,
+		// an unqualified codec capability here.
 		effective := messageEffectiveContentType(doc, msgs[0])
+		if err := avroMediaGuard(msgs[0], effective); err != nil {
+			return inputCodec{}, err
+		}
 		mediaType, _, err := mime.ParseMediaType(effective)
 		if err != nil || !strings.Contains(mediaType, "/") {
 			return inputCodec{}, fmt.Errorf("invalid media type %q", effective)
@@ -343,6 +354,9 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 		if ct == "" {
 			ct = doc.DefaultContentType
 		}
+		if err := avroMediaGuard(m, ct); err != nil {
+			return "", err
+		}
 		if err := carriableMessageContentType(ct); err != nil {
 			return "", err
 		}
@@ -366,6 +380,11 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 		lane, err := requiredCodecLane(bindCtx, "decode")
 		if err != nil {
 			return "", err
+		}
+		for _, m := range msgs {
+			if err := avroMediaGuard(m, lane.ContentType); err != nil {
+				return "", err
+			}
 		}
 		return lane.ContentType, nil
 	}
@@ -403,6 +422,9 @@ func resolveReplyContentType(doc *document, op *asyncOperation, status int, actu
 		}
 		if m.Headers != nil {
 			return "", fmt.Errorf("selected reply message declares headers, which the application-value boundary cannot carry")
+		}
+		if err := avroMediaGuard(m, messageEffectiveContentType(doc, m)); err != nil {
+			return "", err
 		}
 		if err := carriableMessageContentType(messageEffectiveContentType(doc, m)); err != nil {
 			return "", err
