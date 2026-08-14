@@ -485,3 +485,66 @@ export function isTextContentType(contentType: string): boolean {
 function isJSONMediaType(normalized: string): boolean {
   return normalized === "application/json" || normalized.endsWith("+json");
 }
+
+// ---------------------------------------------------------------------------
+// The routed operation envelope (openbindings.asyncapi@1 §9.2, ruled
+// 2026-08-14; Go twin: envelope.go): a channel that declares location-less
+// parameters makes the publish input an envelope object — the payload under
+// the protocol-neutral "payload" field, each parameter under its own name —
+// because addressing data varies per invocation and is therefore operation
+// input. configuration.address.parameters remains the amortized pre-fill;
+// an explicitly supplied envelope field wins.
+// ---------------------------------------------------------------------------
+
+/** The channel's location-less parameter names, sorted. */
+export function locationlessParamNames(ch: AsyncAPIChannel | undefined): string[] {
+  const parameters = ch?.parameters;
+  if (!parameters) return [];
+  return Object.keys(parameters)
+    .filter((name) => !parameters[name]!.location)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+function clientEnvelopeFieldName(reserved: string, params: string[]): string {
+  return params.includes(reserved) ? `${reserved}_value` : reserved;
+}
+
+/**
+ * Separates a publish input riding the routed envelope into its payload
+ * value and address-parameter values. envelope=false means the channel
+ * declares no location-less parameters and the value is the bare wholesale
+ * payload, unchanged.
+ */
+export function splitInputEnvelope(
+  ch: AsyncAPIChannel | undefined,
+  value: unknown,
+): { payload: unknown; params: Record<string, string>; envelope: boolean } {
+  const names = locationlessParamNames(ch);
+  if (names.length === 0) return { payload: value, params: {}, envelope: false };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`the parameterized channel's input is the routed envelope: supply one object carrying "payload" and the channel parameters, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`);
+  }
+  const object = value as Record<string, unknown>;
+  const payloadField = clientEnvelopeFieldName("payload", names);
+  const declared = new Set([payloadField, ...names]);
+  const params: Record<string, string> = {};
+  for (const [field, member] of Object.entries(object)) {
+    if (!declared.has(field)) {
+      throw new Error(`the routed envelope is closed: field ${JSON.stringify(field)} matches neither ${JSON.stringify(payloadField)} nor a location-less channel parameter`);
+    }
+    if (field === payloadField) continue;
+    params[field] = envelopeParameterText(field, member);
+  }
+  if (!(payloadField in object)) {
+    throw new Error(`the routed envelope requires the ${JSON.stringify(payloadField)} field carrying the message payload`);
+  }
+  return { payload: object[payloadField], params, envelope: true };
+}
+
+/** Strings ride as-is; other scalars ride their JSON text; structured
+ *  values have no address spelling and refuse. */
+function envelopeParameterText(field: string, value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  throw new Error(`envelope parameter ${JSON.stringify(field)}: an address parameter value must be a scalar, got ${value === null ? "null" : typeof value}`);
+}

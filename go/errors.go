@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	ErrCodeContextRequired   = "CONTEXT_REQUIRED"
+	ErrCodeContextRequired = "CONTEXT_REQUIRED"
 	// ErrCodeRefused carries the binding-invoker contract's never-dispatched
 	// guarantee: the invocation was refused before dispatch and no
 	// observable interaction side effect occurred. Emitted ONLY where that

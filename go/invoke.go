@@ -205,6 +205,29 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 		}
 		prepared = &preparedInput{Value: value}
 	}
+	// The routed envelope (§9.2): a parameterized channel's publish input
+	// arrives as {payload, <params>}; parameter fields split off for
+	// address expansion (explicit input winning over the
+	// configuration.address.parameters pre-fill) and the payload rides on
+	// to the ordinary codec lanes alone.
+	if prepared != nil {
+		payload, envelopeParams, isEnvelope, eerr := splitInputEnvelope(ch, prepared.Value)
+		if eerr != nil {
+			h.FireError(&ExecutionError{Code: ErrCodeRefused, Message: eerr.Error()})
+			return
+		}
+		if isEnvelope {
+			prepared.Value = payload
+			merged := map[string]string{}
+			for name, value := range addrCfg.Parameters {
+				merged[name] = value
+			}
+			for name, value := range envelopeParams {
+				merged[name] = value
+			}
+			addrCfg.Parameters = merged
+		}
+	}
 	var outgoing any
 	if prepared != nil {
 		outgoing = prepared.Value

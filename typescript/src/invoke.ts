@@ -85,6 +85,7 @@ import {
   resolveWSUpgrade,
 } from "./bindings.js";
 import { AvroBinaryCodec } from "./avro.js";
+import { locationlessParamNames, splitInputEnvelope } from "./content.js";
 import {
   decodeContentType,
   encodeInput,
@@ -278,16 +279,33 @@ export async function runBinding(
   try {
     const addrCfg = addressConfiguration(args.context);
     const needsPayload = channelNeedsOutgoingPayload(ch);
-    if (needsPayload) {
-      if (asyncOp.action !== "receive") throw new Error("subscription address uses a message runtime expression before any outgoing message exists");
-      if (!externalDriver && target.protocol !== "http" && target.protocol !== "https") {
+    // The routed envelope (§9.2): a parameterized channel's publish input
+    // arrives as {payload, <params>}; the parameter fields must be read
+    // before the address can be spelled, exactly like a payload-derived
+    // location expression.
+    const needsEnvelopeSplit = asyncOp.action === "receive"
+      && locationlessParamNames(ch).length > 0
+      && !noInputDeclared(args);
+    if (needsPayload || needsEnvelopeSplit) {
+      if (needsPayload && asyncOp.action !== "receive") throw new Error("subscription address uses a message runtime expression before any outgoing message exists");
+      if (needsPayload && !externalDriver && target.protocol !== "http" && target.protocol !== "https") {
         throw new Error("WebSocket publish address runtime expressions are not available before connection in the built-in driver");
       }
-      if (noInputDeclared(args)) throw new Error("address runtime expression requires an outgoing message, but the operation declares no input");
+      if (needsPayload && noInputDeclared(args)) throw new Error("address runtime expression requires an outgoing message, but the operation declares no input");
       const first = await readFirstInput(h);
-      if (!first.ok) throw new Error("address runtime expression requires an outgoing message, but invocation input is absent");
+      if (!first.ok) {
+        if (needsPayload) throw new Error("address runtime expression requires an outgoing message, but invocation input is absent");
+        throw new Error("the parameterized channel's input is the routed envelope, but invocation input is absent");
+      }
       await h.closeInput();
       preparedInput = first;
+    }
+    if (needsEnvelopeSplit && preparedInput !== undefined) {
+      const split = splitInputEnvelope(ch, preparedInput.value);
+      if (split.envelope) {
+        preparedInput = { ok: true, value: split.payload };
+        addrCfg.parameters = { ...addrCfg.parameters, ...split.params };
+      }
     }
     address = resolveAddress(ch, channelName, addrCfg, preparedInput?.value);
   } catch (e: unknown) {

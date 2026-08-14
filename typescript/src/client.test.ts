@@ -77,8 +77,11 @@ describe("AsyncAPIClient", () => {
         interaction: "publish",
       }),
     ]);
+    // The routed envelope (§9.2, ruled 2026-08-14): a parameterized
+    // channel's publish input is {payload, <params>}; the configured
+    // address pre-fill still supplies tenant, so only payload rides here.
     await expect(
-      client.publish("#/channels/commands~1{tenant}/publish", { id: 1 }),
+      client.publish("#/channels/commands~1{tenant}/publish", { payload: { id: 1 } }),
     ).resolves.toEqual([]);
     expect(fetch).toHaveBeenCalledOnce();
     client.close();

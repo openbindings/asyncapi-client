@@ -96,7 +96,11 @@ func selectedInputMessages(doc *document, op *asyncOperation, ch *channel, bindC
 		return nil, fmt.Errorf("selected message has an unresolved trait reference")
 	}
 	if selected.message.Headers != nil {
-		return nil, fmt.Errorf("selected message declares headers, which this AsyncAPI binding revision cannot carry")
+		// The routed envelope carries declared headers on protocol cells
+		// with native header carriage (§9.2, ruled 2026-08-14); this build
+		// has not yet qualified a carriage cell, so the direction refuses
+		// before dispatch as a per-cell capability — never a silent drop.
+		return nil, fmt.Errorf("the selected message declares application headers; this build has no header carriage for the selected protocol cell")
 	}
 	return []message{selected.message}, nil
 }

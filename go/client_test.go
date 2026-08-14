@@ -131,7 +131,7 @@ func TestClientRefusesMessageHeadersInheritedFromTrait(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 	_, err = client.Publish(context.Background(), "submit", map[string]any{"id": 7}, InvocationOptions{})
-	if err == nil || !strings.Contains(err.Error(), "declares headers") {
+	if err == nil || !strings.Contains(err.Error(), "declares application headers") {
 		t.Fatalf("error = %v", err)
 	}
 	if requests != 0 {
@@ -558,7 +558,10 @@ func TestClientNormalizesAsyncAPIV2PerspectiveAndPreservesNativeRef(t *testing.T
 	if len(operations) != 1 || operations[0].Ref != "#/channels/commands~1{tenant}/publish" || operations[0].Action != "receive" {
 		t.Fatalf("operations = %#v", operations)
 	}
-	events, err := client.Publish(context.Background(), operations[0].Ref, map[string]any{"id": 1}, InvocationOptions{})
+	// The routed envelope (§9.2, ruled 2026-08-14): a parameterized
+	// channel's publish input is {payload, <params>}; the configured
+	// address pre-fill still supplies tenant, so only payload rides here.
+	events, err := client.Publish(context.Background(), operations[0].Ref, map[string]any{"payload": map[string]any{"id": 1}}, InvocationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
