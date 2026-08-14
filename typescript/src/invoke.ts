@@ -468,7 +468,7 @@ async function runExternalDriver(
     serverURL: string;
     address?: string;
     messages: readonly Readonly<Record<string, unknown>>[];
-    encode: (value: unknown) => Uint8Array;
+    encode: (value: unknown) => Uint8Array | Promise<Uint8Array>;
   } | undefined;
   let output: {
     channel?: Readonly<Record<string, unknown>>;
@@ -513,10 +513,11 @@ async function runExternalDriver(
         serverURL: inputTarget?.serverURL ?? target.serverURL,
         ...(inputAddress !== undefined ? { address: inputAddress } : {}),
         messages: inputMessages as unknown as readonly Readonly<Record<string, unknown>>[],
-        encode: (value) => {
-          const out = encodeInput(codec, value);
-          return typeof out === "string" ? new TextEncoder().encode(out) : out;
-        },
+        encode: (value) =>
+          encodeThroughHooks(args.hooks, siteFor(args, target.serverURL), value, (v) => {
+            const out = encodeInput(codec, v);
+            return typeof out === "string" ? new TextEncoder().encode(out) : out;
+          }),
       };
     }
 
@@ -1764,7 +1765,10 @@ async function runWSSubscribe(
         }
         let frame: string | Uint8Array;
         try {
-          frame = encodeInput(codec, msg);
+          frame = await encodeThroughHooks(args.hooks, siteFor(args, target.serverURL), msg, (v) => {
+            const out = encodeInput(codec, v);
+            return typeof out === "string" ? new TextEncoder().encode(out) : out;
+          });
         } catch (e: unknown) {
           h.fireError(new InvocationError(ERR_VALIDATION_FAILED, errorMessage(e)));
           return;
@@ -1894,7 +1898,10 @@ async function runWSPublish(
     for await (const msg of h.inputs()) {
       let frame: string | Uint8Array;
       try {
-        frame = encodeInput(codec, msg);
+        frame = await encodeThroughHooks(args.hooks, siteFor(args, target.serverURL), msg, (v) => {
+          const out = encodeInput(codec, v);
+          return typeof out === "string" ? new TextEncoder().encode(out) : out;
+        });
       } catch (e: unknown) {
         h.fireError(new InvocationError(ERR_VALIDATION_FAILED, errorMessage(e)));
         return;

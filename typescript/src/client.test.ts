@@ -437,7 +437,7 @@ describe("AsyncAPIClient", () => {
         expect(request.input?.address).toBe("/commands");
         expect(request.server?.protocol).toBe("mqtt");
         expect(request.input?.messages).toHaveLength(1);
-        expect(new TextDecoder().decode(request.input!.encode({ id: 9 }))).toBe('{"id":9}');
+        expect(new TextDecoder().decode(await request.input!.encode({ id: 9 }))).toBe('{"id":9}');
         expect(request.operation.bindings).toEqual({
           mqtt: { qos: 1 },
           future: { marker: "preserved", config: { type: "object" } },
@@ -555,5 +555,61 @@ describe("the byte boundary", () => {
     expect(Array.from(seen[0]!)).toEqual([0x07, ...Array.from(new TextEncoder().encode("payload"))]);
     expect(events).toEqual(["wire"]);
     client.close();
+  });
+});
+
+// The encode codec seam is consulted on EVERY input lane, not only HTTP
+// unary (the Go twin consults it on all four; a TS-only HTTP-only wiring
+// was a same-inputs-different-outcomes parity break, caught in review).
+describe("encode hook on the WebSocket lane", () => {
+  it("frames published values through the consumer codec", async () => {
+    const received: Buffer[] = [];
+    const wss = new WebSocketServer({ port: 0 });
+    const port = (wss.address() as { port: number }).port;
+    wss.on("connection", (socket) => {
+      socket.on("message", (data: Buffer) => {
+        received.push(data);
+        socket.close();
+      });
+    });
+    try {
+      const doc = {
+        asyncapi: "3.0.0",
+        info: { title: "ws bytes", version: "1" },
+        servers: { test: { host: `127.0.0.1:${port}`, protocol: "ws" } },
+        channels: {
+          blobs: { address: "/", messages: { Blob: { contentType: "application/octet-stream" } } },
+        },
+        operations: {
+          store: {
+            action: "receive",
+            channel: { $ref: "#/channels/blobs" },
+            messages: [{ $ref: "#/channels/blobs/messages/Blob" }],
+          },
+        },
+      };
+      const client = await AsyncAPIClient.load(doc, {
+        hooks: {
+          encode: (_site, value) =>
+            typeof value === "string"
+              ? new Uint8Array([0x07, ...new TextEncoder().encode(value)])
+              : ASYNCAPI_USE_DEFAULT,
+        },
+      });
+      let publishError: unknown;
+      await client.publish("store", "payload", {
+        context: { configuration: { websocketMessageType: "binary" } },
+      }).catch((e: unknown) => { publishError = e; });
+      // The server-side message event races the client's completion; wait
+      // for delivery before asserting.
+      for (let i = 0; i < 100 && received.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (received.length === 0 && publishError !== undefined) throw publishError;
+      client.close();
+      expect(Array.from(received[0] ?? [])).toEqual([0x07, ...Array.from(new TextEncoder().encode("payload"))]);
+    } finally {
+      wss.close();
+    }
   });
 });

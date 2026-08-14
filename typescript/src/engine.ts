@@ -42,7 +42,10 @@ export interface AsyncAPIHookSite {
   profile: string;
 }
 
-export const ASYNCAPI_USE_DEFAULT: unique symbol = Symbol("asyncapi: use default");
+// Registered (Symbol.for) so a dual CJS/ESM instantiation of this package
+// in one process still shares a single decline sentinel; a fresh Symbol()
+// would make the other build's sentinel leak through as a decoded value.
+export const ASYNCAPI_USE_DEFAULT = Symbol.for("openbindings.asyncapi-client.use-default");
 
 export interface AsyncAPIExecutionHooks {
   decode?(

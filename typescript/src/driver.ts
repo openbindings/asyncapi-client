@@ -41,7 +41,10 @@ export interface AsyncAPIProtocolDriverDirection {
 }
 
 export interface AsyncAPIProtocolDriverInput extends AsyncAPIProtocolDriverDirection {
-  readonly encode: (value: unknown) => Uint8Array;
+  /** Serializes one application value to the exact wire octets, consulting
+   *  the consumer codec seam before the built-in lane (so it may resolve
+   *  asynchronously, like decode). */
+  readonly encode: (value: unknown) => Uint8Array | Promise<Uint8Array>;
 }
 
 export interface AsyncAPIProtocolDriverOutput extends AsyncAPIProtocolDriverDirection {
