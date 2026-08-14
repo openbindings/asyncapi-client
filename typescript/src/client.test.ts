@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 import { AsyncAPIClient } from "./client.js";
-import { AsyncAPIEngine } from "./engine.js";
+import { AsyncAPIEngine, ASYNCAPI_USE_DEFAULT } from "./engine.js";
 import { AsyncAPIExecutionError } from "./engine.js";
 import type { AsyncAPIProtocolDriver } from "./driver.js";
 
@@ -466,6 +466,94 @@ describe("AsyncAPIClient", () => {
     const execution = await client.start("submit");
     const failure = execution.completed.catch((error: unknown) => error);
     await expect(failure).resolves.toEqual(expect.objectContaining({ code: "DRIVER_UNAVAILABLE" }));
+    client.close();
+  });
+});
+
+function byteDocument() {
+  return {
+    asyncapi: "3.0.0",
+    info: { title: "Byte boundary", version: "1.0.0" },
+    servers: { production: { host: "api.example.test", protocol: "https" } },
+    channels: {
+      blobs: {
+        address: "/blobs",
+        messages: {
+          Blob: { contentType: "application/octet-stream", payload: { type: "string", contentEncoding: "base64" } },
+          Stored: { contentType: "application/octet-stream" },
+        },
+      },
+    },
+    operations: {
+      store: {
+        action: "receive",
+        channel: { $ref: "#/channels/blobs" },
+        messages: [{ $ref: "#/channels/blobs/messages/Blob" }],
+        bindings: { http: { method: "PUT" } },
+        reply: { messages: [{ $ref: "#/channels/blobs/messages/Stored" }] },
+      },
+    },
+  };
+}
+
+// The artifact-authorized byte rule (§9.2, ruled 2026-08-13): declared
+// binary media carries exact octets, the canonical RFC 4648 §4 Base64
+// string being the boundary value in both directions. Go twin:
+// TestClientCarriesDeclaredBinaryMediaThroughTheByteBoundary.
+describe("the byte boundary", () => {
+  const wire = new Uint8Array([0x00, 0x01, 0xfe, 0xff]);
+  const wireBase64 = btoa(String.fromCharCode(...wire));
+
+  it("carries declared binary media as canonical Base64 in both directions", async () => {
+    const seen: Uint8Array[] = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      seen.push(new Uint8Array(await request.arrayBuffer()));
+      return new Response("stored", {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      });
+    });
+    const client = await AsyncAPIClient.load(byteDocument(), { fetch });
+    const events = await client.publish("store", wireBase64);
+    expect(Array.from(seen[0]!)).toEqual(Array.from(wire));
+    expect(events).toEqual([btoa("stored")]);
+    client.close();
+  });
+
+  it("refuses non-canonical Base64 and non-string values before dispatch", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const client = await AsyncAPIClient.load(byteDocument(), { fetch });
+    await expect(client.publish("store", "AAE_")).rejects.toThrow(/canonical Base64/);
+    await expect(client.publish("store", 7)).rejects.toThrow(/must be a canonical Base64 string/);
+    expect(fetch).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it("enriches through consumer Encode/Decode codec hooks", async () => {
+    const seen: Uint8Array[] = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      seen.push(new Uint8Array(await request.arrayBuffer()));
+      return new Response(new Uint8Array([0x07, 0x77, 0x69, 0x72, 0x65]), {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      });
+    });
+    const client = await AsyncAPIClient.load(byteDocument(), {
+      fetch,
+      hooks: {
+        encode: (_site, value) =>
+          typeof value === "string" ? new Uint8Array([0x07, ...new TextEncoder().encode(value)]) : ASYNCAPI_USE_DEFAULT,
+        decode: (_site, result) =>
+          result.bodyBytes && result.bodyBytes[0] === 0x07
+            ? new TextDecoder().decode(result.bodyBytes.subarray(1))
+            : ASYNCAPI_USE_DEFAULT,
+      },
+    });
+    const events = await client.publish("store", "payload");
+    expect(Array.from(seen[0]!)).toEqual([0x07, ...Array.from(new TextEncoder().encode("payload"))]);
+    expect(events).toEqual(["wire"]);
     client.close();
   });
 });

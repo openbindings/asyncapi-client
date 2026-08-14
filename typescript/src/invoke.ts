@@ -57,6 +57,7 @@ import {
   type Metadata,
   isJSONContentType,
   decodeThroughHooks,
+  encodeThroughHooks,
   resolveDeliveryUnitLimit,
   type InvokeHooks,
   type InvokeSite,
@@ -94,6 +95,8 @@ import {
   resolveInputCodec,
   selectedInputMessages,
   type InputCodec,
+  isBytesContentType,
+  encodeBase64,
 } from "./content.js";
 import { streamSSE } from "./sse.js";
 import { replyMessagesBindable } from "./authoring.js";
@@ -510,7 +513,10 @@ async function runExternalDriver(
         serverURL: inputTarget?.serverURL ?? target.serverURL,
         ...(inputAddress !== undefined ? { address: inputAddress } : {}),
         messages: inputMessages as unknown as readonly Readonly<Record<string, unknown>>[],
-        encode: (value) => new TextEncoder().encode(encodeInput(codec, value)),
+        encode: (value) => {
+          const out = encodeInput(codec, value);
+          return typeof out === "string" ? new TextEncoder().encode(out) : out;
+        },
       };
     }
 
@@ -538,11 +544,14 @@ async function runExternalDriver(
           if (payload.byteLength > limit) {
             throw new Error(`delivery unit exceeds configured ${limit}-byte limit`);
           }
-          const body = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+          const raw: RawResult = isBytesContentType(contentType)
+            // The byte boundary: exact octets, never a UTF-8 text decode.
+            ? { status: null, body: "", bodyBytes: payload, meta: {} }
+            : { status: null, body: new TextDecoder("utf-8", { fatal: true }).decode(payload), meta: {} };
           return decodeThroughHooks(
             args.hooks,
             siteFor(args, target.serverURL),
-            { status: null, body, meta: {} },
+            raw,
             builtinDecodeFor(contentType),
           );
         },
@@ -1146,9 +1155,12 @@ async function runUnaryPublish(
   }
   await h.closeInput();
 
-  let body: string;
+  let body: string | Uint8Array;
   try {
-    body = encodeInput(codec, first.value);
+    body = await encodeThroughHooks(args.hooks, siteFor(args, target.serverURL), first.value, (v) => {
+      const out = encodeInput(codec, v);
+      return typeof out === "string" ? new TextEncoder().encode(out) : out;
+    });
   } catch (e: unknown) {
     h.fireError(new InvocationError(ERR_VALIDATION_FAILED, errorMessage(e)));
     return;
@@ -1186,7 +1198,7 @@ async function runUnaryPublish(
     resp = await doFetch(url, {
       method: requestMethod(asyncOp, ""),
       headers,
-      body,
+      body: body as BodyInit,
       signal: h.signal,
       redirect: "manual",
     });
@@ -1216,17 +1228,17 @@ async function runUnaryPublish(
 
   h.setHeader(headersToMetadata(resp.headers));
 
-  let respText: string;
+  let respBytes: Uint8Array;
   try {
     // The unary reply body is one delivery unit: the consumer-configurable
     // delivery-unit bound applies (args.maxDeliveryUnitBytes, default 10MB).
-    respText = await readResponseText(resp, resolveDeliveryUnitLimit(args));
+    respBytes = await readResponseBytes(resp, resolveDeliveryUnitLimit(args));
   } catch (e: unknown) {
     h.fireError(new InvocationError(ERR_RESPONSE_ERROR, errorMessage(e)));
     return;
   }
 
-  if (respText.length === 0) {
+  if (respBytes.byteLength === 0) {
     // An empty body (202/204 acknowledgments included) yields no output
     // value: an acknowledgment is not a message and emits no value (§8).
     // The rule is body-based, never status-based.
@@ -1263,10 +1275,18 @@ async function runUnaryPublish(
   // Never sniffed.
   let output: unknown;
   try {
+    let raw: RawResult;
+    if (isBytesContentType(replyDecode)) {
+      // The byte boundary: exact octets, never a UTF-8 text decode.
+      raw = { status: resp.status, body: "", bodyBytes: respBytes, meta: headersToMetadata(resp.headers) };
+    } else {
+      const respText = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(respBytes);
+      raw = { status: resp.status, body: respText, meta: headersToMetadata(resp.headers) };
+    }
     output = await decodeThroughHooks(
       args.hooks,
       siteFor(args, target.serverURL),
-      { status: resp.status, body: respText, meta: headersToMetadata(resp.headers) },
+      raw,
       builtinDecodeFor(replyDecode),
     );
   } catch (e: unknown) {
@@ -1742,7 +1762,7 @@ async function runWSSubscribe(
           h.fireError(new InvocationError(ERR_SOURCE_CONFIG_ERROR, errorMessage(codecErr)));
           return;
         }
-        let frame: string;
+        let frame: string | Uint8Array;
         try {
           frame = encodeInput(codec, msg);
         } catch (e: unknown) {
@@ -1750,7 +1770,7 @@ async function runWSSubscribe(
           return;
         }
         const messageType = contextConfiguration(args.context)["websocketMessageType"];
-        inputPooled.send(messageType === "binary" ? new TextEncoder().encode(frame) : frame);
+        inputPooled.send(typeof frame === "string" ? (messageType === "binary" ? new TextEncoder().encode(frame) : frame) : frame);
         sent++;
       }
       if (exchange.requireInput && sent === 0) {
@@ -1872,7 +1892,7 @@ async function runWSPublish(
     // published, so the invocation fails loudly.
     let sent = 0;
     for await (const msg of h.inputs()) {
-      let frame: string;
+      let frame: string | Uint8Array;
       try {
         frame = encodeInput(codec, msg);
       } catch (e: unknown) {
@@ -1880,7 +1900,7 @@ async function runWSPublish(
         return;
       }
       const messageType = contextConfiguration(args.context)["websocketMessageType"];
-      pooled.send(messageType === "binary" ? new TextEncoder().encode(frame) : frame);
+      pooled.send(typeof frame === "string" ? (messageType === "binary" ? new TextEncoder().encode(frame) : frame) : frame);
       sent++;
     }
     if (sent === 0) {
@@ -1955,7 +1975,14 @@ async function readErrorBody(resp: Response): Promise<unknown> {
  */
 export function builtinDecodeFor(contentType: string): OutputDecoder {
   const isJSON = isJSONContentType(contentType);
+  const isBytes = isBytesContentType(contentType);
   return (_site: InvokeSite, raw: RawResult): unknown => {
+    if (isBytes) {
+      // The byte boundary: exact octets as the canonical Base64 string.
+      const octets = raw.bodyBytes ?? new TextEncoder().encode(raw.body);
+      if (octets.byteLength === 0) return null;
+      return encodeBase64(octets);
+    }
     if (raw.body.length === 0) return null;
     if (isJSON) {
       try {
@@ -2012,6 +2039,36 @@ function decodeTrailer(hooks: InvokeHooks | null | undefined, builtinDecode: str
 function toInvocationError(e: unknown): InvocationError {
   if (e instanceof InvocationError) return e;
   return new InvocationError(ERR_RESPONSE_ERROR, errorMessage(e));
+}
+
+async function readResponseBytes(resp: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!resp.body) return new Uint8Array(await resp.arrayBuffer());
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        // Cancel the body stream before bailing; releasing the lock alone
+        // leaves the response socket pinned on the remaining bytes.
+        await reader.cancel().catch(() => {});
+        throw new Error(`response exceeds ${maxBytes} byte limit`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 
 async function readResponseText(resp: Response, maxBytes: number): Promise<string> {

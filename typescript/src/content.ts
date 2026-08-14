@@ -142,7 +142,7 @@ export function decodeContentType(
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("output message has an unresolved trait reference");
     validateMessageBindingVersion(message);
     if (message.headers !== undefined) throw new Error("output message declares headers, which the application-value boundary cannot carry");
-    supportedMessageContentType(messageEffectiveContentType(doc, message));
+    carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
   const types = completeEffectiveTypes(doc, msgs);
   if (types.length > 1) throw new Error("output messages declare conflicting effective content types");
@@ -158,8 +158,13 @@ export function decodeContentType(
  */
 export interface InputCodec {
   /** JSON serializes the value as JSON; otherwise the text lane applies (a
-   *  string value sent raw; a non-string value is refused). */
+   *  string value sent raw; a non-string value is refused) unless bytes
+   *  selects the byte boundary. */
   json: boolean;
+  /** The artifact-authorized byte rule (§9.2, ruled 2026-08-13): the input
+   *  value is the canonical RFC 4648 §4 Base64 string of the exact octets
+   *  the wire carries. */
+  bytes?: boolean;
   /** The declared type the wire carries ("" when the declaration is
    *  ambiguous and names no one type). */
   contentType: string;
@@ -190,10 +195,14 @@ export function resolveInputCodec(
     return { json: lane === "application/json", contentType: lane === "application/json" ? "application/json" : "text/plain; charset=utf-8" };
   }
   const effective = messageEffectiveContentType(doc, msgs[0]!);
-  supportedMessageContentType(effective);
+  if (isJSONMediaType(t) || isTextContentType(t)) supportedMessageContentType(effective);
   if (isJSONMediaType(t)) return { json: true, contentType: effective };
   if (isTextContentType(t)) return { json: false, contentType: effective };
-  throw new Error(`effective content type ${JSON.stringify(effective)} has no built-in application-value carriage`);
+  // The artifact-authorized byte rule: any other syntactically valid
+  // declared media carries exact octets, the caller's canonical Base64
+  // string being the boundary value. A malformed declaration refuses.
+  parseMedia(effective);
+  return { json: false, bytes: true, contentType: effective };
 }
 
 export function messageEffectiveContentType(
@@ -209,6 +218,32 @@ export function messageEffectiveContentType(
  * configuration. Binary codecs and non-UTF-8 charsets are not assigned an
  * invented bytes convention.
  */
+/**
+ * Admits every content type some lane carries: JSON family and UTF-8 text
+ * through the ordinary value boundary, any other syntactically valid media
+ * through the byte boundary (§9.2's byte rule). Only a malformed
+ * declaration refuses (Go twin: carriableMessageContentType).
+ */
+/** True when the declared media rides the byte boundary: syntactically
+ *  valid, neither JSON family nor text. */
+export function isBytesContentType(contentType: string): boolean {
+  if (contentType.trim() === "") return false;
+  let parsed;
+  try {
+    parsed = parseMedia(contentType);
+  } catch {
+    return false;
+  }
+  return !isJSONMediaType(parsed.type) && !parsed.type.startsWith("text/");
+}
+
+export function carriableMessageContentType(contentType: string): void {
+  if (contentType.trim() === "") return;
+  const parsed = parseMedia(contentType);
+  const textual = isJSONMediaType(parsed.type) || parsed.type.startsWith("text/");
+  if (textual) supportedMessageContentType(contentType);
+}
+
 export function supportedMessageContentType(contentType: string): void {
   if (contentType.trim() === "") return;
   const parsed = parseMedia(contentType);
@@ -238,7 +273,7 @@ export function resolveReplyContentType(
     if (message["x-ob-asyncapi-unresolved-trait"] !== undefined) throw new Error("selected reply message has an unresolved trait reference");
     validateMessageBindingVersion(message);
     if (message.headers !== undefined) throw new Error("selected reply message declares headers, which the application-value boundary cannot carry");
-    supportedMessageContentType(messageEffectiveContentType(doc, message));
+    carriableMessageContentType(messageEffectiveContentType(doc, message));
   }
 
   const declared = candidates.map((message) => message.contentType ?? doc.defaultContentType ?? "");
@@ -310,7 +345,13 @@ function mediaSubset(declared: ParsedMedia, actual: ParsedMedia): boolean {
  * codec: the JSON lane serializes; the text lane requires a string value
  * and sends it raw — a non-string value there is refused (§9.1).
  */
-export function encodeInput(codec: InputCodec, v: unknown): string {
+export function encodeInput(codec: InputCodec, v: unknown): string | Uint8Array {
+  if (codec.bytes) {
+    if (typeof v !== "string") {
+      throw new Error(`the governing declaration selects the byte boundary: the input value must be a canonical Base64 string, got ${typeof v}`);
+    }
+    return decodeCanonicalBase64(v);
+  }
   if (codec.json) return JSON.stringify(v ?? null);
   if (typeof v !== "string") {
     throw new Error(
@@ -321,6 +362,38 @@ export function encodeInput(codec: InputCodec, v: unknown): string {
     throw new Error("the text-lane input is not valid UTF-8");
   }
   return v;
+}
+
+/** Decodes canonical RFC 4648 §4 Base64 (standard alphabet, required
+ *  padding, no whitespace), refusing every non-canonical spelling. */
+export function decodeCanonicalBase64(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw new Error("the byte-boundary input is not canonical Base64 (standard alphabet, required padding, no whitespace)");
+  }
+  let binary: string;
+  try {
+    binary = atob(value);
+  } catch {
+    throw new Error("the byte-boundary input is not canonical Base64");
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  // Canonicality: re-encoding must reproduce the input exactly (rejects
+  // non-zero unused pad bits).
+  if (encodeBase64(bytes) !== value) {
+    throw new Error("the byte-boundary input is not canonical Base64");
+  }
+  return bytes;
+}
+
+/** Encodes bytes as canonical RFC 4648 §4 Base64. */
+export function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
 }
 
 /** ES2022-compatible equivalent of String.prototype.isWellFormed(). */

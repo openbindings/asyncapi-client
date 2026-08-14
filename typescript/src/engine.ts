@@ -29,6 +29,10 @@ export interface AsyncAPIEngineSource {
 export interface AsyncAPIHookResult {
   status: number | null;
   body: string;
+  /** The exact wire octets when the governing carriage is the byte
+   *  boundary (binary media never survives a UTF-8 text decode); body is
+   *  "" in that case. A consumer Decode codec reads these. */
+  bodyBytes?: Uint8Array;
   metadata: Record<string, string[]>;
 }
 
@@ -45,6 +49,17 @@ export interface AsyncAPIExecutionHooks {
     site: AsyncAPIHookSite,
     result: AsyncAPIHookResult,
   ): unknown | typeof ASYNCAPI_USE_DEFAULT | Promise<unknown | typeof ASYNCAPI_USE_DEFAULT>;
+  /**
+   * The input-side codec seam (§9.2's byte rule enrichment, ruled
+   * 2026-08-13): a consumer codec keyed on the declared content type may
+   * serialize the application value to the exact wire octets. Returning
+   * ASYNCAPI_USE_DEFAULT declines to the built-in lane (JSON, text, or the
+   * canonical Base64 byte boundary).
+   */
+  encode?(
+    site: AsyncAPIHookSite,
+    value: unknown,
+  ): Uint8Array | typeof ASYNCAPI_USE_DEFAULT | Promise<Uint8Array | typeof ASYNCAPI_USE_DEFAULT>;
 }
 
 export interface AsyncAPIEngineOptions {
@@ -393,9 +408,27 @@ function engineHooks(
           try {
             const value = await hooks.decode!(
               { ref: site.ref, target: site.target, profile: profile.name },
-              { status: raw.status, body: raw.body, metadata: cloneMetadata(raw.meta) },
+              {
+                status: raw.status,
+                body: raw.body,
+                ...(raw.bodyBytes !== undefined ? { bodyBytes: raw.bodyBytes } : {}),
+                metadata: cloneMetadata(raw.meta),
+              },
             );
             return value === ASYNCAPI_USE_DEFAULT ? USE_DEFAULT : value;
+          } catch (error: unknown) {
+            throw toInternalError(error);
+          }
+        }
+      : undefined,
+    encode: hooks?.encode
+      ? async (site: InvokeSite, value: unknown) => {
+          try {
+            const encoded = await hooks.encode!(
+              { ref: site.ref, target: site.target, profile: profile.name },
+              value,
+            );
+            return encoded === ASYNCAPI_USE_DEFAULT ? USE_DEFAULT : encoded;
           } catch (error: unknown) {
             throw toInternalError(error);
           }

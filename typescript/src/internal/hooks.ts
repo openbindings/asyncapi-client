@@ -1,5 +1,5 @@
 import { InvocationError, type Metadata } from "./invocation.js";
-import { ERR_EXECUTION_FAILED, ERR_RESPONSE_ERROR, ERR_RUNTIME } from "./errcodes.js";
+import { ERR_EXECUTION_FAILED, ERR_RESPONSE_ERROR, ERR_RUNTIME, ERR_VALIDATION_FAILED } from "./errcodes.js";
 import { familyName } from "./helpers.js";
 import type { JSONSchema } from "./types.js";
 
@@ -61,6 +61,10 @@ export function siteFamilyName(site: InvokeSite): string {
 export interface RawResult {
   status: number | null;
   body: string;
+  /** The exact wire octets, populated when the governing carriage is the
+   *  byte boundary (binary media never survives a UTF-8 text decode). A
+   *  consumer Decode codec reads these; body is "" in that case. */
+  bodyBytes?: Uint8Array;
   meta: Metadata;
 }
 
@@ -78,6 +82,19 @@ export const USE_DEFAULT: unique symbol = Symbol("openbindings: use default");
  * an InvocationError to choose the code, else the seam wraps it as
  * ERR_RESPONSE_ERROR with tier provenance.
  */
+/**
+ * The input-side codec seam (§9.2's byte rule enrichment, ruled
+ * 2026-08-13): a consumer codec keyed on the site's declared content type
+ * may serialize the application value to the exact wire octets — an Avro
+ * codec turning logical values into Avro bytes, for example. Returning
+ * USE_DEFAULT declines to the built-in lane (JSON, text, or the canonical
+ * Base64 byte boundary).
+ */
+export type InputEncoder = (
+  site: InvokeSite,
+  value: unknown,
+) => Uint8Array | typeof USE_DEFAULT | Promise<Uint8Array | typeof USE_DEFAULT>;
+
 export type OutputDecoder = (
   site: InvokeSite,
   raw: RawResult,
@@ -111,12 +128,13 @@ export type FieldRouter = (site: InvokeSite, field: string, value: unknown) => s
 /** One tier's hook slots; either tier may be all-undefined. */
 export interface HookSlots {
   decode?: OutputDecoder;
+  encode?: InputEncoder;
   classify?: ResultClassifier;
   route?: FieldRouter;
 }
 
 function slotsEmpty(s: HookSlots): boolean {
-  return !s.decode && !s.classify && !s.route;
+  return !s.decode && !s.encode && !s.classify && !s.route;
 }
 
 const TIER_PER_INVOCATION = "per-invocation hook";
@@ -221,6 +239,34 @@ export class InvokeHooks {
     return runBuiltinDecode(site, raw, builtin);
   }
 
+  /**
+   * Runs the encode chain: per-invocation → invoker-level → builtin, each
+   * tier declining with USE_DEFAULT. A handled result's bytes are the exact
+   * wire payload.
+   */
+  async encodeInput(
+    site: InvokeSite,
+    value: unknown,
+    builtin: (value: unknown) => Uint8Array,
+  ): Promise<Uint8Array> {
+    const tiers: Array<[string, InputEncoder | undefined]> = [
+      [TIER_PER_INVOCATION, this.perInvocation.encode],
+      [TIER_INVOKER_LEVEL, this.invokerLevel.encode],
+    ];
+    for (const [tier, fn] of tiers) {
+      if (!fn) continue;
+      let v: Uint8Array | typeof USE_DEFAULT;
+      try {
+        v = await fn(site, value);
+      } catch (err) {
+        throw hookTerminal(tier, ERR_VALIDATION_FAILED, err);
+      }
+      if (v === USE_DEFAULT) continue;
+      return v;
+    }
+    return builtin(value);
+  }
+
   /** Runs the classify chain with the same tiering and channels. */
   async classify(
     site: InvokeSite,
@@ -292,6 +338,17 @@ export async function decodeThroughHooks(
 ): Promise<unknown> {
   if (hooks) return hooks.decodeOutput(site, raw, builtin);
   return runBuiltinDecode(site, raw, builtin);
+}
+
+/** Null-safe encode through the seam (see decodeThroughHooks). */
+export async function encodeThroughHooks(
+  hooks: InvokeHooks | null | undefined,
+  site: InvokeSite,
+  value: unknown,
+  builtin: (value: unknown) => Uint8Array,
+): Promise<Uint8Array> {
+  if (hooks) return hooks.encodeInput(site, value, builtin);
+  return builtin(value);
 }
 
 /** Null-safe classify through the seam (see decodeThroughHooks). */

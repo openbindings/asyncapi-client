@@ -85,9 +85,16 @@ var ErrUseDefault = errors.New("asyncapi-client: use default")
 type outputDecoder func(invokeSite, RawResult) (any, error)
 
 // Hooks are AsyncAPI-native customization points. handled=false declines to
-// the artifact runtime's built-in decoder.
+// the artifact runtime's built-in codec.
 type Hooks struct {
 	Decode func(HookSite, RawResult) (value any, handled bool, err error)
+	// Encode is the input-side codec seam (§9.2's byte rule enrichment,
+	// ruled 2026-08-13): a consumer codec keyed on the site's declared
+	// content type may serialize the application value to the exact wire
+	// octets — an Avro codec turning logical values into Avro bytes, for
+	// example. handled=false declines to the built-in lane (JSON, text, or
+	// the canonical Base64 byte boundary).
+	Encode func(HookSite, any) (payload []byte, handled bool, err error)
 }
 
 type invokeHooks struct {
@@ -114,6 +121,22 @@ func (h *invokeHooks) DecodeOutput(site invokeSite, raw RawResult, builtin outpu
 		return nil, &ExecutionError{Code: ErrCodeRuntime, Message: "AsyncAPI execution has no output decoder"}
 	}
 	return builtin(site, raw)
+}
+
+// EncodeInput consults the consumer Encode codec before the built-in lane:
+// a handled result's bytes are the exact wire payload; declining falls to
+// the resolved built-in codec (JSON, text, or the Base64 byte boundary).
+func (h *invokeHooks) EncodeInput(site invokeSite, value any, builtin func(any) ([]byte, error)) ([]byte, error) {
+	if h != nil && h.hooks != nil && h.hooks.Encode != nil {
+		payload, handled, err := h.hooks.Encode(HookSite{Operation: site.Operation, Ref: site.Ref, Target: site.Target, Profile: h.profile}, value)
+		if err != nil {
+			return nil, asExecutionError(err)
+		}
+		if handled {
+			return payload, nil
+		}
+	}
+	return builtin(value)
 }
 
 func (h *invokeHooks) DecodeDecidedBy() string {

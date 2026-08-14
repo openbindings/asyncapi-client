@@ -98,7 +98,9 @@ func messageBindable(doc *document, m message) bool {
 			return false
 		}
 	}
-	return supportedMessageContentType(messageEffectiveContentType(doc, m)) == nil
+	// Binary media is carriable through the byte boundary (§9.2's byte
+	// rule); only a malformed content-type declaration refuses.
+	return carriableMessageContentType(messageEffectiveContentType(doc, m)) == nil
 }
 
 func replyMessagesBindable(doc *document, op *asyncOperation) bool {

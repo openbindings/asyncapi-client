@@ -1,6 +1,7 @@
 package asyncapiclient
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"mime"
@@ -183,8 +184,13 @@ func decodeContentType(doc *document, msgs []message) string {
 // request-side declaration.
 type inputCodec struct {
 	// JSON serializes the value as JSON; otherwise the text lane applies
-	// (a string value sent raw; a non-string value is refused).
+	// (a string value sent raw; a non-string value is refused) unless Bytes
+	// selects the byte boundary.
 	JSON bool
+	// Bytes selects the artifact-authorized byte rule (§9.2, ruled
+	// 2026-08-13): the input value is the canonical RFC 4648 §4 Base64
+	// string of the exact octets the wire carries.
+	Bytes bool
 	// ContentType is the declared type the wire carries ("" when the
 	// declaration is ambiguous and names no one type).
 	ContentType string
@@ -234,7 +240,14 @@ func resolveInputCodec(doc *document, msgs []message, contexts ...map[string]any
 		}
 		return inputCodec{JSON: false, ContentType: effective}, nil
 	default:
-		return inputCodec{}, fmt.Errorf("effective content type %q has no built-in application-value carriage", messageEffectiveContentType(doc, msgs[0]))
+		// The artifact-authorized byte rule: any other syntactically valid
+		// declared media carries exact octets, the caller's canonical Base64
+		// string being the boundary value. A malformed declaration refuses.
+		effective := messageEffectiveContentType(doc, msgs[0])
+		if _, _, err := mime.ParseMediaType(effective); err != nil {
+			return inputCodec{}, fmt.Errorf("invalid media type %q: %v", effective, err)
+		}
+		return inputCodec{Bytes: true, ContentType: effective}, nil
 	}
 }
 
@@ -263,6 +276,31 @@ func supportedMessageContentType(contentType string) error {
 	}
 	if charset := strings.ToLower(strings.TrimSpace(params["charset"])); charset != "" && charset != "utf-8" && charset != "utf8" {
 		return fmt.Errorf("effective content type %q declares unsupported non-UTF-8 charset %q", contentType, params["charset"])
+	}
+	return nil
+}
+
+// carriableMessageContentType admits every content type some lane carries:
+// JSON family and UTF-8 text through the ordinary value boundary, any other
+// syntactically valid media through the byte boundary. Only a malformed
+// declaration refuses.
+func carriableMessageContentType(contentType string) error {
+	if strings.TrimSpace(contentType) == "" {
+		return nil
+	}
+	if err := supportedMessageContentType(contentType); err != nil {
+		if _, _, perr := mime.ParseMediaType(contentType); perr != nil {
+			return fmt.Errorf("invalid media type %q: %v", contentType, perr)
+		}
+		mediaType, params, _ := mime.ParseMediaType(contentType)
+		mediaType = strings.ToLower(mediaType)
+		textual := mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") || strings.HasPrefix(mediaType, "text/")
+		if textual {
+			// The textual lanes' charset constraint still governs.
+			_ = params
+			return err
+		}
+		return nil
 	}
 	return nil
 }
@@ -298,7 +336,7 @@ func resolveSubscriptionContentType(doc *document, msgs []message, bindCtx map[s
 		if ct == "" {
 			ct = doc.DefaultContentType
 		}
-		if err := supportedMessageContentType(ct); err != nil {
+		if err := carriableMessageContentType(ct); err != nil {
 			return "", err
 		}
 		identity := ""
@@ -359,7 +397,7 @@ func resolveReplyContentType(doc *document, op *asyncOperation, status int, actu
 		if m.Headers != nil {
 			return "", fmt.Errorf("selected reply message declares headers, which the application-value boundary cannot carry")
 		}
-		if err := supportedMessageContentType(messageEffectiveContentType(doc, m)); err != nil {
+		if err := carriableMessageContentType(messageEffectiveContentType(doc, m)); err != nil {
 			return "", err
 		}
 	}
@@ -467,6 +505,20 @@ func canonicalMedia(value string) (string, map[string]string, error) {
 // resolved codec: the JSON lane marshals; the text lane requires a string
 // value and sends it raw — a non-string value there is refused (§9.1).
 func encodeInput(codec inputCodec, v any) ([]byte, error) {
+	if codec.Bytes {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("the governing declaration selects the byte boundary: the input value must be a canonical Base64 string, got %T", v)
+		}
+		decoded, err := base64.StdEncoding.Strict().DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("the byte-boundary input is not canonical Base64: %v", err)
+		}
+		if base64.StdEncoding.EncodeToString(decoded) != s {
+			return nil, fmt.Errorf("the byte-boundary input is not canonical Base64 (standard alphabet, required padding, no whitespace)")
+		}
+		return decoded, nil
+	}
 	if codec.JSON {
 		return json.Marshal(v)
 	}

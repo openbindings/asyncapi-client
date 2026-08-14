@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -442,8 +443,7 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 		inputMessages = selected
 		request.Input = &DriverInput{DriverDirection: driverDirection(inputChannel, inputTarget, inputAddress, inputMessages, driverDocument)}
 		request.Input.Encode = func(value any) ([]byte, error) {
-			encoded, err := encodeInput(codec, value)
-			return []byte(encoded), err
+			return args.Hooks.EncodeInput(siteFor(args, ""), value, func(v any) ([]byte, error) { return encodeInput(codec, v) })
 		}
 		if operation.Reply != nil {
 			outputMessages = replyGoverningMessages(doc, operation)
@@ -465,7 +465,9 @@ func prepareProtocolDriverRequest(target resolvedTarget, operationKey string, op
 			}
 			inputMessages = selected
 			request.Input = &DriverInput{DriverDirection: driverDirection(inputChannel, inputTarget, inputAddress, inputMessages, driverDocument)}
-			request.Input.Encode = func(value any) ([]byte, error) { return encodeInput(codec, value) }
+			request.Input.Encode = func(value any) ([]byte, error) {
+				return args.Hooks.EncodeInput(siteFor(args, ""), value, func(v any) ([]byte, error) { return encodeInput(codec, v) })
+			}
 		}
 	}
 	if len(outputMessages) > 0 {
@@ -1095,7 +1097,7 @@ func runUnaryPublish(ctx context.Context, client *http.Client, target resolvedTa
 	}
 	_ = h.CloseInput()
 
-	body, err := encodeInput(codec, first)
+	body, err := args.Hooks.EncodeInput(siteFor(args, target.ServerURL), first, func(v any) ([]byte, error) { return encodeInput(codec, v) })
 	if err != nil {
 		h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: err.Error()})
 		return
@@ -1576,7 +1578,7 @@ func runWSSubscribe(ctx context.Context, pool *wsPool, target resolvedTarget, ad
 				if readErr != nil {
 					return
 				}
-				frame, encodeErr := encodeInput(codec, value)
+				frame, encodeErr := args.Hooks.EncodeInput(siteFor(args, target.ServerURL), value, func(v any) ([]byte, error) { return encodeInput(codec, v) })
 				if encodeErr != nil {
 					h.FireError(&ExecutionError{Code: ErrCodeValidationFailed, Message: encodeErr.Error()})
 					return
@@ -2040,9 +2042,14 @@ func applyCredentialsViaSecuritySchemes(req *http.Request, doc *document, secSrv
 // channel for error-frame conventions.
 func builtinDecodeFor(contentType string) outputDecoder {
 	isJSON := isJSONContentType(contentType)
+	isBytes := contentType != "" && !isJSON && !isTextContentType(contentType)
 	return func(_ invokeSite, raw RawResult) (any, error) {
 		if len(raw.Body) == 0 {
 			return nil, nil
+		}
+		if isBytes {
+			// The byte boundary: exact octets as the canonical Base64 string.
+			return base64.StdEncoding.EncodeToString(raw.Body), nil
 		}
 		if isJSON {
 			var parsed any

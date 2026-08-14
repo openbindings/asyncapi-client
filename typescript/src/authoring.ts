@@ -4,8 +4,8 @@ import type {
   AsyncAPIOperation,
 } from "./asyncapi-types.js";
 import {
+  carriableMessageContentType,
   messageEffectiveContentType,
-  supportedMessageContentType,
 } from "./content.js";
 
 /** True when the current execution profile can carry one declared message. */
@@ -18,7 +18,9 @@ export function messageBindable(
   const version = message.bindings?.http?.bindingVersion;
   if (version !== undefined && version !== "0.3.0") return false;
   try {
-    supportedMessageContentType(messageEffectiveContentType(doc, message));
+    // Binary media is carriable through the byte boundary (§9.2's byte
+    // rule); only a malformed content-type declaration refuses.
+    carriableMessageContentType(messageEffectiveContentType(doc, message));
     return true;
   } catch {
     return false;

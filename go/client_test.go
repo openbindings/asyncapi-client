@@ -3,6 +3,7 @@ package asyncapiclient
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -585,5 +586,108 @@ func TestClientReportsUninstalledProtocolDriverAsCapabilityFailure(t *testing.T)
 	var failure *ExecutionError
 	if !errors.As(err, &failure) || failure.Code != ErrCodeDriverUnavailable {
 		t.Fatalf("failure = %#v (err %v)", failure, err)
+	}
+}
+
+func byteArtifact() []byte {
+	return []byte(`{
+  "asyncapi":"3.0.0",
+  "info":{"title":"Byte boundary","version":"1.0.0"},
+  "servers":{"production":{"host":"api.example.test","protocol":"https"}},
+  "channels":{"blobs":{"address":"/blobs","messages":{
+    "Blob":{"contentType":"application/octet-stream","payload":{"type":"string","contentEncoding":"base64"}},
+    "Stored":{"contentType":"application/octet-stream"}
+  }}},
+  "operations":{"store":{
+    "action":"receive",
+    "channel":{"$ref":"#/channels/blobs"},
+    "messages":[{"$ref":"#/channels/blobs/messages/Blob"}],
+    "bindings":{"http":{"method":"PUT"}},
+    "reply":{"messages":[{"$ref":"#/channels/blobs/messages/Stored"}]}
+  }}
+}`)
+}
+
+// The artifact-authorized byte rule (§9.2, ruled 2026-08-13): declared
+// binary media carries exact octets, the canonical RFC 4648 §4 Base64
+// string being the boundary value in both directions.
+func TestClientCarriesDeclaredBinaryMediaThroughTheByteBoundary(t *testing.T) {
+	wire := []byte{0x00, 0x01, 0xFE, 0xFF}
+	var seen []byte
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		seen, _ = io.ReadAll(request.Body)
+		return &http.Response{
+			StatusCode: 200, Status: "200 OK", Header: http.Header{"Content-Type": {"application/octet-stream"}},
+			Body: io.NopCloser(strings.NewReader("stored")), Request: request,
+		}, nil
+	})}
+	client, err := Load(context.Background(), Source{Content: byteArtifact()}, LoadOptions{HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	events, err := client.Publish(context.Background(), "store", base64.StdEncoding.EncodeToString(wire), InvocationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(seen, wire) {
+		t.Fatalf("wire bytes = %#v, want %#v", seen, wire)
+	}
+	if len(events) != 1 || events[0].Value != base64.StdEncoding.EncodeToString([]byte("stored")) {
+		t.Fatalf("output = %#v, want the reply octets as canonical Base64", events)
+	}
+
+	// Non-canonical Base64 refuses loudly before dispatch.
+	if _, err := client.Publish(context.Background(), "store", "AAE_", InvocationOptions{}); err == nil {
+		t.Fatal("non-canonical Base64 must refuse")
+	}
+	if _, err := client.Publish(context.Background(), "store", 7, InvocationOptions{}); err == nil {
+		t.Fatal("a non-string byte-boundary value must refuse")
+	}
+}
+
+// The codec seam enrichment: consumer Encode/Decode hooks keyed on the
+// declared media turn logical values into wire octets and back, overriding
+// the Base64 floor.
+func TestClientCodecHooksEnrichTheByteBoundary(t *testing.T) {
+	var seen []byte
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		seen, _ = io.ReadAll(request.Body)
+		return &http.Response{
+			StatusCode: 200, Status: "200 OK", Header: http.Header{"Content-Type": {"application/octet-stream"}},
+			Body: io.NopCloser(strings.NewReader("\x07wire")), Request: request,
+		}, nil
+	})}
+	client, err := Load(context.Background(), Source{Content: byteArtifact()}, LoadOptions{HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	hooks := &Hooks{
+		Encode: func(_ HookSite, value any) ([]byte, bool, error) {
+			text, ok := value.(string)
+			if !ok {
+				return nil, false, nil
+			}
+			return append([]byte{0x07}, []byte(text)...), true, nil
+		},
+		Decode: func(_ HookSite, raw RawResult) (any, bool, error) {
+			if len(raw.Body) > 0 && raw.Body[0] == 0x07 {
+				return string(raw.Body[1:]), true, nil
+			}
+			return nil, false, nil
+		},
+	}
+	events, err := client.Publish(context.Background(), "store", "payload", InvocationOptions{Hooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(seen, append([]byte{0x07}, []byte("payload")...)) {
+		t.Fatalf("wire bytes = %#v", seen)
+	}
+	if len(events) != 1 || events[0].Value != "wire" {
+		t.Fatalf("output = %#v, want the hook-decoded logical value", events)
 	}
 }
