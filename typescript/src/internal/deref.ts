@@ -320,17 +320,6 @@ export async function dereference<T = unknown>(
   // was returned to a different parent.
   const resolvedNodes = new Map<object, unknown>();
 
-  // Nodes whose member walk is currently on the stack. A ref that resolves
-  // to such a node has found a genuine cycle: inlining would have to
-  // terminate by object sharing, which loses the artifact's own ref
-  // spelling and leaves back-edges at anonymous interior nodes (the shared
-  // graph aliases finer-grained nodes than any ref ever named). For
-  // entry-internal references the Reference Object is kept literal instead
-  // — the same surviving-$ref form the Go resolver's visited set produces —
-  // and downstream cyclic-reference hoisting rewrites it by the artifact's
-  // spelling.
-  const inProgress = new Set<object>();
-
   function invalidateResolvedSubtree(node: unknown, preserve: object): void {
     const seen = new WeakSet<object>();
     const walk = (value: unknown): void => {
@@ -420,13 +409,8 @@ export async function dereference<T = unknown>(
 
     if (Array.isArray(node)) {
       resolvedNodes.set(node, node);
-      inProgress.add(node);
-      try {
-        for (let i = 0; i < node.length; i++) {
-          node[i] = await walkAsync(node[i], document);
-        }
-      } finally {
-        inProgress.delete(node);
+      for (let i = 0; i < node.length; i++) {
+        node[i] = await walkAsync(node[i], document);
       }
       return node;
     }
@@ -454,16 +438,6 @@ export async function dereference<T = unknown>(
       resolvedNodes.set(obj, obj);
       const ref = obj.$ref;
       const target = await resolveReference(ref, obj, document);
-
-      if (
-        typeof target === "object" && target !== null
-        && inProgress.has(target)
-        && ref.startsWith("#")
-        && (scopeByNode.get(obj) ?? document.rootScope) === entryContext.rootScope
-      ) {
-        // Entry-internal cycle: keep the Reference Object literal.
-        return obj;
-      }
 
       if (target !== undefined) {
         const extraKeys = Object.keys(obj).filter((k) => k !== "$ref");
@@ -501,14 +475,9 @@ export async function dereference<T = unknown>(
     }
 
     resolvedNodes.set(obj, obj);
-    inProgress.add(obj);
-    try {
-      for (const key of Object.keys(obj)) {
-        if (shouldTraverseChild?.(obj, key, obj[key], ownerKey) === false) continue;
-        obj[key] = await walkAsync(obj[key], document, key);
-      }
-    } finally {
-      inProgress.delete(obj);
+    for (const key of Object.keys(obj)) {
+      if (shouldTraverseChild?.(obj, key, obj[key], ownerKey) === false) continue;
+      obj[key] = await walkAsync(obj[key], document, key);
     }
     return obj;
   }
