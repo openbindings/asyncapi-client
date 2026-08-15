@@ -1,5 +1,9 @@
 import type {
+  AsyncAPIDriverHeader,
+  AsyncAPIDriverUnit,
   AsyncAPIProtocolDriver,
+  AsyncAPIProtocolDriverInput,
+  AsyncAPIProtocolDriverOutput,
   AsyncAPIProtocolDriverRequest,
   AsyncAPIProtocolDriverSession,
 } from "@openbindings/asyncapi-client";
@@ -39,13 +43,17 @@ export interface KafkaClient {
 
 export interface KafkaProducer {
   connect(): Promise<void>;
-  send(record: { topic: string; messages: Array<{ value: Uint8Array; key?: Uint8Array }> }): Promise<unknown>;
+  send(record: {
+    topic: string;
+    messages: Array<{ value: Uint8Array; key?: Uint8Array; headers?: readonly AsyncAPIDriverHeader[] }>;
+  }): Promise<unknown>;
   disconnect(): Promise<void>;
 }
 
 export interface KafkaConsumerMessage {
   value: Uint8Array | null;
   key: Uint8Array | null;
+  headers?: readonly AsyncAPIDriverHeader[];
 }
 
 export interface KafkaConsumer {
@@ -59,6 +67,11 @@ export interface KafkaConsumer {
 /** Kafka execution under AsyncAPI Kafka binding versions 0.1.0 through 0.5.0. */
 export class AsyncAPIKafkaDriver implements AsyncAPIProtocolDriver {
   readonly protocols: readonly string[];
+
+  /** The Kafka cell's native per-message header carriage (record headers):
+   *  the routed envelope's application headers ride the unit seam (§9.2
+   *  per-cell capability). */
+  readonly carriesMessageHeaders = true;
 
   constructor(private readonly options: AsyncAPIKafkaDriverOptions = {}) {
     this.protocols = options.protocols ?? ["kafka"];
@@ -133,9 +146,9 @@ function resolveProfile(
 
   let key: Uint8Array | undefined;
   for (const message of direction.messages) {
-    if (message["headers"] !== undefined) {
-      throw new Error("Kafka message headers are outside the payload-only OpenBindings Kafka profile");
-    }
+    // Declared Message headers ride the routed envelope through the unit
+    // seam as Kafka record headers (§9.2 per-cell capability, qualified by
+    // this driver) — no longer a profile exclusion.
     const messageBinding = binding(message, "kafka");
     const version = validateBinding("message", messageBinding);
     validateMessageBinding(messageBinding, version);
@@ -188,11 +201,13 @@ async function publishInputs(
     let count = 0;
     for await (const value of session.inputs) {
       if (request.signal.aborted) return;
+      const unit = await encodeUnit(request.input, value);
       await producer.send({
         topic: profile.topic,
         messages: [{
-          value: request.input.encode(value),
+          value: unit.payload,
           ...(profile.key ? { key: profile.key } : {}),
+          ...(unit.headers.length > 0 ? { headers: unit.headers } : {}),
         }],
       });
       count++;
@@ -203,6 +218,30 @@ async function publishInputs(
   }
 }
 
+/** Prefers the unit seam (payload + record headers); a request built
+ *  without it falls back to the payload-only seam. (Go twin: encodeUnit.) */
+async function encodeUnit(
+  input: AsyncAPIProtocolDriverInput,
+  value: unknown,
+): Promise<{ payload: Uint8Array; headers: readonly AsyncAPIDriverHeader[] }> {
+  if (input.encodeUnit) {
+    const unit = await input.encodeUnit(value);
+    return { payload: unit.payload, headers: unit.headers };
+  }
+  return { payload: await input.encode(value), headers: [] };
+}
+
+/** Prefers the unit seam (record headers project into the routed envelope);
+ *  a request built without it falls back to the payload-only seam, dropping
+ *  no headers because none were contracted. (Go twin: decodeUnit.) */
+async function decodeUnit(
+  output: AsyncAPIProtocolDriverOutput,
+  unit: AsyncAPIDriverUnit,
+): Promise<unknown> {
+  if (output.decodeUnit) return output.decodeUnit(unit);
+  return output.decode(unit.payload);
+}
+
 async function subscribeOutputs(
   consumer: KafkaConsumer,
   request: AsyncAPIProtocolDriverRequest,
@@ -210,7 +249,7 @@ async function subscribeOutputs(
   profile: KafkaProfile,
 ): Promise<void> {
   if (!request.output) throw new Error("Kafka subscription request has no artifact output lane");
-  const decodeOutput = request.output.decode;
+  const output = request.output;
   await session.closeInput();
   await consumer.connect();
   try {
@@ -226,7 +265,10 @@ async function subscribeOutputs(
           if (message.value === null) {
             throw new Error("Kafka tombstone records are outside the currently qualified payload profile");
           }
-          await session.emit(await decodeOutput(message.value));
+          await session.emit(await decodeUnit(output, {
+            payload: message.value,
+            headers: message.headers ?? [],
+          }));
         } catch (error: unknown) {
           failRun(error);
           throw error;

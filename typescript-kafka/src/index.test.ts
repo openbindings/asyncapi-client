@@ -16,6 +16,31 @@ describe("AsyncAPI Kafka protocol driver", () => {
     while (cleanup.length > 0) await cleanup.pop()?.();
   });
 
+  // Kafka record-header carriage (§9.2 per-cell capability; Go twin:
+  // TestKafkaCarriesRecordHeadersBothDirections): the routed envelope's
+  // application headers ride the unit seam as record headers on publish,
+  // and received record headers project into the output envelope on
+  // subscribe — declared properties only, undeclared pairs never leak.
+  it("carries record headers both directions through the unit seam", async () => {
+    const document = kafkaDocument();
+    (document.channels.orders.messages.Event as Record<string, unknown>).headers = {
+      type: "object",
+      properties: { traceId: { type: "string" }, attempt: { type: "integer" } },
+    };
+    const factory = new FakeFactory();
+    const client = await AsyncAPIClient.load(document, {
+      drivers: [createAsyncAPIKafkaDriver({ clientFactory: factory })],
+    });
+    cleanup.push(() => client.close());
+    await client.publish("publish", {
+      payload: { id: "evt-1" },
+      headers: { traceId: "t-7", attempt: 2 },
+    });
+    const carried = Object.fromEntries((factory.sent[0]?.headers ?? []).map(({ key, value }) => [key, text(value)]));
+    expect(carried).toEqual({ traceId: "t-7", attempt: "2" });
+    expect(text(factory.sent[0]?.value)).toBe(JSON.stringify({ id: "evt-1" }));
+  });
+
   it("maps authored topic, client identity, group, key, codec, and ordering into the Kafka engine", async () => {
     const factory = new FakeFactory();
     const client = await AsyncAPIClient.load(kafkaDocument(), {
@@ -24,8 +49,8 @@ describe("AsyncAPI Kafka protocol driver", () => {
     });
     cleanup.push(() => client.close());
 
-    await client.publish("publish", { id: "evt-1" });
-    await client.publish("publish", { id: "evt-2" });
+    await client.publish("publish", { payload: { id: "evt-1" } });
+    await client.publish("publish", { payload: { id: "evt-2" } });
     expect(factory.configs).toEqual([
       { brokers: ["broker.example.test:9092"], clientId: "orders-client" },
       { brokers: ["broker.example.test:9092"], clientId: "orders-client" },
@@ -61,7 +86,7 @@ describe("AsyncAPI Kafka protocol driver", () => {
       context: { basic: { username: "must-not-leak", password: "must-not-leak" } },
     });
     cleanup.push(() => client.close());
-    await client.publish("publish", { id: "evt" });
+    await client.publish("publish", { payload: { id: "evt" } });
     expect(factory.configs[0]?.sasl).toBeUndefined();
 
     const secured = kafkaDocument();
@@ -72,7 +97,7 @@ describe("AsyncAPI Kafka protocol driver", () => {
       context: { basic: { username: "orders", password: "secret" } },
     });
     cleanup.push(() => securedClient.close());
-    await securedClient.publish("publish", { id: "evt" });
+    await securedClient.publish("publish", { payload: { id: "evt" } });
     expect(securedFactory.configs[0]?.sasl).toEqual({
       mechanism: "plain",
       username: "orders",
@@ -92,7 +117,7 @@ describe("AsyncAPI Kafka protocol driver", () => {
       context: { configuration: { kafka: { clientId: "cfg-client", groupId: "group-workers", key: "key-tenant" } } },
     });
     cleanup.push(() => client.close());
-    await client.publish("publish", { id: "configured" });
+    await client.publish("publish", { payload: { id: "configured" } });
     expect(factory.configs[0]?.clientId).toBe("cfg-client");
     expect(text(factory.sent[0]?.key)).toBe("key-tenant");
     factory.consumerMessages = [{ key: bytes("key-tenant"), value: bytes('{"id":"configured"}') }];
@@ -126,11 +151,6 @@ describe("AsyncAPI Kafka protocol driver", () => {
         error: /Schema Registry/,
       },
       {
-        name: "message headers",
-        mutate(document) { (document.channels.orders.messages.Event as Record<string, unknown>).headers = { type: "object" }; },
-        error: /declares headers/,
-      },
-      {
         name: "dynamic key without completion",
         mutate(document) { (document.channels.orders.messages.Event.bindings.kafka as Record<string, unknown>).key = { type: "string" }; },
         error: /does not select one value/,
@@ -149,7 +169,7 @@ describe("AsyncAPI Kafka protocol driver", () => {
         drivers: [createAsyncAPIKafkaDriver({ clientFactory: factory })],
       });
       cleanup.push(() => client.close());
-      await expect(client.publish("publish", { id: test.name })).rejects.toThrow(test.error);
+      await expect(client.publish("publish", { payload: { id: test.name } })).rejects.toThrow(test.error);
       expect(factory.configs, test.name).toHaveLength(0);
     }
   });
@@ -183,7 +203,7 @@ describe("AsyncAPI Kafka protocol driver", () => {
 
 class FakeFactory implements KafkaClientFactory {
   configs: KafkaConnectionConfig[] = [];
-  sent: Array<{ topic: string; value: Uint8Array; key?: Uint8Array }> = [];
+  sent: Array<{ topic: string; value: Uint8Array; key?: Uint8Array; headers?: readonly { key: string; value: Uint8Array }[] }> = [];
   subscribed: string[] = [];
   consumerOptions: Array<{ groupId: string; fromBeginning: boolean }> = [];
   consumerMessages: KafkaConsumerMessage[] = [];
@@ -201,7 +221,8 @@ class FakeFactory implements KafkaClientFactory {
     return {
       connect: async () => undefined,
       send: async ({ topic, messages }) => {
-        this.sent.push(...messages.map(({ value, key }) => ({
+        this.sent.push(...messages.map(({ value, key, headers }) => ({
+          ...(headers ? { headers } : {}),
           topic,
           value: new Uint8Array(value),
           ...(key ? { key: new Uint8Array(key) } : {}),

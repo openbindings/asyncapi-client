@@ -250,7 +250,9 @@ async function publishInputs(
   let count = 0;
   for await (const value of session.inputs) {
     if (request.signal.aborted) return;
-    const payload = request.input.encode(value);
+    // encode consults the consumer codec seam and may resolve
+    // asynchronously (the client's documented contract).
+    const payload = await request.input.encode(value);
     await publish(client, request.input.address, payload, { qos: profile.qos, retain: profile.retain });
     count++;
   }

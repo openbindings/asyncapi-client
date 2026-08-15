@@ -24,7 +24,11 @@ export {
   type AsyncAPIPrerequisites,
 } from "./engine.js";
 export type {
+  AsyncAPIDriverHeader,
+  AsyncAPIDriverUnit,
   AsyncAPIProtocolDriver,
+  AsyncAPIProtocolDriverInput,
+  AsyncAPIProtocolDriverOutput,
   AsyncAPIProtocolDriverRequest,
   AsyncAPIProtocolDriverSession,
 } from "./driver.js";

@@ -33,9 +33,9 @@ describe("AsyncAPI MQTT 3.1.1 driver", () => {
       await subscription.completed.catch(() => undefined);
     });
     await subscription.diagnostics.leading;
-    await client.publish("publishQ0", { id: "evt-0" });
-    await client.publish("publish", { id: "evt-17" });
-    await client.publish("publishQ2", { id: "evt-2" });
+    await client.publish("publishQ0", { payload: { id: "evt-0" } });
+    await client.publish("publish", { payload: { id: "evt-17" } });
+    await client.publish("publishQ2", { payload: { id: "evt-2" } });
 
     const events = subscription.events[Symbol.asyncIterator]();
     await expect(events.next()).resolves.toEqual({ done: false, value: { value: { id: "evt-0" }, metadata: {} } });
@@ -66,7 +66,7 @@ describe("AsyncAPI MQTT 3.1.1 driver", () => {
     });
     cleanup.push(async () => client.close());
 
-    await expect(client.publish("publish", { id: "evt-17" })).rejects.toThrow(/protocolVersion.*3\.1\.1/);
+    await expect(client.publish("publish", { payload: { id: "evt-17" } })).rejects.toThrow(/protocolVersion.*3\.1\.1/);
     expect(connected).toBe(false);
   });
 
@@ -86,7 +86,7 @@ describe("AsyncAPI MQTT 3.1.1 driver", () => {
     });
     cleanup.push(async () => client.close());
 
-    await expect(client.publish("publish", { id: "evt-17" })).rejects.toThrow(/MQTT 5 message-binding fields/);
+    await expect(client.publish("publish", { payload: { id: "evt-17" } })).rejects.toThrow(/MQTT 5 message-binding fields/);
     expect(connected).toBe(false);
   });
 
@@ -110,7 +110,7 @@ describe("AsyncAPI MQTT 3.1.1 driver", () => {
         })],
       });
       cleanup.push(async () => client.close());
-      await expect(client.publish("publish", { id: "evt-17" })).rejects.toThrow(/persistent MQTT sessions|Last Will/);
+      await expect(client.publish("publish", { payload: { id: "evt-17" } })).rejects.toThrow(/persistent MQTT sessions|Last Will/);
       expect(connected).toBe(false);
     }
   });
@@ -121,11 +121,11 @@ describe("AsyncAPI MQTT 3.1.1 driver", () => {
         mutate(document: ReturnType<typeof mqttDocument>) {
           (document.operations.publish.bindings.mqtt as Record<string, unknown>)["future"] = true;
         },
-        invoke: (client: AsyncAPIClient) => client.publish("publish", { id: "evt-17" }),
+        invoke: (client: AsyncAPIClient) => client.publish("publish", { payload: { id: "evt-17" } }),
       },
       {
         mutate(document: ReturnType<typeof mqttDocument>) { document.channels.events.address = "events/#"; },
-        invoke: (client: AsyncAPIClient) => client.publish("publish", { id: "evt-17" }),
+        invoke: (client: AsyncAPIClient) => client.publish("publish", { payload: { id: "evt-17" } }),
       },
       {
         mutate(document: ReturnType<typeof mqttDocument>) { document.channels.events.address = "events/a+"; },
@@ -169,7 +169,7 @@ describe("AsyncAPI MQTT 3.1.1 driver", () => {
     });
     cleanup.push(async () => client.close());
 
-    await client.publish("publishQ0", { id: "no-credential-leak" });
+    await client.publish("publishQ0", { payload: { id: "no-credential-leak" } });
     expect(observed).toEqual({});
   });
 
