@@ -62,6 +62,7 @@ func NormalizeDocument(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	hoistNonObjectAvroPayloads(envelope)
 	infoValue, hasInfo := envelope["info"]
 	infoObject, infoIsObject := infoValue.(map[string]any)
 	_, hasTitle := infoObject["title"].(string)

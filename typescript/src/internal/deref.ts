@@ -78,6 +78,17 @@ export interface DereferenceOptions {
      */
     ownerKey?: string,
   ) => boolean;
+
+  /**
+   * Position-aware admission of non-object external resources. By default an
+   * external `$ref` must return an object document; a format adapter may
+   * declare that the child subtree at `key` of `owner` enters a space whose
+   * governing schema language admits any JSON document root (the AsyncAPI
+   * client uses this for Avro-declared schema positions, where a top-level
+   * union is an array and a bare primitive type name is a string). Once
+   * entered, the space is inherited by the whole subtree.
+   */
+  nonObjectResourceSpace?: (owner: Record<string, unknown>, key: string) => boolean;
 }
 
 /** Resolve a JSON Pointer (RFC 6901) against a root object. */
@@ -148,18 +159,19 @@ async function fetchDocument(
   doFetch: typeof globalThis.fetch,
   parse: (text: string) => unknown,
   signal?: AbortSignal,
-): Promise<{ document: Record<string, unknown>; retrievalURI: string }> {
+): Promise<{ document: unknown; retrievalURI: string }> {
   const resp = await doFetch(url, { signal });
   if (!resp.ok) {
     throw new Error(`failed to fetch $ref ${url}: ${resp.status}`);
   }
   const text = await resp.text();
   const parsed = parse(text);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`external $ref ${url} did not return an object document`);
-  }
   return {
-    document: parsed as Record<string, unknown>,
+    // The object demand is applied per referencing position (see
+    // nonObjectResourceSpace): a resource entered from an ordinary position
+    // must be an object document, while a non-object-space position admits
+    // any JSON document root.
+    document: parsed,
     // Fetch exposes the final retrieval URI after redirects. When a test or
     // host fetch implementation cannot provide it, the requested URI remains
     // the only available base.
@@ -286,8 +298,14 @@ export async function dereference<T = unknown>(
 
   const entryContext = registerDocument(cloned, baseUrl);
 
+  const nonObjectResourceSpace = options?.nonObjectResourceSpace;
+  const childSpace = (owner: Record<string, unknown>, key: string, inherited: boolean): boolean =>
+    inherited || (nonObjectResourceSpace?.(owner, key) ?? false);
+
   interface ExternalRecord {
     context?: DocumentContext;
+    /** False when the fetched document's root is not a JSON object. */
+    rootIsObject?: boolean;
     ready?: Promise<DocumentContext>;
   }
   const externalCache = new Map<string, ExternalRecord>();
@@ -302,7 +320,24 @@ export async function dereference<T = unknown>(
     externalCache.set(key, record);
     record.ready = (async () => {
       const fetched = await fetchDocument(key, doFetch, parse, signal);
-      const context = registerDocument(fetched.document, fetched.retrievalURI, key);
+      const rootValue = fetched.document;
+      record.rootIsObject = rootValue !== null && typeof rootValue === "object" && !Array.isArray(rootValue);
+      if (rootValue === null || typeof rootValue !== "object") {
+        // A primitive document root (a bare Avro type name, for example)
+        // carries no references and no anchors: a minimal context suffices,
+        // and admission is judged per referencing position below.
+        const context: DocumentContext = {
+          root: rootValue as unknown as Record<string, unknown>,
+          rootScope: {
+            root: rootValue as unknown as Record<string, unknown>,
+            baseURI: withoutFragment(fetched.retrievalURI || key),
+            anchors: new Map(),
+          },
+        };
+        record.context = context;
+        return context;
+      }
+      const context = registerDocument(rootValue as Record<string, unknown>, fetched.retrievalURI, key);
       // Publish the parsed/indexed document before walking it. A circular
       // external edge can now resolve back to this object graph without
       // awaiting itself; resolvedNodes below terminates the object cycle.
@@ -370,6 +405,7 @@ export async function dereference<T = unknown>(
     ref: string,
     owner: Record<string, unknown>,
     document: DocumentContext,
+    admitNonObjectResource: boolean,
   ): Promise<unknown> {
     let scope = scopeByNode.get(owner) ?? document.rootScope;
     if (ref.startsWith("#")) {
@@ -397,20 +433,28 @@ export async function dereference<T = unknown>(
       const external = await resolveExternal(resourceURI);
       resource = resourcesByURI.get(resourceURI) ?? external.rootScope;
     }
+    // The object demand is positional: an AsyncAPI structural reference
+    // requires an object document, while a reference inside a declared
+    // non-object space (an Avro-declared schema position — a top-level
+    // union is an array, a bare primitive type name is a string) admits any
+    // JSON document root.
+    if (!admitNonObjectResource && externalCache.get(resourceURI)?.rootIsObject === false) {
+      throw new Error(`external $ref ${resourceURI} did not return an object document`);
+    }
     const prepared = prepareRefTarget?.(resource.root, { resourceURI, fragment });
     if (prepared) resource = reindexPreparedResource(resource.root, resource, owner);
     const target = resolveFragment(resource, fragment);
     return target;
   }
 
-  async function walkAsync(node: unknown, document: DocumentContext, ownerKey?: string): Promise<unknown> {
+  async function walkAsync(node: unknown, document: DocumentContext, ownerKey?: string, space = false): Promise<unknown> {
     if (node == null || typeof node !== "object") return node;
     if (resolvedNodes.has(node)) return resolvedNodes.get(node);
 
     if (Array.isArray(node)) {
       resolvedNodes.set(node, node);
       for (let i = 0; i < node.length; i++) {
-        node[i] = await walkAsync(node[i], document);
+        node[i] = await walkAsync(node[i], document, undefined, space);
       }
       return node;
     }
@@ -428,7 +472,7 @@ export async function dereference<T = unknown>(
         for (const key of Object.keys(obj)) {
           if (key === "$ref") continue;
           if (shouldTraverseChild?.(obj, key, obj[key], ownerKey) === false) continue;
-          obj[key] = await walkAsync(obj[key], document, key);
+          obj[key] = await walkAsync(obj[key], document, key, childSpace(obj, key, space));
         }
         return obj;
       }
@@ -437,7 +481,7 @@ export async function dereference<T = unknown>(
       // once the target (and any siblings) has resolved.
       resolvedNodes.set(obj, obj);
       const ref = obj.$ref;
-      const target = await resolveReference(ref, obj, document);
+      const target = await resolveReference(ref, obj, document, space);
 
       if (target !== undefined) {
         const extraKeys = Object.keys(obj).filter((k) => k !== "$ref");
@@ -462,11 +506,11 @@ export async function dereference<T = unknown>(
               });
             }
           }
-          const resolved = await walkAsync(merged, document, ownerKey);
+          const resolved = await walkAsync(merged, document, ownerKey, space);
           resolvedNodes.set(obj, resolved);
           return resolved;
         }
-        const resolved = await walkAsync(target, document, ownerKey);
+        const resolved = await walkAsync(target, document, ownerKey, space);
         resolvedNodes.set(obj, resolved);
         return resolved;
       }
@@ -477,7 +521,7 @@ export async function dereference<T = unknown>(
     resolvedNodes.set(obj, obj);
     for (const key of Object.keys(obj)) {
       if (shouldTraverseChild?.(obj, key, obj[key], ownerKey) === false) continue;
-      obj[key] = await walkAsync(obj[key], document, key);
+      obj[key] = await walkAsync(obj[key], document, key, childSpace(obj, key, space));
     }
     return obj;
   }

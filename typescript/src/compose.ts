@@ -110,6 +110,44 @@ export function normalizeResolvedReferenceUnions(root: Record<string, unknown>):
   if (Object.keys(channels).length === 0) delete root["channels"];
 }
 
+const LITERAL_SCHEMA_VALUE_KEYS = new Set(["const", "default", "enum", "example", "examples"]);
+
+/**
+ * Rewrites a message-level Avro payload whose declared schema is a
+ * non-object JSON value — a top-level union array, a bare primitive type
+ * name — into the equivalent Multi Format Schema Object wrapper
+ * {schemaFormat, schema}. The two spellings are one declaration (the
+ * wrapper discrimination rule reads them identically), and the wrapper is
+ * the shape the Go client's typed document model carries a non-object
+ * schema in, so the two implementations converge on it. Runs on the
+ * normalized envelope so external composition output and inline-authored
+ * documents take the same shape (Go twin: hoistNonObjectAvroPayloads).
+ * Literal-value keys and extension subtrees are data, not structure, and
+ * are not entered.
+ */
+export function hoistNonObjectAvroPayloads(
+  value: unknown,
+  isAvroFormat: (format: string) => boolean,
+): void {
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const child of value) hoistNonObjectAvroPayloads(child, isAvroFormat);
+    return;
+  }
+  const owner = value as Record<string, unknown>;
+  const format = owner["schemaFormat"];
+  if (typeof format === "string" && isAvroFormat(format)) {
+    const payload = owner["payload"];
+    if (payload !== undefined && payload !== null && !isObject(payload)) {
+      owner["payload"] = { schemaFormat: format, schema: payload };
+    }
+  }
+  for (const [key, child] of Object.entries(owner)) {
+    if (LITERAL_SCHEMA_VALUE_KEYS.has(key) || key.toLowerCase().startsWith("x-")) continue;
+    hoistNonObjectAvroPayloads(child, isAvroFormat);
+  }
+}
+
 function normalizeInlineMessages(
   root: Record<string, unknown>,
   prefix: string,

@@ -188,3 +188,36 @@ func (c *avroBinaryCodec) decode(wire []byte) (any, error) {
 	}
 	return value, nil
 }
+
+// hoistNonObjectAvroPayloads rewrites a message-level Avro payload whose
+// declared schema is a non-object JSON value — a top-level union array, a
+// bare primitive type name — into the equivalent Multi Format Schema Object
+// wrapper {schemaFormat, schema}. The two spellings are one declaration (the
+// wrapper discrimination rule reads them identically), and the wrapper is
+// the shape the typed document model carries a non-object schema in: the
+// Message Object payload field is object-typed while the wrapper's schema
+// member is untyped. Runs on the normalized envelope so external composition
+// output and inline-authored documents take the same shape. Literal-value
+// keys and extension subtrees are data, not structure, and are not entered.
+func hoistNonObjectAvroPayloads(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if format, ok := typed["schemaFormat"].(string); ok && isAvroSchemaFormat(format) {
+			if payload, present := typed["payload"]; present && payload != nil {
+				if _, isObject := payload.(map[string]any); !isObject {
+					typed["payload"] = map[string]any{"schemaFormat": format, "schema": payload}
+				}
+			}
+		}
+		for key, child := range typed {
+			if isLiteralSchemaValueKey(key) || strings.HasPrefix(strings.ToLower(key), "x-") {
+				continue
+			}
+			hoistNonObjectAvroPayloads(child)
+		}
+	case []any:
+		for _, child := range typed {
+			hoistNonObjectAvroPayloads(child)
+		}
+	}
+}

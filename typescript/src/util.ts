@@ -11,12 +11,14 @@ import {
   SERVER_NAME_TAG,
 } from "./constants.js";
 import { applyDocumentTraits } from "./traits.js";
-import { normalizeResolvedReferenceUnions } from "./compose.js";
+import { hoistNonObjectAvroPayloads, normalizeResolvedReferenceUnions } from "./compose.js";
+import { isAvroSchemaFormat } from "./avro.js";
 import {
   discriminateAsyncAPIEdition,
   normalizeAsyncAPIEnvelope,
   parseV2OperationRef,
   refForNormalizedOperationKey,
+  validateReferenceAdmission,
 } from "./edition.js";
 
 // The u flag makes the class match whole code points, so an astral-plane
@@ -35,6 +37,21 @@ const SCHEMA_MAP_CONTAINER_KEYS = new Set([
 ]);
 
 const NON_KEY_CHARS = /[^a-zA-Z0-9._-]/gu;
+
+/**
+ * Position-aware admission of non-object external resources (the shared
+ * dereferencer's nonObjectResourceSpace option): a message-level
+ * `schemaFormat` on the Avro correspondence list governs `payload` (the 2.x
+ * spelling) and a Multi Format Schema Object's `schemaFormat` governs its
+ * `schema` member (the 3.x spelling) — a reference there may compose a
+ * non-object document, because a top-level Avro union is a JSON array and a
+ * bare primitive type name is a JSON string (Go twin: avroSchemaChild).
+ */
+function avroSchemaChild(owner: Record<string, unknown>, key: string): boolean {
+  if (key !== "payload" && key !== "schema") return false;
+  const format = owner["schemaFormat"];
+  return typeof format === "string" && isAvroSchemaFormat(format);
+}
 
 /** Replaces non-alphanumeric characters with underscores to produce a valid key. */
 export function sanitizeKey(name: string): string {
@@ -348,6 +365,11 @@ export async function parseAsyncAPIDocument(
   // position-aware resolution below. Skipped entirely when no external-form
   // reference exists, which is the common case.
   discriminateAsyncAPIEdition(raw as Record<string, unknown>);
+  // Reference-position admission runs BEFORE composition: inlining a
+  // reference at a position the declared edition does not admit one would
+  // silently erase the evidence the refusal is about (Go twin:
+  // ValidateReferenceAdmission before resolveArtifactReferences).
+  validateReferenceAdmission(raw as Record<string, unknown>);
   if (containsExternalRef(raw)) {
     // Tag source identity BEFORE inlining: the original reference spellings
     // are the artifact's deepest declared addresses, and coverage reports
@@ -367,6 +389,7 @@ export async function parseAsyncAPIDocument(
         // per-operation eligibility and coverage, exactly as in Go.
         allowUnresolved: true,
         shouldTraverseChild: literalAwareTraversal,
+        nonObjectResourceSpace: avroSchemaChild,
       },
     );
     // AsyncAPI requires several positions to BE Reference Objects; re-hoist
@@ -376,6 +399,10 @@ export async function parseAsyncAPIDocument(
   }
 
   raw = normalizeAsyncAPIEnvelope(raw as Record<string, unknown>);
+  // A non-object Avro schema composed (or authored) at a message-level
+  // payload takes the Multi Format Schema Object wrapper shape, matching
+  // the Go client's normalization (see hoistNonObjectAvroPayloads).
+  hoistNonObjectAvroPayloads(raw, isAvroSchemaFormat);
 
   validateRawFixedFields(raw as Record<string, unknown>);
 
@@ -398,6 +425,7 @@ export async function parseAsyncAPIDocument(
       // Preserve a dangling target here so the eligibility/coverage layer can
       // exclude that operation without rejecting unrelated valid operations.
       allowUnresolved: true,
+      nonObjectResourceSpace: avroSchemaChild,
       // These fields carry application data, not reference-bearing artifact
       // structure. A literal object such as {"$ref":"customer-value"} in
       // an enum or example must survive unchanged. Extension values are also

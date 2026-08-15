@@ -35,7 +35,163 @@ export function normalizeAsyncAPIEnvelope(
 ): Record<string, unknown> {
   const edition = discriminateAsyncAPIEdition(source);
   if (V3_EDITIONS.has(edition)) return source;
+  validateV2ReferenceAdmission(source, edition);
   return normalizeV2(source, edition);
+}
+
+/**
+ * Refuses an AsyncAPI 2.x document that writes a Reference Object at a
+ * position its own declared edition does not admit one. Position admission
+ * is pinned from the edition texts (the `X Object | Reference Object`
+ * unions of the official 2.x specifications); a document violating them has
+ * no interpretation under its edition, so the refusal is whole-artifact and
+ * deliberately consistent across implementations (Go twin:
+ * ValidateReferenceAdmission). The parser calls this BEFORE external
+ * reference composition — inlining a reference at a non-admitting position
+ * would silently erase the evidence — and normalization calls it again for
+ * directly supplied documents. A 3.x document passes through untouched.
+ */
+export function validateReferenceAdmission(source: Record<string, unknown>): void {
+  const edition = source.asyncapi;
+  if (typeof edition !== "string" || !V2_EDITIONS.has(edition)) return;
+  validateV2ReferenceAdmission(source, edition);
+}
+
+/** A Reference Object: an object whose $ref member is a string. */
+function isV2ReferenceObject(value: unknown): boolean {
+  return (
+    value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as Record<string, unknown>)["$ref"] === "string"
+  );
+}
+
+// The Servers Object's patterned field is typed `Server Object` through
+// 2.3.0 and `Server Object | Reference Object` from 2.4.0 (pinned against
+// the official texts of every accepted 2.x edition).
+const V2_SERVERS_ADMIT_REFERENCE_VALUES = new Set(["2.4.0", "2.5.0", "2.6.0"]);
+
+// The string-typed fields checked per object kind. Every entry is `string`
+// in the edition text of every accepted 2.x edition that defines it, so a
+// Reference Object there is never admitted. (Fields an older edition does
+// not define are simply absent from documents of that edition; checking the
+// union is harmless and keeps the table edition-independent.)
+const V2_SERVER_STRING_FIELDS = ["url", "protocol", "protocolVersion", "description"];
+const V2_CHANNEL_STRING_FIELDS = ["description"];
+const V2_OPERATION_STRING_FIELDS = ["operationId", "summary", "description"];
+const V2_MESSAGE_STRING_FIELDS = ["messageId", "name", "title", "summary", "description", "contentType", "schemaFormat"];
+
+function v2ReferenceAdmissionError(edition: string, position: string): never {
+  throw new Error(`not a valid AsyncAPI document (${position} does not admit a Reference Object in AsyncAPI ${edition})`);
+}
+
+function validateV2ReferenceAdmission(source: Record<string, unknown>, edition: string): void {
+  if (isV2ReferenceObject(source.servers)) {
+    v2ReferenceAdmissionError(edition, "the servers field is a Servers Object map and");
+  }
+  for (const [name, raw] of entries(source.servers)) {
+    if (isV2ReferenceObject(raw) && !V2_SERVERS_ADMIT_REFERENCE_VALUES.has(edition)) {
+      v2ReferenceAdmissionError(edition, `server ${JSON.stringify(name)} is typed Server Object and`);
+    }
+    v2StringFieldsAdmission(edition, raw, V2_SERVER_STRING_FIELDS, `server ${JSON.stringify(name)}`);
+  }
+  if (isV2ReferenceObject(source.channels)) {
+    v2ReferenceAdmissionError(edition, "the channels field is a Channels Object map and");
+  }
+  for (const [name, raw] of entries(source.channels)) {
+    const channel = object(raw);
+    // The Channel Item Object's own `$ref` field is admitted (all 2.x
+    // editions; deprecated from 2.4.0 but legal), so the channel value
+    // itself is never refused here.
+    v2StringFieldsAdmission(edition, channel, V2_CHANNEL_STRING_FIELDS, `channel ${JSON.stringify(name)}`);
+    if (Array.isArray(channel.servers)) {
+      for (const member of channel.servers) {
+        if (isV2ReferenceObject(member)) {
+          v2ReferenceAdmissionError(edition, `channel ${JSON.stringify(name)} servers is a list of server-name strings and`);
+        }
+      }
+    }
+    for (const verb of ["publish", "subscribe"] as const) {
+      const operation = channel[verb];
+      if (operation == null) continue;
+      if (isV2ReferenceObject(operation)) {
+        v2ReferenceAdmissionError(edition, `channel ${JSON.stringify(name)} ${verb} is an Operation Object and`);
+      }
+      v2OperationAdmission(edition, operation, `channel ${JSON.stringify(name)} ${verb}`);
+    }
+  }
+  const components = object(source.components);
+  for (const [name, raw] of entries(components.messages)) {
+    // A components.messages VALUE may be a Reference Object; an inline
+    // message carries the message string fields.
+    if (!isV2ReferenceObject(raw)) {
+      v2MessageAdmission(edition, raw, `components message ${JSON.stringify(name)}`);
+    }
+  }
+  for (const [name, raw] of entries(components.operationTraits)) {
+    if (!isV2ReferenceObject(raw)) {
+      v2StringFieldsAdmission(edition, raw, V2_OPERATION_STRING_FIELDS, `components operation trait ${JSON.stringify(name)}`);
+    }
+  }
+  for (const [name, raw] of entries(components.messageTraits)) {
+    if (!isV2ReferenceObject(raw)) {
+      v2StringFieldsAdmission(edition, raw, V2_MESSAGE_STRING_FIELDS, `components message trait ${JSON.stringify(name)}`);
+    }
+  }
+}
+
+function v2OperationAdmission(edition: string, raw: unknown, position: string): void {
+  const operation = object(raw);
+  v2StringFieldsAdmission(edition, operation, V2_OPERATION_STRING_FIELDS, position);
+  if (Array.isArray(operation.traits)) {
+    for (const [index, trait] of operation.traits.entries()) {
+      // A traits member may itself be a Reference Object (admitted).
+      if (!isV2ReferenceObject(trait)) {
+        v2StringFieldsAdmission(edition, trait, V2_OPERATION_STRING_FIELDS, `${position} trait ${index}`);
+      }
+    }
+  }
+  // operation.message may be a Message Object, a Reference Object
+  // (admitted), or the oneOf list of those.
+  const message = object(operation.message);
+  if (Array.isArray(message.oneOf)) {
+    for (const [index, alternative] of message.oneOf.entries()) {
+      if (!isV2ReferenceObject(alternative)) {
+        v2MessageAdmission(edition, alternative, `${position} message alternative ${index}`);
+      }
+    }
+    return;
+  }
+  if (operation.message != null && !isV2ReferenceObject(operation.message)) {
+    v2MessageAdmission(edition, operation.message, `${position} message`);
+  }
+}
+
+function v2MessageAdmission(edition: string, raw: unknown, position: string): void {
+  const message = object(raw);
+  v2StringFieldsAdmission(edition, message, V2_MESSAGE_STRING_FIELDS, position);
+  if (Array.isArray(message.traits)) {
+    for (const [index, trait] of message.traits.entries()) {
+      if (!isV2ReferenceObject(trait)) {
+        v2StringFieldsAdmission(edition, trait, V2_MESSAGE_STRING_FIELDS, `${position} trait ${index}`);
+      }
+    }
+  }
+}
+
+function v2StringFieldsAdmission(
+  edition: string,
+  raw: unknown,
+  fields: readonly string[],
+  position: string,
+): void {
+  const owner = object(raw);
+  for (const field of fields) {
+    if (isV2ReferenceObject(owner[field])) {
+      v2ReferenceAdmissionError(edition, `${position} ${field} is typed string and`);
+    }
+  }
 }
 
 export function v2OperationKey(channel: string, verb: "publish" | "subscribe"): string {
