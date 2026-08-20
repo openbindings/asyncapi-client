@@ -1552,7 +1552,7 @@ async function runSSESubscribe(
     siteFor(args, target.serverURL),
     h,
     invocationMeta,
-    builtinDecodeFor(decodeCT, sseAvro),
+    builtinPerEventDecodeFor(decodeCT, sseAvro),
   );
 }
 
@@ -2171,6 +2171,26 @@ async function readErrorBody(resp: Response): Promise<unknown> {
  * output. Content-independent — the declaration decides, never the bytes.
  */
 export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): OutputDecoder {
+  const perEvent = builtinPerEventDecodeFor(contentType, avro);
+  return (site: InvokeSite, raw: RawResult): unknown => {
+    // An empty delivery unit emits no value. This rule is
+    // whole-unit-scoped (an HTTP reply, a WS frame): the SSE per-event
+    // lane bypasses it via builtinPerEventDecodeFor — a DISPATCHED event
+    // whose data text is empty (a lone empty `data:` line, WHATWG) is a
+    // value, never an absent output.
+    const empty = raw.bodyBytes !== undefined ? raw.bodyBytes.byteLength === 0 : raw.body.length === 0;
+    if (empty) return null;
+    return perEvent(site, raw);
+  };
+}
+
+/**
+ * builtinDecodeFor's declaration-keyed lane set without the
+ * empty-unit→no-value rule, used by the SSE per-event lane where an empty
+ * data text is the empty-string value under the text lane (and a
+ * declared-JSON contentType judges it as any other non-JSON text — loud).
+ */
+export function builtinPerEventDecodeFor(contentType: string, avro?: AvroBinaryCodec): OutputDecoder {
   const isJSON = isJSONContentType(contentType);
   const isBytes = isBytesContentType(contentType);
   return (_site: InvokeSite, raw: RawResult): unknown => {
@@ -2180,7 +2200,6 @@ export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): O
       // declaration instead carries the Avro-JSON encoding, which the
       // ordinary JSON branch below parses).
       const octets = raw.bodyBytes ?? new TextEncoder().encode(raw.body);
-      if (octets.byteLength === 0) return null;
       try {
         return avro.decode(octets);
       } catch (e: unknown) {
@@ -2190,7 +2209,6 @@ export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): O
     if (isBytes) {
       // The byte boundary: exact octets as the canonical Base64 string.
       const octets = raw.bodyBytes ?? new TextEncoder().encode(raw.body);
-      if (octets.byteLength === 0) return null;
       return encodeBase64(octets);
     }
     // A textual lane over a byte-delivered frame (a WS binary frame, a
@@ -2208,7 +2226,6 @@ export function builtinDecodeFor(contentType: string, avro?: AvroBinaryCodec): O
         );
       }
     }
-    if (body.length === 0) return null;
     if (isJSON) {
       try {
         return JSON.parse(body);
