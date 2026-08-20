@@ -173,20 +173,21 @@ export function contextRequiredError(
  * service generates at runtime). `point` names the binding-specification
  * configuration point ("server", "address", …); `path` is a JSON Pointer
  * relative to that point, with the empty pointer addressing the whole point;
- * `choices` carries values declared by the artifact, while the
- * governing binding specification decides whether that list is closed or
- * advisory. `durable` defaults to false; pass `true` only when reuse is
- * permitted.
+ * `schema` is the engine-asserted JSON Schema for the value at (point, path)
+ * — artifact-derived where the artifact speaks, absent where it does not
+ * (absent = unconstrained). An `enum` member is a closed admissible set
+ * (satisfaction validates against it); `examples` are advisory. `durable`
+ * defaults to false; pass `true` only when reuse is permitted.
  */
 export function configValueRequirement(
   point: string,
   path: string,
   description: string,
-  choices?: string[],
+  schema?: Record<string, unknown>,
   durable?: boolean,
 ): ContextRequirement {
   const req: ContextRequirement = { type: "config.value", point, path, description };
-  if (choices && choices.length > 0) req.choices = choices;
+  if (schema !== undefined) req.schema = schema;
   if (durable !== undefined) req.durable = durable;
   return req;
 }

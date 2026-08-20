@@ -121,18 +121,26 @@ import {
  * other error stays a terminal ERR_SOURCE_CONFIG_ERROR. resolveTarget/
  * resolveAddress already consulted the supplied context and found the value
  * absent, so the challenge fires unconditionally; the operation-invoker's
- * bounded resolve-and-retry loop is the backstop. The resolved server URL
- * when known is the strongest available scope; configuration is not assumed
- * public, so a resolver decides whether that scope is sufficient.
+ * bounded resolve-and-retry loop is the backstop. The challenge target is
+ * the engine-asserted scope for the missing value (the context-scope model,
+ * ratified 2026-08-19): the resolved server URL when known (empty when
+ * server resolution itself failed), else the strongest host hint the
+ * artifact provides, else the threaded source location — the artifact-bound
+ * identity a point that precedes destination resolution naturally scopes
+ * to. The location rides verbatim: this client has no location canonicalizer
+ * of its own. A content-only source with no location asserts nothing and
+ * the target stays empty. Configuration is not assumed public, so a
+ * resolver decides whether the asserted scope is sufficient.
  */
-function configOrSourceError(e: unknown, serverURL: string): InvocationError {
+function configOrSourceError(e: unknown, serverURL: string, sourceLocation: string): InvocationError {
   if (e instanceof ConfigRequired) {
+    const target = serverURL || e.hostHint || sourceLocation || "";
     return contextRequiredError(e.message, {
-      target: serverURL,
+      target,
       alternatives: [
         {
           requirements: [
-            configValueRequirement(e.point, e.path, e.message, e.choices, e.durable),
+            configValueRequirement(e.point, e.path, e.message, e.schema, e.durable),
           ],
         },
       ],
@@ -199,7 +207,7 @@ export async function runBinding(
   try {
     target = resolveTarget(doc, ch, args.context);
   } catch (e: unknown) {
-    h.fireError(configOrSourceError(e, ""));
+    h.fireError(configOrSourceError(e, "", args.source.location ?? ""));
     return;
   }
 
@@ -338,7 +346,7 @@ export async function runBinding(
     }
     address = resolveAddress(ch, channelName, addrCfg, preparedInput?.value);
   } catch (e: unknown) {
-    h.fireError(configOrSourceError(e, target.serverURL));
+    h.fireError(configOrSourceError(e, target.serverURL, args.source.location ?? ""));
     return;
   }
 
