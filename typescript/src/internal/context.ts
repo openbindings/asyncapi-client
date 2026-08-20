@@ -446,6 +446,29 @@ export function normalizeEndpoint(url: string): string {
  * layer — rule 10 of the binding-invoker interface: no resolver here, no
  * invented satisfaction convention).
  */
+/**
+ * Structural JSON-value equality for closed-enum membership checks (the Go
+ * twin uses reflect.DeepEqual). Object member order is irrelevant.
+ */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => jsonEqual(item, b[index]));
+  }
+  if (
+    a && b
+    && typeof a === "object" && typeof b === "object"
+    && !Array.isArray(a) && !Array.isArray(b)
+  ) {
+    const left = a as Record<string, unknown>;
+    const right = b as Record<string, unknown>;
+    const keys = Object.keys(left);
+    if (keys.length !== Object.keys(right).length) return false;
+    return keys.every((key) => Object.hasOwn(right, key) && jsonEqual(left[key], right[key]));
+  }
+  return false;
+}
+
 function requirementSatisfied(
   ctx: Record<string, unknown>,
   req: ContextRequirement,
@@ -492,7 +515,27 @@ function requirementSatisfied(
       return false;
     }
     const selected = configurationValueAt((configuration as Record<string, unknown>)[point], path);
-    return selected.present && selected.value !== undefined && selected.value !== null && selected.value !== "";
+    if (!selected.present || selected.value === undefined || selected.value === null || selected.value === "") {
+      return false;
+    }
+    // When the requirement carries an engine-asserted schema, presence is
+    // not enough: the selected value must also validate against it.
+    // Twin divergence by necessity: the openbindings SDKs validate against
+    // the full JSON Schema via their core validator; this repo has no JSON
+    // Schema validator dependency of its own and does not add one, so it
+    // enforces only the closed `enum` member (the one constraint this
+    // engine itself asserts — every schema it emits is enum-only or
+    // absent). A general non-enum schema is not enforced here.
+    const schemaRaw = req.schema;
+    if (schemaRaw !== undefined) {
+      if (!schemaRaw || typeof schemaRaw !== "object" || Array.isArray(schemaRaw)) return false;
+      const enumMembers = (schemaRaw as Record<string, unknown>)["enum"];
+      if (enumMembers !== undefined) {
+        if (!Array.isArray(enumMembers)) return false;
+        if (!enumMembers.some((member) => jsonEqual(member, selected.value))) return false;
+      }
+    }
+    return true;
   }
   const mappedField = REQUIREMENT_FIELDS[req.type];
   if (mappedField === undefined && req.type.startsWith("auth.")) {

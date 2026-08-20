@@ -136,12 +136,32 @@ export class ConfigRequired extends Error {
     readonly point: string,
     readonly path: string,
     message: string,
-    readonly choices?: string[],
+    /**
+     * The engine-asserted JSON Schema for the missing value — artifact-derived
+     * where the artifact speaks (a declared enum becomes `{"enum": […]}`),
+     * absent where it does not (absent = unconstrained).
+     */
+    readonly schema?: Record<string, unknown>,
     readonly durable?: boolean,
+    /**
+     * The strongest scope the artifact provides when no server URL has
+     * resolved yet (Go twin: configRequired.hostHint).
+     */
+    readonly hostHint?: string,
   ) {
     super(message);
     this.name = "ConfigRequired";
   }
+}
+
+/**
+ * Lifts an artifact-declared closed value set into the engine-asserted schema
+ * shape (`{"enum": […]}`); an empty set asserts nothing (undefined = absent =
+ * unconstrained).
+ */
+function enumSchema(values?: string[]): Record<string, unknown> | undefined {
+  if (!values || values.length === 0) return undefined;
+  return { enum: [...values] };
 }
 
 /**
@@ -192,7 +212,7 @@ export function resolveTarget(
         "server",
         "/key",
         "configuration.server.key must select one artifact server before metadata.baseURL can replace its target",
-        names,
+        enumSchema(names),
         true,
       );
     }
@@ -222,7 +242,7 @@ export function resolveTarget(
       "server",
       "/key",
       "the effective server set declares several bindable servers; configuration.server.key must select one artifact member",
-      names,
+      enumSchema(names),
       true,
     );
   }
@@ -342,7 +362,7 @@ function resolveServerConfig(
       "server",
       "/key",
       "configuration.server.key must select one artifact server before variables or a URL replacement can be applied",
-      names,
+      enumSchema(names),
       true,
     );
   }
@@ -501,7 +521,9 @@ function substituteServerVariables(
           "server",
           `/variables/${escapeJSONPointerToken(name)}`,
           `server ${JSON.stringify(member.name)}: variable ${JSON.stringify(name)} has no supplied value and no declared default (supply one at the server configuration point's "variables" member)`,
-          declared?.enum,
+          enumSchema(declared?.enum),
+          undefined,
+          member.server.host,
         );
       }
     }
@@ -657,7 +679,7 @@ function expandAddress(
           "address",
           `/parameters/${escapeJSONPointerToken(name)}`,
           `channel ${JSON.stringify(channelName)}: address parameter ${JSON.stringify(name)} has no supplied value and no declared default`,
-          declared?.enum,
+          enumSchema(declared?.enum),
         );
       }
     }

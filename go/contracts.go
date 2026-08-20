@@ -44,10 +44,14 @@ type Prerequisites struct {
 	Alternatives []RequirementAlternative
 }
 
-func newConfigValueRequirement(point, path, description string, choices []string, durable *bool) Requirement {
+// newConfigValueRequirement builds a config.value requirement. schema is the
+// engine-asserted JSON Schema for the value at (point, path) — artifact-
+// derived where the artifact speaks, nil where it does not (absent =
+// unconstrained); an `enum` member is a closed admissible set.
+func newConfigValueRequirement(point, path, description string, schema map[string]any, durable *bool) Requirement {
 	extra := map[string]any{"point": point, "path": path}
-	if len(choices) > 0 {
-		extra["choices"] = append([]string(nil), choices...)
+	if schema != nil {
+		extra["schema"] = schema
 	}
 	return Requirement{Type: "config.value", Description: description, Durable: durable, Extra: extra}
 }

@@ -1,6 +1,9 @@
 package asyncapiclient
 
-import "strings"
+import (
+	"reflect"
+	"strings"
+)
 
 func contextBearerToken(ctx map[string]any) string { return contextString(ctx, "bearerToken") }
 
@@ -188,7 +191,41 @@ func contextSatisfiesRequirement(ctx map[string]any, requirement Requirement, al
 			return false
 		}
 		selected, selectedPresent := configurationValueAt(value, path)
-		return selectedPresent && selected != nil && selected != ""
+		if !selectedPresent || selected == nil || selected == "" {
+			return false
+		}
+		// When the requirement carries an engine-asserted schema, presence is
+		// not enough: the selected value must also validate against it.
+		// Twin divergence by necessity: the openbindings-go SDK validates
+		// against the full JSON Schema via its core validator; this repo has
+		// no JSON Schema validator dependency of its own and does not add
+		// one, so it enforces only the closed `enum` member (the one
+		// constraint this engine itself asserts — every schema it emits is
+		// enum-only or absent). A general non-enum schema is not enforced
+		// here.
+		if schemaRaw, schemaPresent := requirement.Extra["schema"]; schemaPresent {
+			schema, ok := schemaRaw.(map[string]any)
+			if !ok {
+				return false
+			}
+			if enum, hasEnum := schema["enum"]; hasEnum {
+				members, ok := enum.([]any)
+				if !ok {
+					return false
+				}
+				admitted := false
+				for _, member := range members {
+					if reflect.DeepEqual(member, selected) {
+						admitted = true
+						break
+					}
+				}
+				if !admitted {
+					return false
+				}
+			}
+		}
+		return true
 	default:
 		value, present := ctx[requirement.Type]
 		return present && value != nil && value != ""

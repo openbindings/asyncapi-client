@@ -27,18 +27,28 @@ import (
 // consulted the supplied context and found the value absent, so the challenge
 // fires unconditionally; the operation-invoker's bounded resolve-and-retry
 // loop is the backstop against a resolver that keeps supplying an insufficient
-// value. serverURL is the resolved target when known (empty when server
-// resolution itself failed), used as the challenge's best available scope.
-// A resolver decides whether that scope is sufficient for stored-value
-// release; configuration is not assumed public.
-func configOrSourceError(err error, serverURL string) *ExecutionError {
+// value. The challenge target is the engine-asserted scope for the missing
+// value (the context-scope model, ratified 2026-08-19): the resolved server
+// URL when known (empty when server resolution itself failed), else the
+// strongest host hint the artifact provides, else the threaded source
+// location — the artifact-bound identity a point that precedes destination
+// resolution naturally scopes to. The location rides verbatim: this client
+// has no location canonicalizer of its own and the loader admits only an
+// absolute URI there (validateDocumentAddress). A content-only source with
+// no location asserts nothing and the target stays empty. A resolver decides
+// whether the asserted scope is sufficient for stored-value release;
+// configuration is not assumed public.
+func configOrSourceError(err error, serverURL, sourceLocation string) *ExecutionError {
 	var cr *configRequired
 	if errors.As(err, &cr) {
 		target := serverURL
 		if target == "" {
 			target = cr.hostHint
 		}
-		req := newConfigValueRequirement(cr.point, cr.path, cr.description, cr.choices, cr.durable)
+		if target == "" {
+			target = sourceLocation
+		}
+		req := newConfigValueRequirement(cr.point, cr.path, cr.description, cr.schema, cr.durable)
 		return newContextRequiredError(cr.description, &Prerequisites{
 			Target:       target,
 			Alternatives: []RequirementAlternative{{Requirements: []Requirement{req}}},
@@ -133,7 +143,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 
 	target, err := resolveTarget(doc, ch, args.Context)
 	if err != nil {
-		h.FireError(configOrSourceError(err, ""))
+		h.FireError(configOrSourceError(err, "", args.Source.Location))
 		return
 	}
 	driver := args.ProtocolDrivers[strings.ToLower(target.Protocol)]
@@ -246,7 +256,7 @@ func runBinding(ctx context.Context, client *http.Client, pool *wsPool, args *ex
 	}
 	address, err := resolveAddress(ch, channelName, addrCfg, outgoing)
 	if err != nil {
-		h.FireError(configOrSourceError(err, target.ServerURL))
+		h.FireError(configOrSourceError(err, target.ServerURL, args.Source.Location))
 		return
 	}
 
