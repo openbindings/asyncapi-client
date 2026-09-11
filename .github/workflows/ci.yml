@@ -7,18 +7,52 @@ on:
 jobs:
   qualify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: asyncapi-client
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: asyncapi-client
+      # Live qualification includes the published SDK bridges.
+      - uses: actions/checkout@v4
+        with:
+          repository: openbindings/openbindings-go
+          ref: release/0.2
+          path: openbindings-go
+      - uses: actions/checkout@v4
+        with:
+          repository: openbindings/openbindings-ts
+          ref: release/0.2
+          path: openbindings-ts
+      - uses: actions/checkout@v4
+        with:
+          repository: openbindings/jsonata
+          ref: e2a5e518e6b5bd247ab327d427c591dc72743f2d
+          path: jsonata
       - uses: pnpm/action-setup@v4
         with:
           version: 10.15.0
+          package_json_file: asyncapi-client/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: asyncapi-client/pnpm-lock.yaml
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
+          go-version-file: asyncapi-client/go/go.mod
+          cache-dependency-path: asyncapi-client/go/go.sum
       - run: pnpm install --frozen-lockfile
+      - name: Prepare SDK bridge dependencies
+        run: |
+          npm --prefix ../jsonata/javascript ci --ignore-scripts
+          npm --prefix ../jsonata/javascript run build
+          pnpm build
+          pnpm --dir ../openbindings-ts install --frozen-lockfile --ignore-scripts
+          pnpm --dir ../openbindings-ts --filter @openbindings/asyncapi... build
+          cd ..
+          go work init openbindings-go openbindings-go/formats/asyncapi asyncapi-client/go
+          go work edit -replace github.com/openbindings/openbindings-go@v0.2.0=./openbindings-go
+          go work edit -replace github.com/openbindings/asyncapi-client/go@v0.1.0=./asyncapi-client/go
       - run: pnpm qualify:release
