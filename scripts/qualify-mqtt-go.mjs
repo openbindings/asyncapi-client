@@ -49,7 +49,7 @@ async function qualifyTypeScriptBridge(brokerURL) {
   try {
     const call = invoker.invokeBinding({
       source: { bindingSpec: BINDING_SPEC, content: mqttFailureArtifact(target.host) },
-      ref: "#/operations/observe",
+      selector: "#/operations/observe",
       context: { basic: { username: "sensor", password: "secret" } },
     });
     const terminal = call.closed.catch((error) => error);
@@ -64,11 +64,11 @@ async function qualifyTypeScriptBridge(brokerURL) {
     } catch (error) {
       outputFailure = error;
     }
-    if (!/MQTT connection (?:closed|lost)/i.test(String(outputFailure?.message ?? outputFailure))) {
+    if (outputFailure?.code !== "DRIVER_FAILED" || Object.hasOwn(outputFailure, "data")) {
       throw new Error(`TypeScript bridge did not surface MQTT connection loss: ${String(outputFailure)}`);
     }
     const closedFailure = await withTimeout(terminal, "TypeScript bridge closed rejection");
-    if (!/MQTT connection (?:closed|lost)/i.test(String(closedFailure?.message ?? closedFailure))) {
+    if (closedFailure?.code !== "DRIVER_FAILED" || Object.hasOwn(closedFailure, "data")) {
       throw new Error(`TypeScript bridge closed with the wrong failure: ${String(closedFailure)}`);
     }
   } finally {

@@ -18,7 +18,7 @@ it.skipIf(!brokerURL || !topic)("publishes and consumes ordered application valu
   });
   try {
     for (const id of ["ts-1", "ts-2", "ts-3"]) {
-      await client.publish("publish", { id });
+      await client.publish("publish", { payload: { id } });
     }
     const subscription = await client.subscribe<{ id: string }>("observe");
     const events = subscription.events[Symbol.asyncIterator]();
@@ -42,7 +42,7 @@ it.skipIf(!brokerURL || !recoveryTopic || !container)("preserves output ordering
   });
   let paused = false;
   try {
-    await client.publish("publish", { id: "before-loss" });
+    await client.publish("publish", { payload: { id: "before-loss" } });
     const subscription = await client.subscribe<{ id: string }>("observe");
     const events = subscription.events[Symbol.asyncIterator]();
     await expect(withTimeout(events.next())).resolves.toMatchObject({
@@ -56,7 +56,7 @@ it.skipIf(!brokerURL || !recoveryTopic || !container)("preserves output ordering
     await exec("docker", ["unpause", container as string]);
     paused = false;
 
-    await client.publish("publish", { id: "after-recovery" });
+    await client.publish("publish", { payload: { id: "after-recovery" } });
     await expect(withTimeout(events.next())).resolves.toMatchObject({
       done: false,
       value: { value: { id: "after-recovery" } },
@@ -78,7 +78,7 @@ it.skipIf(!brokerURL || !securityTopic)("applies an authored SCRAM requirement t
     context: { basic: { username: "orders", password: "secret-password" } },
   });
   try {
-    await client.publish("publish", { id: "secured-ts" });
+    await client.publish("publish", { payload: { id: "secured-ts" } });
     const subscription = await client.subscribe<{ id: string }>("observe");
     const events = subscription.events[Symbol.asyncIterator]();
     await expect(withTimeout(events.next())).resolves.toMatchObject({
