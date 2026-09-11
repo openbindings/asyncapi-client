@@ -32,7 +32,7 @@ func TestLivePublishSubscribeUsesAuthoredKafkaFacts(t *testing.T) {
 	defer client.Close()
 
 	for _, id := range []string{"go-1", "go-2", "go-3"} {
-		if _, err := client.Publish(context.Background(), "publish", map[string]any{"id": id}, asyncapiclient.InvocationOptions{}); err != nil {
+		if _, err := client.Publish(context.Background(), "publish", map[string]any{"payload": map[string]any{"id": id}}, asyncapiclient.InvocationOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -75,7 +75,7 @@ func TestLiveTransientBrokerLossPreservesOutputsAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	if _, err := client.Publish(context.Background(), "publish", map[string]any{"id": "before-loss"}, asyncapiclient.InvocationOptions{}); err != nil {
+	if _, err := client.Publish(context.Background(), "publish", map[string]any{"payload": map[string]any{"id": "before-loss"}}, asyncapiclient.InvocationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	subscription, err := client.Subscribe(context.Background(), "observe", asyncapiclient.InvocationOptions{})
@@ -100,7 +100,7 @@ func TestLiveTransientBrokerLossPreservesOutputsAndRecovers(t *testing.T) {
 	}
 	paused = false
 
-	if _, err := client.Publish(context.Background(), "publish", map[string]any{"id": "after-recovery"}, asyncapiclient.InvocationOptions{}); err != nil {
+	if _, err := client.Publish(context.Background(), "publish", map[string]any{"payload": map[string]any{"id": "after-recovery"}}, asyncapiclient.InvocationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	readKafkaEvent(t, subscription, "after-recovery")
@@ -137,7 +137,7 @@ func TestLiveSCRAMUsesAbstractBasicContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	if _, err := client.Publish(context.Background(), "publish", map[string]any{"id": "secured-go"}, asyncapiclient.InvocationOptions{}); err != nil {
+	if _, err := client.Publish(context.Background(), "publish", map[string]any{"payload": map[string]any{"id": "secured-go"}}, asyncapiclient.InvocationOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	subscription, err := client.Subscribe(context.Background(), "observe", asyncapiclient.InvocationOptions{})

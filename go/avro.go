@@ -11,7 +11,7 @@ import (
 	"github.com/linkedin/goavro/v2"
 )
 
-// The named Avro correspondence (openbindings.asyncapi@1 §9.2): a message
+// The Avro application-value correspondence: a message
 // whose payload declares an on-list Avro schema format crosses the boundary
 // as logical application values. A JSON-family effective content type
 // carries the Avro-JSON encoding directly — the ordinary JSON lane is that

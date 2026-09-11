@@ -66,7 +66,7 @@ describe("the named Avro correspondence at invocation", () => {
   // wire carries exactly the Avro binary encoding of the datum under the
   // artifact's schema (bare framing, the default).
   it("encodes the logical value as the Avro binary wire", async () => {
-    let seen = new Uint8Array(0);
+    let seen: Uint8Array = new Uint8Array(0);
     const fetch = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
       seen = await requestBytes(input, init);
       return new Response(null, { status: 204 });
@@ -104,7 +104,7 @@ describe("the named Avro correspondence at invocation", () => {
   // on the wire, and decode verifies and strips the same prefix.
   it("frames and unframes the Confluent wire prefix", async () => {
     const framed = new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x2a, ...AVRO_WIRE_ID_7]);
-    let seen = new Uint8Array(0);
+    let seen: Uint8Array = new Uint8Array(0);
     const fetch = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
       seen = await requestBytes(input, init);
       return new Response(framed, { status: 200, headers: { "content-type": "avro/binary" } });

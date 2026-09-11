@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// The routed operation envelope (openbindings.asyncapi@1 §9.2, ruled
-// 2026-08-14): a channel that declares location-less parameters makes the
+// The routed operation envelope: a channel that declares location-less
+// parameters makes the
 // publish input an envelope object — the payload under the protocol-neutral
 // "payload" field, each parameter under its own name — because addressing
 // data varies per invocation and is therefore operation input.

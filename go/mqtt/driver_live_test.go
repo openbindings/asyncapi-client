@@ -50,7 +50,7 @@ func TestLivePublishSubscribeUsesOneAuthoredIdentity(t *testing.T) {
 		operation string
 		id        string
 	}{{"publishQ0", "evt-0"}, {"publish", "evt-17"}, {"publishQ2", "evt-2"}} {
-		if _, err := client.Publish(context.Background(), published.operation, map[string]any{"id": published.id}, asyncapiclient.InvocationOptions{}); err != nil {
+		if _, err := client.Publish(context.Background(), published.operation, map[string]any{"payload": map[string]any{"id": published.id}}, asyncapiclient.InvocationOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}

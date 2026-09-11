@@ -139,10 +139,10 @@ async function qualifyTypeScriptBridge(brokerURL, topic, secured) {
   try {
     const publish = invoker.invokeBinding({
       source: { bindingSpec: BINDING_SPEC, content: artifact },
-      ref: "#/operations/publish",
+      selector: "#/operations/publish",
       ...(secured ? { context: { basic: { username: "orders", password: "secret-password" } } } : {}),
     });
-    await publish.write({ id: "through-openbindings-kafka" });
+    await publish.write({ payload: { id: "through-openbindings-kafka" } });
     await publish.close();
     const publishedOutputs = [];
     for await (const output of publish.outputs) publishedOutputs.push(output);
@@ -153,7 +153,7 @@ async function qualifyTypeScriptBridge(brokerURL, topic, secured) {
 
     const subscribe = invoker.invokeBinding({
       source: { bindingSpec: BINDING_SPEC, content: artifact },
-      ref: "#/operations/observe",
+      selector: "#/operations/observe",
       ...(secured ? { context: { basic: { username: "orders", password: "secret-password" } } } : {}),
     });
     const outputs = subscribe.outputs[Symbol.asyncIterator]();
