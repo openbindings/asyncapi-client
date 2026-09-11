@@ -27,8 +27,7 @@ const (
 type artifactReferenceDocument struct {
 	location string
 	// root is the parsed document. AsyncAPI structural references demand an
-	// object root; a reference at an Avro-declared schema position (the
-	// openbindings.asyncapi@1 §9.2 named correspondence) may compose a
+	// object root; a reference at an Avro-declared schema position may compose a
 	// non-object document — a top-level Avro union is a JSON array, and a
 	// bare primitive type name is a JSON string — so the root is held
 	// untyped and the object demand is applied per referencing position.
