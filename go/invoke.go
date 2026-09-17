@@ -2258,8 +2258,8 @@ func builtinPerEventDecodeFor(contentType string, avro *avroBinaryCodec) outputD
 			return base64.StdEncoding.EncodeToString(raw.Body), nil
 		}
 		if isJSON {
-			var parsed any
-			if err := json.Unmarshal(raw.Body, &parsed); err != nil {
+			parsed, err := decodeJSONPayload(raw.Body)
+			if err != nil {
 				return nil, &ExecutionError{
 					Code:    ErrCodeResponseError,
 					Message: fmt.Sprintf("message declares %q but the payload is not valid JSON: %v", contentType, err),
@@ -2275,6 +2275,26 @@ func builtinPerEventDecodeFor(contentType string, avro *avroBinaryCodec) outputD
 		}
 		return string(raw.Body), nil
 	}
+}
+
+// decodeJSONPayload retains numeric tokens without changing encoding/json's
+// string or duplicate-member behavior. The EOF check preserves Unmarshal's
+// whole-delivery-unit requirement; one successful Decode alone is insufficient.
+func decodeJSONPayload(data []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("JSON payload contains more than one value")
+	}
+	return value, nil
 }
 
 // decodeTrailer builds the x-ob-decode provenance stamp (the conventions

@@ -24,6 +24,10 @@ type InvocationOptions struct {
 
 // Client is a loaded AsyncAPI artifact with a small, artifact-native API.
 // It does not require, construct, or expose an OBI.
+// Generic values decoded from JSON-family payloads retain encoding/json.Number
+// instead of float64. Use its Int64/Float64 methods only when an explicit native
+// numeric conversion is wanted; encoding/json.Marshal preserves the JSON number.
+// This does not change typed, header, or non-JSON codec representations.
 type Client struct {
 	engine   *Engine
 	source   Source
