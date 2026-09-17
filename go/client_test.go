@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -282,7 +283,7 @@ func TestReplyBearingWebSocketReceiveSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Value.(map[string]any)["accepted"] != float64(17) {
+	if len(events) != 1 || events[0].Value.(map[string]any)["accepted"] != json.Number("17") {
 		t.Fatalf("events = %#v", events)
 	}
 	type result struct {
@@ -299,7 +300,7 @@ func TestReplyBearingWebSocketReceiveSession(t *testing.T) {
 	}
 	for range 2 {
 		got := <-results
-		if got.err != nil || len(got.events) != 1 || got.events[0].Value.(map[string]any)["accepted"] != float64(got.id) {
+		if got.err != nil || len(got.events) != 1 || got.events[0].Value.(map[string]any)["accepted"] != json.Number(strconv.Itoa(got.id)) {
 			t.Fatalf("concurrent result = %#v", got)
 		}
 	}
@@ -346,7 +347,7 @@ func TestReplyBearingWebSocketSendKeepsDirectionsDistinct(t *testing.T) {
 	if err := execution.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Value.(map[string]any)["command"] != float64(23) {
+	if len(events) != 1 || events[0].Value.(map[string]any)["command"] != json.Number("23") {
 		t.Fatalf("events = %#v", events)
 	}
 	select {
@@ -420,7 +421,7 @@ func TestReplyBearingWebSocketCoordinatesDistinctStaticEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Value.(map[string]any)["accepted"] != float64(71) {
+	if len(events) != 1 || events[0].Value.(map[string]any)["accepted"] != json.Number("71") {
 		t.Fatalf("events = %#v", events)
 	}
 }

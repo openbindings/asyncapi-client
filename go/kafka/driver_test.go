@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -347,7 +348,7 @@ func TestKafkaCarriesRecordHeadersBothDirections(t *testing.T) {
 	envelope, _ := outputs[0].(map[string]any)
 	payload, _ := envelope["payload"].(map[string]any)
 	headers, _ := envelope["headers"].(map[string]any)
-	if payload["id"] != float64(9) {
+	if payload["id"] != json.Number("9") {
 		t.Fatalf("payload = %#v", envelope)
 	}
 	if headers["traceId"] != "t-9" || headers["attempt"] != float64(5) {
