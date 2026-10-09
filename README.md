@@ -112,9 +112,14 @@ Apache-2.0.
 
 ## Ordinary CI
 
-`pnpm verify`, `pnpm verify:consumers` and `go vet ./...` (from `go/`) check the
+`pnpm verify:standalone`, `pnpm verify:consumers` and `go vet ./...` (from `go/`) check the
 standalone packages. Run `node scripts/qualify-mqtt-go.mjs --standalone` and
 `node scripts/qualify-kafka.mjs --standalone` for the retained local broker
 tests; Kafka requires Docker. The same scripts without that option retain
 legacy SDK-bridge qualification and require their compatible sibling sources.
 Ordinary CI uses no OpenBindings SDK or JSONata source checkout.
+
+Standalone matrix validation retains every semantic cell and checks all local
+evidence paths. It reports the named historical Go SDK fixture references
+separately; it does not certify the SDK bridges. `pnpm verify` retains the full
+evidence-path check and needs those compatible sibling fixtures.

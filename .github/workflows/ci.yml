@@ -38,7 +38,7 @@ jobs:
           cache-dependency-path: asyncapi-client/go/go.sum
       - run: pnpm install --frozen-lockfile
       - name: Standalone build, type, unit, race and protocol checks
-        run: pnpm verify
+        run: pnpm verify:standalone
       - run: go vet ./...
         working-directory: asyncapi-client/go
         env:
