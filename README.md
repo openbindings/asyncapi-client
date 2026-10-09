@@ -109,3 +109,12 @@ loss, SCRAM, and both OpenBindings bridges.
 ## License
 
 Apache-2.0.
+
+## Ordinary CI
+
+`pnpm verify`, `pnpm verify:consumers` and `go vet ./...` (from `go/`) check the
+standalone packages. Run `node scripts/qualify-mqtt-go.mjs --standalone` and
+`node scripts/qualify-kafka.mjs --standalone` for the retained local broker
+tests; Kafka requires Docker. The same scripts without that option retain
+legacy SDK-bridge qualification and require their compatible sibling sources.
+Ordinary CI uses no OpenBindings SDK or JSONata source checkout.

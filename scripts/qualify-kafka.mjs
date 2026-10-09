@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const withSdkBridges = !process.argv.slice(2).includes("--standalone");
 const image = process.env.ASYNCAPI_KAFKA_TEST_IMAGE
   ?? "docker.redpanda.com/redpandadata/redpanda:v26.1.13";
 const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
@@ -73,13 +74,15 @@ try {
 
   await run("pnpm", ["--dir", "typescript", "build"], root, {});
   await run("pnpm", ["--dir", "typescript-kafka", "build"], root, {});
-  await run("pnpm", ["--filter", "@openbindings/asyncapi", "build"], resolve(root, "../openbindings-ts"), {});
-  await qualifyTypeScriptBridge(environment.ASYNCAPI_KAFKA_TEST_URL, topics.tsBridge, false);
-  await run("go", ["test", ".", "-run", "TestLiveOpenBindingsAdapterUsesKafkaDriver", "-count=1"], resolve(root, "../openbindings-go/formats/asyncapi"), {
-    ...environment,
-    GOWORK: resolve(root, "../go.work"),
-    GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
-  });
+  if (withSdkBridges) {
+    await run("pnpm", ["--filter", "@openbindings/asyncapi", "build"], resolve(root, "../openbindings-ts"), {});
+    await qualifyTypeScriptBridge(environment.ASYNCAPI_KAFKA_TEST_URL, topics.tsBridge, false);
+    await run("go", ["test", ".", "-run", "TestLiveOpenBindingsAdapterUsesKafkaDriver", "-count=1"], resolve(root, "../openbindings-go/formats/asyncapi"), {
+      ...environment,
+      GOWORK: resolve(root, "../go.work"),
+      GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
+    });
+  }
 
   await run("docker", [
     "exec", container, "rpk", "security", "user", "create", "orders",
@@ -112,13 +115,15 @@ try {
     GOWORK: "off",
     GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
   });
-  await qualifyTypeScriptBridge(environment.ASYNCAPI_KAFKA_TEST_URL, topics.tsBridgeSecurity, true);
-  await run("go", ["test", ".", "-run", "TestLiveOpenBindingsAdapterUsesKafkaSCRAMWithoutProtocolFields", "-count=1"], resolve(root, "../openbindings-go/formats/asyncapi"), {
-    ...securityEnvironment,
-    GOWORK: resolve(root, "../go.work"),
-    GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
-  });
-  console.log("TypeScript and Go Kafka standalone/OpenBindings bridge qualification passed");
+  if (withSdkBridges) {
+    await qualifyTypeScriptBridge(environment.ASYNCAPI_KAFKA_TEST_URL, topics.tsBridgeSecurity, true);
+    await run("go", ["test", ".", "-run", "TestLiveOpenBindingsAdapterUsesKafkaSCRAMWithoutProtocolFields", "-count=1"], resolve(root, "../openbindings-go/formats/asyncapi"), {
+      ...securityEnvironment,
+      GOWORK: resolve(root, "../go.work"),
+      GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
+    });
+  }
+  console.log(withSdkBridges ? "TypeScript and Go Kafka standalone/OpenBindings bridge qualification passed" : "TypeScript and Go standalone Kafka qualification passed");
 } finally {
   if (started) {
     await run("docker", ["rm", "-f", container], root, {}, true);
