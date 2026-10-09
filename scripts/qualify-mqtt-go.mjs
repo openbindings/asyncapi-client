@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const withSdkBridges = !process.argv.slice(2).includes("--standalone");
 const broker = spawn(process.execPath, [resolve(root, "typescript-mqtt/scripts/broker.mjs")], {
   cwd: root,
   stdio: ["ignore", "pipe", "inherit"],
@@ -20,19 +21,23 @@ try {
   if (!line.startsWith("mqtt://")) throw new Error(`unexpected MQTT broker readiness line: ${line}`);
   await run("pnpm", ["--dir", "typescript", "build"], root, {});
   await run("pnpm", ["--dir", "typescript-mqtt", "build"], root, {});
-  await run("pnpm", ["--filter", "@openbindings/asyncapi", "build"], resolve(root, "../openbindings-ts"), {});
-  await qualifyTypeScriptBridge(line);
+  if (withSdkBridges) {
+    await run("pnpm", ["--filter", "@openbindings/asyncapi", "build"], resolve(root, "../openbindings-ts"), {});
+    await qualifyTypeScriptBridge(line);
+  }
   await run("go", ["test", "./mqtt", "-run", "TestLive", "-count=1"], resolve(root, "go"), {
     ASYNCAPI_MQTT_TEST_URL: line,
     GOWORK: "off",
     GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
   });
-  await run("go", ["test", ".", "-run", "TestLiveOpenBindingsAdapter", "-count=1"], resolve(root, "../openbindings-go/formats/asyncapi"), {
-    ASYNCAPI_MQTT_TEST_URL: line,
-    GOWORK: resolve(root, "../go.work"),
-    GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
-  });
-  console.log("TypeScript and Go MQTT standalone/OpenBindings bridge qualification passed");
+  if (withSdkBridges) {
+    await run("go", ["test", ".", "-run", "TestLiveOpenBindingsAdapter", "-count=1"], resolve(root, "../openbindings-go/formats/asyncapi"), {
+      ASYNCAPI_MQTT_TEST_URL: line,
+      GOWORK: resolve(root, "../go.work"),
+      GOCACHE: "/tmp/openbindings-asyncapi-client-go-cache",
+    });
+  }
+  console.log(withSdkBridges ? "TypeScript and Go MQTT standalone/OpenBindings bridge qualification passed" : "Standalone MQTT qualification passed");
 } finally {
   broker.kill("SIGTERM");
   await Promise.race([once(broker, "exit"), new Promise((resolveWait) => setTimeout(resolveWait, 5000))]);

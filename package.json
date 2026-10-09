@@ -15,6 +15,7 @@
     "boundary": "pnpm build && node scripts/verify-boundary.mjs",
     "verify": "pnpm lint && pnpm test && pnpm test:go && pnpm verify:mqtt-matrix && pnpm verify:kafka-matrix && pnpm verify:websocket-reply-matrix && pnpm boundary",
     "verify:consumers": "node scripts/verify-clean-consumers.mjs",
-    "qualify:release": "pnpm verify && pnpm test:mqtt:go-live && pnpm test:kafka:live && pnpm verify:consumers"
+    "qualify:release": "pnpm verify && pnpm test:mqtt:go-live && pnpm test:kafka:live && pnpm verify:consumers",
+    "verify:standalone": "pnpm lint && pnpm test && pnpm test:go && node scripts/verify-mqtt-conformance.mjs --standalone && node scripts/verify-kafka-conformance.mjs --standalone && pnpm verify:websocket-reply-matrix && pnpm boundary"
   }
 }

@@ -1,58 +1,51 @@
-name: ci
+name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  qualify:
+  ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: asyncapi-client
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: asyncapi-client
-      # Live qualification includes the published SDK bridges.
-      - uses: actions/checkout@v4
-        with:
-          repository: openbindings/openbindings-go
-          ref: release/0.2
-          path: openbindings-go
-      - uses: actions/checkout@v4
-        with:
-          repository: openbindings/openbindings-ts
-          ref: release/0.2
-          path: openbindings-ts
-      - uses: actions/checkout@v4
-        with:
-          repository: openbindings/jsonata
-          ref: e2a5e518e6b5bd247ab327d427c591dc72743f2d
-          path: jsonata
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.15.0
           package_json_file: asyncapi-client/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: asyncapi-client/pnpm-lock.yaml
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: asyncapi-client/go/go.mod
           cache-dependency-path: asyncapi-client/go/go.sum
       - run: pnpm install --frozen-lockfile
-      - name: Prepare SDK bridge dependencies
-        run: |
-          npm --prefix ../jsonata/javascript ci --ignore-scripts
-          npm --prefix ../jsonata/javascript run build
-          pnpm build
-          pnpm --dir ../openbindings-ts install --frozen-lockfile --ignore-scripts
-          pnpm --dir ../openbindings-ts --filter @openbindings/asyncapi... build
-          cd ..
-          go work init openbindings-go openbindings-go/formats/asyncapi asyncapi-client/go
-          go work edit -replace github.com/openbindings/openbindings-go@v0.2.0=./openbindings-go
-          go work edit -replace github.com/openbindings/asyncapi-client/go@v0.1.0=./asyncapi-client/go
-      - run: pnpm qualify:release
+      - name: Standalone build, type, unit, race and protocol checks
+        run: pnpm verify:standalone
+      - run: go vet ./...
+        working-directory: asyncapi-client/go
+        env:
+          GOWORK: 'off'
+      - name: Installed package consumers
+        run: pnpm verify:consumers
+      - name: Local MQTT broker tests
+        run: node scripts/qualify-mqtt-go.mjs --standalone
+      - name: Local Kafka broker tests
+        run: node scripts/qualify-kafka.mjs --standalone
