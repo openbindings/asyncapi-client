@@ -30,8 +30,9 @@ Reported actual versions and artifact hashes remain the authority for each run.
 
 The Worker is kept inside its request lifetime. Its network service permits
 local fixture addresses; this is not a production Cloudflare capability claim.
-The exchange suite may fail on the pinned Worker close anomaly documented in
-`rust/host/README.md`; keep the failure receipt rather than retrying to claim
+The current constructor profile pins workerd 1.20261010.1. Earlier runtime
+failures and still-failing alternate raw connection paths are documented in
+`rust/host/README.md`; preserve any failure rather than retrying to claim
 qualification. Callback assignment instrumentation observes library-owned
 handlers. It does not prove a settled Wasm heap plateau or full host GC.
 

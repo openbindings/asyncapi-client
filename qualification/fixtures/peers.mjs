@@ -71,13 +71,13 @@ export async function startPeers() {
 }
 
 /** Fixed fixture expectations, never read from the candidate's prepared plan. */
-export function verifyRecords(records,{protocol,count,size,topic=profile.topic}) {
+export function verifyRecords(records,{protocol,count,size,topic=profile.topic,qos=1}) {
   const actual = records.filter(record=>record.protocol===protocol && record.digest);
   if(actual.length!==count) throw new Error(`expected ${count} peer records, got ${actual.length}`);
   for(let sequence=0;sequence<count;sequence++) {
     const record=actual[sequence];
     if(record.bytes!==size || record.digest!==digest(expectedPayload(sequence,size))) throw new Error(`payload mismatch at ${sequence}`);
-    if(protocol==='mqtt' && (record.topic!==topic || record.qos!==1 || record.retain!==false)) throw new Error(`MQTT routing/flags mismatch at ${sequence}`);
+    if(protocol==='mqtt' && (record.topic!==topic || record.qos!==qos || record.retain!==false)) throw new Error(`MQTT routing/flags mismatch at ${sequence}`);
     if(protocol==='websocket' && record.binary!==true) throw new Error(`WebSocket binary frame expected at ${sequence}`);
   }
   return {observed:actual.length,bytes:size*actual.length};

@@ -2,7 +2,7 @@
 //! implementation-authored and are not independent conformance qualification.
 use dynamic_asyncapi_client::{Document, Plan, PlanOptions};
 use dynamic_asyncapi_native::{
-    CloseReceipt, Credentials, Incoming, Receipt, RuntimeCode, Session, SessionOptions,
+    CloseReceipt, Credentials, Delivery, Incoming, Receipt, RuntimeCode, Session, SessionOptions,
     SessionState,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -17,6 +17,15 @@ use tokio::{
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 fn plans(protocol: &str, port: u16, receive: bool) -> Vec<Plan> {
+    plans_at_qos(protocol, port, receive, 1, 1)
+}
+fn plans_at_qos(
+    protocol: &str,
+    port: u16,
+    receive: bool,
+    send_qos: u8,
+    receive_qos: u8,
+) -> Vec<Plan> {
     let mut value = json!({"asyncapi":"3.1.0","info":{"title":"test","version":"1"},
         "servers":{"local":{"host":format!("127.0.0.1:{port}"),"protocol":protocol}},
         "channels":{"events":{"address":if protocol=="mqtt" {"fixture/events"}else{"/events"},"messages":{"event":{"contentType":"application/octet-stream"}}}},
@@ -29,8 +38,9 @@ fn plans(protocol: &str, port: u16, receive: bool) -> Vec<Plan> {
         value["servers"]["local"]["protocolVersion"] = json!("3.1.1");
         value["servers"]["local"]["bindings"] =
             json!({"mqtt":{"clientId":"test-client","keepAlive":1,"cleanSession":true}});
-        for (_, operation) in value["operations"].as_object_mut().unwrap() {
-            operation["bindings"] = json!({"mqtt":{"qos":1}});
+        for (id, operation) in value["operations"].as_object_mut().unwrap() {
+            operation["bindings"] =
+                json!({"mqtt":{"qos":if id == "emit" { send_qos } else { receive_qos }}});
         }
     }
     let document = Document::parse(&value.to_string()).unwrap();
@@ -556,4 +566,281 @@ async fn control_frames_are_not_limited_by_a_smaller_binary_message_budget() {
     observed.await.unwrap();
     session.close().await.unwrap();
     server.await.unwrap();
+}
+
+/// A deliberately small independent packet writer for the receive contracts.
+async fn incoming_publish(stream: &mut TcpStream, qos: u8) {
+    let topic = b"fixture/events";
+    let mut body = Vec::from((topic.len() as u16).to_be_bytes());
+    body.extend_from_slice(topic);
+    if qos > 0 {
+        body.extend_from_slice(&[0, 7]);
+    }
+    body.extend_from_slice(b"payload");
+    assert!(body.len() < 128);
+    stream
+        .write_all(&[0x30 | (qos << 1), body.len() as u8])
+        .await
+        .unwrap();
+    stream.write_all(&body).await.unwrap();
+}
+
+#[tokio::test]
+async fn qos_zero_flushes_without_puback_and_releases_capacity() {
+    let (listener, port) = listener().await;
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        for sequence in 0..1000_u16 {
+            let (kind, body) = packet(&mut stream).await;
+            assert_eq!(kind, 0x30);
+            let topic_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
+            assert_eq!(&body[2..2 + topic_len], b"fixture/events");
+            // QoS 0 has no packet identifier between topic and payload.
+            assert_eq!(&body[2 + topic_len..], &sequence.to_be_bytes());
+        }
+        assert_eq!(packet(&mut stream).await.0, 0xe0);
+        socket_closed(&mut stream).await;
+    });
+    let session = Session::open(
+        &plans_at_qos("mqtt", port, false, 0, 0),
+        SessionOptions {
+            max_messages: 1,
+            max_buffered_bytes: 2,
+            max_message_bytes: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(session.mqtt_subscriptions().is_empty());
+    for sequence in 0..1000_u16 {
+        assert_eq!(
+            session
+                .send(0, sequence.to_be_bytes().to_vec())
+                .await
+                .unwrap(),
+            Receipt::MqttPublishFlushed
+        );
+    }
+    session.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_grants_are_maxima_and_delivery_reports_actual_qos() {
+    for (requested, granted, actual) in [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 1, 1)] {
+        let (listener, port) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut stream = mqtt_ready(listener).await;
+            let (kind, body) = packet(&mut stream).await;
+            assert_eq!(kind, 0x82);
+            assert_eq!(*body.last().unwrap(), requested);
+            stream
+                .write_all(&[0x90, 3, body[0], body[1], granted])
+                .await
+                .unwrap();
+            incoming_publish(&mut stream, actual).await;
+            if actual == 1 {
+                assert_eq!(packet(&mut stream).await, (0x40, vec![0, 7]));
+            }
+            // A QoS 0 delivery has no acknowledgment on the wire.
+            assert_eq!(packet(&mut stream).await.0, 0xe0);
+            socket_closed(&mut stream).await;
+        });
+        let mut session = Session::open(
+            &plans_at_qos("mqtt", port, true, 0, requested),
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+        let subscriptions = session.mqtt_subscriptions();
+        assert_eq!(subscriptions.len(), 1);
+        assert_eq!(subscriptions[0].operation, 1);
+        assert_eq!(subscriptions[0].topic, "fixture/events");
+        assert_eq!(subscriptions[0].requested_qos, requested);
+        assert_eq!(subscriptions[0].granted_qos, granted);
+        let Some(Incoming::Message(message)) = session.next().await.unwrap() else {
+            panic!("expected classified publication")
+        };
+        assert_eq!(message.operation, 1);
+        assert_eq!(message.payload.as_ref(), b"payload");
+        assert!(
+            matches!(message.delivery, Delivery::Mqtt {qos,packet_id,..} if qos == actual && packet_id == if actual == 0 { 0 } else { 7 })
+        );
+        session.close().await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn publication_before_suback_is_retained_until_session_readiness() {
+    let (listener, port) = listener().await;
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        let (_, body) = packet(&mut stream).await;
+        incoming_publish(&mut stream, 0).await;
+        stream
+            .write_all(&[0x90, 3, body[0], body[1], 0])
+            .await
+            .unwrap();
+        assert_eq!(packet(&mut stream).await.0, 0xe0);
+        socket_closed(&mut stream).await;
+    });
+    let mut session = Session::open(&plans("mqtt", port, true), SessionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(session.mqtt_subscriptions()[0].granted_qos, 0);
+    assert!(
+        matches!(session.next().await.unwrap(),Some(Incoming::Message(message)) if message.payload.as_ref() == b"payload")
+    );
+    session.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_or_refused_grants_never_make_a_session_ready() {
+    for (requested, granted, expected) in [
+        (0, 1, RuntimeCode::Protocol),
+        (1, 2, RuntimeCode::Protocol),
+        (1, 0x80, RuntimeCode::Connection),
+    ] {
+        let (listener, port) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut stream = mqtt_ready(listener).await;
+            let (_, body) = packet(&mut stream).await;
+            stream
+                .write_all(&[0x90, 3, body[0], body[1], granted])
+                .await
+                .unwrap();
+            socket_closed(&mut stream).await;
+        });
+        assert!(
+            matches!(Session::open(&plans_at_qos("mqtt",port,true,0,requested), SessionOptions::default()).await, Err(error) if error.code == expected)
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn publication_above_negotiated_grant_is_a_protocol_failure() {
+    let (listener, port) = listener().await;
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        let (_, body) = packet(&mut stream).await;
+        stream
+            .write_all(&[0x90, 3, body[0], body[1], 0])
+            .await
+            .unwrap();
+        incoming_publish(&mut stream, 1).await;
+        // Automatic acknowledgment happens in the backend before delivery policy.
+        assert_eq!(packet(&mut stream).await, (0x40, vec![0, 7]));
+        socket_closed(&mut stream).await;
+    });
+    let mut session = Session::open(&plans("mqtt", port, true), SessionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        session.next().await.unwrap_err().code,
+        RuntimeCode::Protocol
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn qos_two_refuses_before_any_connection_attempt() {
+    let (listener, port) = listener().await;
+    for (send, receive) in [(2, 1), (1, 2)] {
+        assert!(
+            matches!(Session::open(&plans_at_qos("mqtt",port,true,send,receive), SessionOptions::default()).await, Err(error) if error.code == RuntimeCode::Unsupported)
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn mixed_send_qos_preserves_each_receipts_meaning() {
+    let (listener, port) = listener().await;
+    let source = json!({"asyncapi":"3.1.0","info":{"title":"mixed","version":"1"},
+        "servers":{"local":{"host":format!("127.0.0.1:{port}"),"protocol":"mqtt","protocolVersion":"3.1.1",
+            "bindings":{"mqtt":{"clientId":"mixed","cleanSession":true,"keepAlive":1}}}},
+        "channels":{"c":{"address":"fixture/events","messages":{"m":{"contentType":"application/octet-stream"}}}},
+        "operations":{
+            "q0":{"action":"send","channel":{"$ref":"#/channels/c"},"bindings":{"mqtt":{"qos":0}}},
+            "q1":{"action":"send","channel":{"$ref":"#/channels/c"},"bindings":{"mqtt":{"qos":1}}}}});
+    let document = Document::parse(&source.to_string()).unwrap();
+    let p: Vec<_> = ["q0", "q1"]
+        .into_iter()
+        .map(|id| {
+            document
+                .operation_id(id)
+                .unwrap()
+                .compile()
+                .unwrap()
+                .prepare(&PlanOptions::application())
+                .unwrap()
+        })
+        .collect();
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        for qos in [0, 1, 0, 1] {
+            let (kind, body) = packet(&mut stream).await;
+            assert_eq!(kind, 0x30 | (qos << 1));
+            if qos == 1 {
+                let (id, payload) = publish(&body);
+                assert_eq!(payload, [1]);
+                ack(&mut stream, id).await;
+            }
+        }
+        assert_eq!(packet(&mut stream).await.0, 0xe0);
+        socket_closed(&mut stream).await;
+    });
+    let session = Session::open(&p, SessionOptions::default()).await.unwrap();
+    let mut ids = Vec::new();
+    for qos in [0, 1, 0, 1] {
+        match session.send(qos, vec![qos as u8]).await.unwrap() {
+            Receipt::MqttPublishFlushed => assert_eq!(qos, 0),
+            Receipt::MqttPubAck { packet_id } => {
+                assert_eq!(qos, 1);
+                assert!(packet_id > 0);
+                ids.push(packet_id);
+            }
+            other => panic!("unexpected receipt: {other:?}"),
+        }
+    }
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    session.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn suback_must_match_subscription_identity_and_count() {
+    for wrong_id in [false, true] {
+        let (listener, port) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut stream = mqtt_ready(listener).await;
+            let (_, body) = packet(&mut stream).await;
+            let id = u16::from_be_bytes([body[0], body[1]]) + u16::from(wrong_id);
+            let mut ack = vec![
+                0x90,
+                if wrong_id { 3 } else { 4 },
+                (id >> 8) as u8,
+                id as u8,
+                1,
+            ];
+            if !wrong_id {
+                ack.push(1);
+            }
+            stream.write_all(&ack).await.unwrap();
+            socket_closed(&mut stream).await;
+        });
+        assert!(
+            matches!(Session::open(&plans("mqtt",port,true),SessionOptions::default()).await,Err(error) if error.code == RuntimeCode::Protocol)
+        );
+        server.await.unwrap();
+    }
 }

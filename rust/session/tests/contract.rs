@@ -104,3 +104,28 @@ fn reservations_remain_bounded_and_release_across_threads() {
     });
     assert_eq!(budget.usage(), Default::default());
 }
+
+#[test]
+fn portable_mqtt_routing_treats_requested_qos_as_a_maximum() {
+    for requested in 0..=2 {
+        let source = r##"{"asyncapi":"3.1.0","info":{"title":"qos","version":"1"},"servers":{"s":{"host":"example.test","protocol":"mqtt","protocolVersion":"3.1.1","bindings":{"mqtt":{"clientId":"routing"}}}},"channels":{"c":{"address":"events","messages":{"m":{"contentType":"application/octet-stream"}}}},"operations":{"listen":{"action":"receive","channel":{"$ref":"#/channels/c"},"bindings":{"mqtt":{"qos":QOS}}}}}"##.replace("QOS",&requested.to_string());
+        let document = Document::parse(&source).unwrap();
+        let plan = document
+            .operation_id("listen")
+            .unwrap()
+            .compile()
+            .unwrap()
+            .prepare(&PlanOptions::application())
+            .unwrap();
+        let session = SessionPlan::new(&[plan]).unwrap();
+        for actual in 0..=2 {
+            let route = session.mqtt_route("events", actual);
+            if actual <= requested {
+                assert_eq!(route, Route::Operation(0));
+            } else {
+                assert!(matches!(route, Route::Rejected(_)));
+            }
+        }
+        assert!(matches!(session.mqtt_route("other", 0), Route::Rejected(_)));
+    }
+}

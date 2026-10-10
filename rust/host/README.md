@@ -31,8 +31,11 @@ after opening; the session owns them.
 Initial development covers local schema-free binary WebSocket with GET and no
 handshake headers. Browser/Worker network policy applies. Local workerd loopback
 configuration does not establish production network access. Worker close
-qualification is open: its pinned runtime has intermittently reported a host
-error followed by a clean close, including in a direct raw-host control. This
-client preserves the error rather than silently declaring success. TLS,
-authentication, further codecs/protocols and sustained performance/ownership
-qualification remain required work.
+qualification remains open. The current tested local profile pins workerd
+1.20261010.1, compatibility date 2026-10-08, and the WebSocket constructor. Its
+constructor path passed 800 raw control connections and the client suites.
+The older 1.20261006.1 profile had intermittent error/clean-close sequences;
+other raw connection methods still reproduce this on the newer runtime. These
+observations are preserved, not treated as client success. TLS, authentication,
+further codecs/protocols and sustained performance/ownership qualification
+remain required work.

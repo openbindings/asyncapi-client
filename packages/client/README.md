@@ -69,7 +69,10 @@ before a message event cannot be controlled by this API and is outside the Rust
 queue budget. Authentication headers and protocol profiles beyond this initial
 binary WebSocket path are still open.
 
-Actual local Worker exchanges have succeeded, but an intermittent Worker
-shutdown anomaly remains under investigation. A host error stays a failure even
-when followed by a clean close event. This preview does not claim full Worker
-transport qualification or a deployed Cloudflare destination profile.
+Actual local Worker exchanges use the tested workerd 1.20261010.1 constructor
+profile, with compatibility date 2026-10-08. The previous runtime had an
+intermittent shutdown anomaly; its failures remain recorded. The updated
+constructor profile passed the client suites and 800 diagnostic connections,
+while other raw connection paths still reproduced errors. Every host error
+stays a failure even if followed by a clean close event. Full transport
+qualification and deployed Cloudflare destination verification remain open.

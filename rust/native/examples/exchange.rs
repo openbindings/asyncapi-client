@@ -1,6 +1,6 @@
 //! Development consumer: every operation/route/setting comes from the input document.
 use dynamic_asyncapi_client::{Document, PlanOptions};
-use dynamic_asyncapi_native::{Credentials, Incoming, Session, SessionOptions};
+use dynamic_asyncapi_native::{Credentials, Delivery, Incoming, Session, SessionOptions};
 use serde_json::json;
 use std::{error::Error, time::Duration};
 use tokio::time::timeout;
@@ -42,6 +42,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
     )
     .await?;
+    let subscriptions = session.mqtt_subscriptions().to_vec();
+    let mut received_qos = Vec::new();
     let mut receipts = Vec::new();
     let mut received = 0;
     let mut rejected = 0;
@@ -61,6 +63,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Incoming::Message(message) => {
                     if message.operation != 1 || message.payload.as_ref() != bytes {
                         return Err("received operation or bytes differ".into());
+                    }
+                    if let Delivery::Mqtt { qos, .. } = message.delivery {
+                        received_qos.push(qos);
                     }
                     received += 1;
                     break;
@@ -84,7 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let after_close = sender.send(0, vec![0; 4]).await.unwrap_err();
     println!(
         "{}",
-        json!({"kind":"dynamic-client-development-execution","received":received,"rejected":rejected,"receipts":receipts,"close":close,"afterClose":after_close.code})
+        json!({"kind":"dynamic-client-development-execution","received":received,"rejected":rejected,"receipts":receipts,"subscriptions":subscriptions,"receivedQos":received_qos,"close":close,"afterClose":after_close.code})
     );
     Ok(())
 }

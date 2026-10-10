@@ -1,12 +1,12 @@
 //! Explicitly owned native protocol sessions for immutable AsyncAPI plans.
-//! This initial execution slice supports MQTT 3.1.1 QoS 1 and binary WebSocket,
+//! This initial execution slice supports MQTT 3.1.1 QoS 0/1 and binary WebSocket,
 //! both over TCP. TLS, recovery and other protocol profiles remain open work.
 #![forbid(unsafe_code)]
 mod mqtt;
 mod websocket;
 
 pub use bytes::Bytes;
-use dynamic_asyncapi_client::Plan;
+use dynamic_asyncapi_client::{Plan, TransportPlan};
 use dynamic_asyncapi_session::{Budget, ConnectionPlan as Connection, Lease, Limits, SessionPlan};
 pub use dynamic_asyncapi_session::{RuntimeCode, RuntimeError};
 use serde::Serialize;
@@ -95,8 +95,23 @@ impl SessionOptions {
     rename_all_fields = "camelCase"
 )]
 pub enum Receipt {
-    MqttPubAck { packet_id: u16 },
+    /// QoS 0 PUBLISH was flushed to the socket. No broker acknowledgment exists.
+    MqttPublishFlushed,
+    /// The broker returned PUBACK for this QoS 1 PUBLISH.
+    MqttPubAck {
+        packet_id: u16,
+    },
     WebSocketFlushed,
+}
+/// Broker-negotiated subscription limits, available once the session is open.
+/// The grant is a maximum; an individual publication may arrive at a lower QoS.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttSubscription {
+    pub operation: usize,
+    pub topic: String,
+    pub requested_qos: u8,
+    pub granted_qos: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -255,6 +270,7 @@ impl Sender {
 /// Plans must agree on connection/role, and receive operations must be unambiguous.
 /// Explicit `close` joins the task; Drop initiates task abortion and socket release.
 pub struct Session {
+    mqtt_subscriptions: Vec<MqttSubscription>,
     sender: Sender,
     events: mpsc::Receiver<Queued>,
     shutdown: watch::Sender<bool>,
@@ -266,6 +282,17 @@ impl Session {
     pub async fn open(plans: &[Plan], options: SessionOptions) -> Result<Self, RuntimeError> {
         options.validate()?;
         let plans = SessionPlan::new(plans)?;
+        if plans.plans().iter().any(|plan| {
+            matches!(
+                plan.describe().transport,
+                TransportPlan::Mqtt311 { qos: 2, .. }
+            )
+        }) {
+            return Err(RuntimeError::new(
+                RuntimeCode::Unsupported,
+                "MQTT QoS 2 execution awaits a backend with verified duplicate-packet handling",
+            ));
+        }
         let connection = plans.connection().clone();
         match &connection {
             Connection::Mqtt(settings) if settings.tls => {
@@ -312,6 +339,10 @@ impl Session {
         .map_err(|_| {
             RuntimeError::new(RuntimeCode::Deadline, "session readiness deadline expired")
         })??;
+        let mqtt_subscriptions = match &driver {
+            Driver::Mqtt(driver) => driver.subscriptions.clone(),
+            Driver::WebSocket(_) => Vec::new(),
+        };
         let (commands, requests) = mpsc::channel(options.max_messages);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (terminal, state) = watch::channel(SessionState::Open);
@@ -329,6 +360,7 @@ impl Session {
             });
         });
         Ok(Self {
+            mqtt_subscriptions,
             sender: Sender {
                 commands,
                 plans,
@@ -346,6 +378,10 @@ impl Session {
     }
     pub fn sender(&self) -> Sender {
         self.sender.clone()
+    }
+    /// Empty for WebSocket sessions and MQTT sessions without receive plans.
+    pub fn mqtt_subscriptions(&self) -> &[MqttSubscription] {
+        &self.mqtt_subscriptions
     }
     pub fn state(&self) -> SessionState {
         self.terminal.borrow().clone()

@@ -24,7 +24,7 @@ pub enum Route {
 struct Inner {
     plans: Arc<[Plan]>,
     connection: ConnectionPlan,
-    mqtt_receivers: HashMap<String, usize>,
+    mqtt_receivers: HashMap<String, (usize, u8)>,
     websocket_receiver: Option<usize>,
 }
 /// Owns the immutable plans and compiles connection compatibility and receive
@@ -64,12 +64,6 @@ impl SessionPlan {
                     qos,
                     ..
                 } => {
-                    if *qos != 1 {
-                        return Err(RuntimeError::new(
-                            RuntimeCode::Unsupported,
-                            "initial MQTT execution requires QoS 1",
-                        ));
-                    }
                     if topic.len() > 2048 {
                         return Err(RuntimeError::new(
                             RuntimeCode::Unsupported,
@@ -78,7 +72,9 @@ impl SessionPlan {
                     }
                     if plan.wire_action == Action::Receive
                         && (topic.contains(['#', '+'])
-                            || mqtt_receivers.insert(topic.clone(), index).is_some())
+                            || mqtt_receivers
+                                .insert(topic.clone(), (index, *qos))
+                                .is_some())
                     {
                         return Err(RuntimeError::new(
                             RuntimeCode::Unsupported,
@@ -200,8 +196,8 @@ impl SessionPlan {
             ))
     }
     pub fn mqtt_route(&self, topic: &str, qos: u8) -> Route {
-        if qos == 1
-            && let Some(operation) = self.0.mqtt_receivers.get(topic)
+        if let Some((operation, requested)) = self.0.mqtt_receivers.get(topic)
+            && qos <= *requested
         {
             return Route::Operation(*operation);
         }

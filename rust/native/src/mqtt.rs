@@ -1,6 +1,6 @@
 use crate::{
-    CloseReceipt, Context, Delivery, Incoming, Receipt, Received, RuntimeCode, RuntimeError,
-    SendCommand,
+    CloseReceipt, Context, Delivery, Incoming, MqttSubscription, Receipt, Received, RuntimeCode,
+    RuntimeError, SendCommand,
 };
 use dynamic_asyncapi_client::{Action, TransportPlan};
 use dynamic_asyncapi_session::{MqttSettings, Route};
@@ -8,7 +8,7 @@ use rumqttc::{
     AsyncClient, ConnectReturnCode, Event, EventLoop, Incoming as Packet, MqttOptions, Outgoing,
     QoS, SubscribeFilter, SubscribeReasonCode,
 };
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 use tokio::{
     sync::{mpsc, watch},
     time::{Instant, sleep_until},
@@ -17,6 +17,8 @@ use tokio::{
 pub(crate) struct Driver {
     client: AsyncClient,
     events: EventLoop,
+    pub(crate) subscriptions: Vec<MqttSubscription>,
+    grants: HashMap<String, u8>,
 }
 pub(crate) async fn connect(
     settings: MqttSettings,
@@ -48,20 +50,30 @@ pub(crate) async fn connect(
             ));
         }
     }
-    let topics: Vec<_> = context
+    let mut subscriptions: Vec<_> = context
         .plans
         .plans()
         .iter()
-        .filter(|p| p.describe().wire_action == Action::Receive)
-        .map(|p| match &p.describe().transport {
-            TransportPlan::Mqtt311 { topic, .. } => {
-                SubscribeFilter::new(topic.clone(), QoS::AtLeastOnce)
-            }
+        .enumerate()
+        .filter(|(_, p)| p.describe().wire_action == Action::Receive)
+        .map(|(operation, p)| match &p.describe().transport {
+            TransportPlan::Mqtt311 { topic, qos, .. } => MqttSubscription {
+                operation,
+                topic: topic.clone(),
+                requested_qos: *qos,
+                granted_qos: *qos,
+            },
             _ => unreachable!(),
         })
         .collect();
-    if !topics.is_empty() {
-        let count = topics.len();
+    let mut grants = HashMap::new();
+    if !subscriptions.is_empty() {
+        let topics = subscriptions.iter().map(|subscription| {
+            SubscribeFilter::new(
+                subscription.topic.clone(),
+                wire_qos(subscription.requested_qos),
+            )
+        });
         client.try_subscribe_many(topics).map_err(|_| {
             RuntimeError::new(
                 RuntimeCode::DriverFailed,
@@ -73,26 +85,50 @@ pub(crate) async fn connect(
             match events.poll().await.map_err(connection_error)? {
                 Event::Outgoing(Outgoing::Subscribe(id)) => expected = Some(id),
                 Event::Incoming(Packet::SubAck(ack)) => {
-                    if expected != Some(ack.pkid)
-                        || ack.return_codes.len() != count
-                        || ack
-                            .return_codes
-                            .iter()
-                            .any(|code| *code != SubscribeReasonCode::Success(QoS::AtLeastOnce))
-                    {
+                    if expected != Some(ack.pkid) || ack.return_codes.len() != subscriptions.len() {
                         return Err(RuntimeError::new(
                             RuntimeCode::Protocol,
-                            "broker did not acknowledge the requested QoS 1 subscriptions",
+                            "MQTT subscription acknowledgment identity or count did not match",
                         ));
+                    }
+                    for (subscription, code) in subscriptions.iter_mut().zip(ack.return_codes) {
+                        let SubscribeReasonCode::Success(qos) = code else {
+                            return Err(RuntimeError::new(
+                                RuntimeCode::Connection,
+                                "broker refused a subscription",
+                            ));
+                        };
+                        if qos as u8 > subscription.requested_qos {
+                            return Err(RuntimeError::new(
+                                RuntimeCode::Protocol,
+                                "broker granted QoS above the requested maximum",
+                            ));
+                        }
+                        subscription.granted_qos = qos as u8;
+                        grants.insert(subscription.topic.clone(), qos as u8);
                     }
                     break;
                 }
-                Event::Incoming(Packet::Publish(message)) => deliver(context, message)?,
+                // MQTT permits matching publications before SUBACK. Until the
+                // grant is known, admission uses the requested upper bound.
+                Event::Incoming(Packet::Publish(message)) => deliver(context, &grants, message)?,
                 _ => {}
             }
         }
     }
-    Ok(Driver { client, events })
+    Ok(Driver {
+        client,
+        events,
+        subscriptions,
+        grants,
+    })
+}
+fn wire_qos(qos: u8) -> QoS {
+    match qos {
+        0 => QoS::AtMostOnce,
+        1 => QoS::AtLeastOnce,
+        _ => unreachable!("native capability admission rejects QoS 2 before I/O"),
+    }
 }
 fn connection_error(error: rumqttc::ConnectionError) -> RuntimeError {
     use rumqttc::{ConnectionError as C, StateError as S};
@@ -120,14 +156,27 @@ fn connection_error(error: rumqttc::ConnectionError) -> RuntimeError {
         ),
     }
 }
-fn deliver(context: &Context, message: rumqttc::Publish) -> Result<(), RuntimeError> {
+fn deliver(
+    context: &Context,
+    grants: &HashMap<String, u8>,
+    message: rumqttc::Publish,
+) -> Result<(), RuntimeError> {
+    if grants
+        .get(&message.topic)
+        .is_some_and(|grant| message.qos as u8 > *grant)
+    {
+        return Err(RuntimeError::new(
+            RuntimeCode::Protocol,
+            "MQTT publication exceeded the granted subscription QoS",
+        ));
+    }
     match context.plans.mqtt_route(&message.topic, message.qos as u8) {
         Route::Operation(operation) => context.deliver(Incoming::Message(Received {
             operation,
             payload: message.payload,
             delivery: Delivery::Mqtt {
                 topic: message.topic,
-                qos: 1,
+                qos: message.qos as u8,
                 retain: message.retain,
                 duplicate: message.dup,
                 packet_id: message.pkid,
@@ -142,6 +191,7 @@ fn deliver(context: &Context, message: rumqttc::Publish) -> Result<(), RuntimeEr
 struct Pending {
     command: SendCommand,
     packet_id: Option<u16>,
+    qos: u8,
 }
 pub(crate) async fn run(
     mut driver: Driver,
@@ -164,7 +214,7 @@ pub(crate) async fn run(
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(300));
             tokio::select! {
                 event=&mut polling=>break event.map_err(|error|if pending.is_some() { connection_error(error).uncertain() } else { connection_error(error) })?,
-                _=sleep_until(deadline),if pending.is_some()=>return Err(RuntimeError::new(RuntimeCode::Deadline,"MQTT publish acknowledgment deadline expired").uncertain()),
+                _=sleep_until(deadline),if pending.is_some()=>return Err(RuntimeError::new(RuntimeCode::Deadline,"MQTT publish completion deadline expired").uncertain()),
                 _=shutdown.changed(),if !closing=> {
                     closing=true;
                     driver.client.try_disconnect().map_err(|_|RuntimeError::new(RuntimeCode::DriverFailed,"driver rejected shutdown"))?;
@@ -173,24 +223,44 @@ pub(crate) async fn run(
                     let Some(command)=command else { return Err(RuntimeError::new(RuntimeCode::Closed,"session command owner ended")); };
                     if command.response.is_closed() { continue; }
                     if Instant::now()>=command.deadline { command.complete(Err(RuntimeError::new(RuntimeCode::Deadline,"send expired before driver submission")));continue; }
-                    let TransportPlan::Mqtt311 { topic,retain,.. }=&context.plans.plans()[command.operation].describe().transport else { unreachable!() };
-                    driver.client.try_publish(topic,QoS::AtLeastOnce,*retain,command.payload.clone()).map_err(|_|RuntimeError::new(RuntimeCode::DriverFailed,"driver rejected prepared publish"))?;
-                    pending=Some(Pending { command,packet_id:None });
+                    let TransportPlan::Mqtt311 { topic,retain,qos,.. }=&context.plans.plans()[command.operation].describe().transport else { unreachable!() };
+                    driver.client.try_publish(topic,wire_qos(*qos),*retain,command.payload.clone()).map_err(|_|RuntimeError::new(RuntimeCode::DriverFailed,"driver rejected prepared publish"))?;
+                    pending=Some(Pending { command,packet_id:None,qos:*qos });
                 },
             }
         };
         match event {
             Event::Outgoing(Outgoing::Publish(id)) => {
-                let Some(pending) = pending.as_mut() else {
+                let Some(current) = pending.as_mut() else {
                     return Err(RuntimeError::new(
                         RuntimeCode::Protocol,
                         "outgoing MQTT publish has no command",
                     ));
                 };
-                pending.packet_id = Some(id);
+                if current.qos == 0 {
+                    if id != 0 {
+                        return Err(RuntimeError::new(
+                            RuntimeCode::Protocol,
+                            "QoS 0 publish unexpectedly has a packet identifier",
+                        )
+                        .uncertain());
+                    }
+                    // EventLoop yields the outgoing event after network flush,
+                    // including when it first yields buffered incoming events.
+                    pending
+                        .take()
+                        .unwrap()
+                        .command
+                        .complete(Ok(Receipt::MqttPublishFlushed));
+                } else {
+                    current.packet_id = Some(id);
+                }
             }
             Event::Incoming(Packet::PubAck(ack)) => {
-                if pending.as_ref().and_then(|p| p.packet_id) != Some(ack.pkid) {
+                if !pending
+                    .as_ref()
+                    .is_some_and(|p| p.qos == 1 && p.packet_id == Some(ack.pkid))
+                {
                     return Err(RuntimeError::new(
                         RuntimeCode::Protocol,
                         "MQTT acknowledgement identity did not match the pending send",
@@ -202,7 +272,9 @@ pub(crate) async fn run(
                     packet_id: ack.pkid,
                 }));
             }
-            Event::Incoming(Packet::Publish(message)) => deliver(&context, message)?,
+            Event::Incoming(Packet::Publish(message)) => {
+                deliver(&context, &driver.grants, message)?
+            }
             Event::Outgoing(Outgoing::Disconnect) if closing => {
                 return Ok(CloseReceipt::MqttDisconnectFlushed);
             }
