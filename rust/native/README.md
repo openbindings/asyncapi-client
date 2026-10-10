@@ -2,7 +2,7 @@
 
 This unpublished crate executes prepared plans from `dynamic-asyncapi-client`. It owns Tokio and the protocol libraries; the semantic engine and its Wasm composition remain independent of native dependencies.
 
-The first execution slice supports schema-free binary, JSON and UTF-8 messages over MQTT 3.1.1 QoS 0/1/2 and WebSocket RFC 6455, over TCP or explicitly configured TLS. MQTT 5, automatic recovery, wildcard receive dispatch, payload schemas, authentication-scheme planning and replies remain required expansion work. Explicit session credentials are currently available for MQTT; they are never copied into a document or plan.
+The first execution slice supports schema-free binary, JSON and UTF-8 messages over MQTT 3.1.1 QoS 0/1/2 and WebSocket RFC 6455, over TCP or explicitly configured TLS. MQTT 5, automatic recovery, wildcard receive dispatch, payload schemas, additional authentication mechanisms and replies remain required expansion work. Explicit session credentials are currently available for MQTT; they are never copied into a document or plan.
 
 ```rust,ignore
 let send = document.operation_id("emit")?.compile()?.prepare(&PlanOptions::application())?;

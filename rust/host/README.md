@@ -33,9 +33,13 @@ handshake headers. Browser/Worker network policy applies. Local workerd loopback
 configuration does not establish production network access. Worker close
 qualification remains open. The current tested local profile pins workerd
 1.20261010.1, compatibility date 2026-10-08, and the WebSocket constructor. Its
-constructor path passed 800 raw control connections and the client suites.
+constructor path passed 800 raw control connections, but the later JSON codec
+consumer and a matched direct-next control both failed with a host WebSocket
+error. Current lifecycle/authentication checks pass without resolving that codec
+shutdown failure.
 The older 1.20261006.1 profile had intermittent error/clean-close sequences;
 other raw connection methods still reproduce this on the newer runtime. These
-observations are preserved, not treated as client success. TLS, authentication,
-further codecs/protocols and sustained performance/ownership qualification
-remain required work.
+observations are preserved, not treated as client success. Declared X509 is
+refused before socket construction because this driver cannot configure a client
+identity. Host-capable authentication, broader TLS/codecs/protocols and sustained
+performance/ownership qualification remain required work.
