@@ -6,10 +6,18 @@ The client does not generate source code and does not require an OpenBindings In
 
 This repository is also the execution substrate used by the OpenBindings AsyncAPI adapter. Its public API is intentionally AsyncAPI-native; protocol abstraction belongs in the adapter above it.
 
-> Status: pre-release. TypeScript and Go clients are runnable and tested while
-> their public APIs and qualification corpus are being stabilized.
+> Status: Rust migration in progress. The maintained-engine target is one Rust
+> implementation with Rust and TypeScript APIs. The new foundation is in
+> [`rust/`](rust/client/README.md), with the Rust-backed TypeScript preview in
+> [`packages/client/`](packages/client/README.md). It currently supports JSON
+> admission and operation inspection, not protocol execution or full edition
+> conformance. See [Rust development](docs/rust-development.md).
+>
+> Existing Go and independent TypeScript engines are retained for transition.
+> The invocation examples and conformance claims below describe those legacy
+> packages; they are not qualification evidence for the Rust engine.
 
-## TypeScript
+## Legacy TypeScript
 
 ```ts
 import { AsyncAPIClient } from "@openbindings/asyncapi-client";
@@ -31,7 +39,7 @@ await subscription.completed;
 needs explicit input half-close, output iteration, cancellation, metadata,
 and terminal completion.
 
-## Go
+## Legacy Go
 
 ```go
 client, err := asyncapiclient.Load(ctx, asyncapiclient.Source{
@@ -51,7 +59,7 @@ Go's `Client.Start` and `Execution` expose the same explicit session lifecycle
 as TypeScript. `Client.Operations` inventories the artifact without creating
 or synthesizing an OBI.
 
-## Artifact semantics
+## Legacy artifact semantics
 
 - Exact AsyncAPI editions 2.0.0–2.6.0, 3.0.0, and 3.1.0 are accepted; other editions fail loudly.
 - `receive` is invoked as a publish interaction; `send` is invoked as a subscription, because the artifact describes the application rather than the caller.

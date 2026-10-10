@@ -3,3 +3,7 @@ dist/
 coverage/
 *.tgz
 .DS_Store
+rust/target/
+packages/client/wasm/
+packages/client/dist/
+qualification/composition/target/
