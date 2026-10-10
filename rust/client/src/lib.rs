@@ -7,6 +7,7 @@
 mod document;
 mod effective;
 mod preparation;
+mod serializable;
 mod source;
 mod yaml;
 
@@ -15,13 +16,14 @@ pub use preparation::{
     CompiledDescription, CompiledOperation, MessageDescription, Plan, PlanDescription, PlanOptions,
     ProtocolProfile, Role, ServerDescription, TransportPlan,
 };
-pub use source::{Json, Location};
+pub use source::{DeserializationError, Json, Location};
 
 /// Stable coarse diagnostic classification. Individual reasons may be extended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
 pub enum Code {
     InvalidJson,
+    InvalidValue,
     InvalidYaml,
     UnsupportedYaml,
     DuplicateMember,

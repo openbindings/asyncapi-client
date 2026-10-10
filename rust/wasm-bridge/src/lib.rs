@@ -118,6 +118,15 @@ impl PlanHandle {
 pub struct JsonHandle(Json);
 #[wasm_bindgen]
 impl JsonHandle {
+    pub fn parse(source: &str, bytes: u32, depth: u32, nodes: u32) -> Result<JsonHandle, JsValue> {
+        let limits = dynamic_asyncapi_client::Limits {
+            source_bytes: bytes as usize,
+            depth: depth as usize,
+            nodes: nodes as usize,
+            ..Default::default()
+        };
+        Json::parse(source, limits).map(JsonHandle).map_err(error)
+    }
     pub fn kind(&self) -> String {
         self.0.kind().into()
     }

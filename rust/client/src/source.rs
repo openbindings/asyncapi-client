@@ -46,6 +46,21 @@ impl Source {
                 yaml: true,
             }));
         }
+        Self::from_validated_json(text, uri, limits)
+    }
+    fn parse_json(text: &str, limits: Limits) -> Result<Arc<Self>, Diagnostic> {
+        if text.len() > limits.source_bytes {
+            return Err(Diagnostic::new(Code::Limit, "JSON byte limit exceeded"));
+        }
+        serde_json::from_str::<&RawValue>(text)
+            .map_err(|_| Diagnostic::new(Code::InvalidJson, "expected one strict JSON value"))?;
+        Self::from_validated_json(text, None, limits)
+    }
+    fn from_validated_json(
+        text: &str,
+        uri: Option<String>,
+        limits: Limits,
+    ) -> Result<Arc<Self>, Diagnostic> {
         let mut scanner = Scanner {
             text,
             uri: uri.clone(),
@@ -80,6 +95,23 @@ pub struct Json {
     pub(crate) pointer: String,
 }
 impl Json {
+    /// Admit an independent, owning JSON value. No YAML fallback, I/O, schema
+    /// evaluation or floating-point conversion. Child views own their source.
+    pub fn parse(text: &str, limits: Limits) -> Result<Self, Diagnostic> {
+        Source::parse_json(text, limits).map(|source| source.root())
+    }
+    /// Project into an application type using standard Serde JSON conversion.
+    /// Integer overflow refuses; choosing float types explicitly permits rounding.
+    /// YAML views use their exact JSON representation. This leaves the owner
+    /// intact and is not schema validation. Custom Deserialize work is unbounded
+    /// caller code. Potentially sensitive error text requires explicit detail().
+    pub fn deserialize<T: serde::de::DeserializeOwned>(&self) -> Result<T, DeserializationError> {
+        if self.source.yaml {
+            serde_json::from_str(&self.to_json()).map_err(DeserializationError)
+        } else {
+            serde_json::from_str(self.raw()).map_err(DeserializationError)
+        }
+    }
     pub fn kind(&self) -> &'static str {
         match self.value() {
             Value::Null => "null",
@@ -209,6 +241,37 @@ impl Json {
     }
 }
 
+/// Safe default formatting for a failed application-type projection.
+pub struct DeserializationError(serde_json::Error);
+impl DeserializationError {
+    pub fn line(&self) -> usize {
+        self.0.line()
+    }
+    pub fn column(&self) -> usize {
+        self.0.column()
+    }
+    /// Explicit access to Serde's error, which may contain message data.
+    pub fn detail(&self) -> &serde_json::Error {
+        &self.0
+    }
+}
+impl std::fmt::Display for DeserializationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "JSON does not match the requested Rust type at line {}, column {}",
+            self.line(),
+            self.column()
+        )
+    }
+}
+impl std::fmt::Debug for DeserializationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::error::Error for DeserializationError {}
+
 pub(crate) fn escape(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
@@ -293,8 +356,15 @@ impl Scanner<'_> {
                     loop {
                         self.skip();
                         let key_span = self.string();
-                        let key: String =
-                            serde_json::from_str(&self.text[key_span.clone()]).unwrap();
+                        let key: String = serde_json::from_str(&self.text[key_span.clone()])
+                            .map_err(|_| {
+                                self.error(
+                                    Code::InvalidJson,
+                                    "object key is not valid Unicode",
+                                    &pointer,
+                                    key_span.start,
+                                )
+                            })?;
                         let child = format!("{pointer}/{}", escape(&key));
                         if !keys.insert(key.clone()) {
                             return Err(self.error(
@@ -338,7 +408,14 @@ impl Scanner<'_> {
             }
             b'"' => {
                 let span = self.string();
-                Value::String(serde_json::from_str(&self.text[span]).expect("validated string"))
+                Value::String(serde_json::from_str(&self.text[span]).map_err(|_| {
+                    self.error(
+                        Code::InvalidJson,
+                        "string is not valid Unicode",
+                        &pointer,
+                        start,
+                    )
+                })?)
             }
             _ => {
                 while self
@@ -349,7 +426,9 @@ impl Scanner<'_> {
                 {
                     self.at += 1;
                 }
-                serde_json::from_str(&self.text[start..self.at]).expect("validated scalar")
+                serde_json::from_str(&self.text[start..self.at]).map_err(|_| {
+                    self.error(Code::InvalidJson, "invalid JSON scalar", &pointer, start)
+                })?
             }
         };
         self.spans.insert(pointer, start..self.at);

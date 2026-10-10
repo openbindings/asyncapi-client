@@ -1,3 +1,5 @@
+import { admitSource, bounds, ordinaryJson, type ValueLimits } from './json-input.js';
+export type { ValueLimits } from './json-input.js';
 import initializeWasm, { DocumentHandle, OperationHandle, CompiledOperationHandle, PlanHandle, JsonHandle, HostSessionBuilder, HostSessionHandle, HostSenderHandle, CancellationHandle, IncomingHandle, type InitInput } from '../wasm/asyncapi.js';
 
 export interface SourceLocation {
@@ -127,11 +129,27 @@ export async function createClient(options: { wasm?: InitInput | Promise<InitInp
   await readiness;
   return new RustClient();
 }
+function valueRefusal(code: 'InvalidValue' | 'InvalidConfiguration' | 'Limit', detail: string): never {
+  throw new AsyncApiError({ code, detail, location: null, requirement: null });
+}
 export interface Client {
+  /** Admit strict JSON, preserving exact authored numbers. No YAML or schema validation. */
+  parseJson(source: string, limits?: ValueLimits): JsonView;
+  /** Checked plain JavaScript values; no getter/toJSON invocation or lossy substitution. */
+  fromValue(value: unknown, limits?: ValueLimits): JsonView;
   parse(source: string, options?: { sourceUri?: string }): Document;
   openSession(plans: readonly Plan[], options?: HostSessionOptions & { signal?: AbortSignal }): Promise<HostSession>;
 }
 class RustClient implements Client {
+  parseJson(source: string, options: ValueLimits = {}): JsonView {
+    const limit = bounds(options, valueRefusal);
+    admitSource(source, limit, valueRefusal);
+    return call(() => new JsonView(JsonHandle.parse(source, limit.bytes, limit.depth, limit.nodes)));
+  }
+  fromValue(value: unknown, options: ValueLimits = {}): JsonView {
+    const limit = bounds(options, valueRefusal);
+    return this.parseJson(ordinaryJson(value, limit, valueRefusal), limit);
+  }
   async openSession(plans: readonly Plan[], options: HostSessionOptions & { signal?: AbortSignal } = {}): Promise<HostSession> {
     const builder = new HostSessionBuilder();
     try {

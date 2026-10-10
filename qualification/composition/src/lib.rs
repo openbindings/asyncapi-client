@@ -97,3 +97,26 @@ pub async fn exchange_from_outer_api(source: &str, payload: Vec<u8>) -> Result<V
     session.close(None).await.map_err(|e| e.to_string())?;
     Ok(received)
 }
+
+/// The outer module calls both typed and exact client APIs directly in Rust.
+#[cfg_attr(feature = "wasm", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn values_from_outer_api(source: &str) -> Result<String, String> {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Event {
+        id: u128,
+        label: String,
+    }
+    let exact = dynamic_asyncapi_client::Json::parse(source, Default::default())
+        .map_err(|e| e.to_string())?;
+    let typed: Event = exact.deserialize().map_err(|e| e.to_string())?;
+    drop(exact);
+    dynamic_asyncapi_client::Json::from_serializable(&typed, Default::default())
+        .map(|value| value.to_json())
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn external_typed_values_do_not_cross_a_javascript_number() {
+    let source = r#"{"id":900719925474099312345,"label":"event"}"#;
+    assert_eq!(values_from_outer_api(source).unwrap(), source);
+}

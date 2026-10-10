@@ -28,6 +28,7 @@ const report = { classification:'development', independent:false, suite, platfor
 const sources = {};
 for (const [name, path] of Object.entries({
   'facade.js':resolve(repo,'packages/client/dist/index.js'),
+  'json-input.js':resolve(repo,'packages/client/dist/json-input.js'),
   'asyncapi.js':resolve(repo,'packages/client/wasm/asyncapi.js'),
   'asyncapi.wasm':resolve(repo,'packages/client/wasm/asyncapi_bg.wasm'),
   'composition.js':resolve(compositionDir,'composition.js'),
@@ -44,6 +45,7 @@ let browser, child, peers;
 const routes = {
   '/': { type:'text/html', bytes:Buffer.from('<!doctype html><title>AsyncAPI inspection development consumer</title>') },
   '/client.js': { type:'text/javascript',bytes:sources['facade.js'] },
+  '/json-input.js': { type:'text/javascript',bytes:sources['json-input.js'] },
   '/wasm/asyncapi.js':{ type:'text/javascript',bytes:sources['asyncapi.js'] },
   '/wasm/asyncapi_bg.wasm':{ type:'application/wasm',bytes:sources['asyncapi.wasm'] },
   '/composition.js':{ type:'text/javascript',bytes:sources['composition.js'] },

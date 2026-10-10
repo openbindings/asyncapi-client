@@ -8,4 +8,27 @@ The current reader families are AsyncAPI 2.6, 3.0 and 3.1, retaining declared pa
 
 No package is published. The older Go and TypeScript implementations are historical/transitional code, not an oracle for this engine.
 
+## Independent message values
+
+`Json::parse(text, limits)` admits strict JSON independently of a document. It
+preserves number tokens, rejects duplicate members and malformed Unicode, and
+has no YAML fallback. Children own their source and remain valid after dropping
+the root. Byte, node and depth limits apply.
+
+`Json::from_serializable(&value, limits)` supports ordinary Serde input, including
+128-bit integers, enums and finite floats. Nonfinite floats fail instead of
+becoming null. Standard Serde JSON map-key and byte-array conversions apply;
+duplicate resulting names fail. The pinned arbitrary-precision Number protocol
+is checked; RawValue and unknown private protocols fail. Literal private-looking
+map keys remain data. Custom Serialize/Display code and transparent-wrapper
+recursion remain caller work outside the library's resource bounds.
+
+`value.deserialize::<T>()` explicitly projects a JSON or YAML view into an owned
+Rust type. Integer overflow fails; selecting a floating-point destination permits
+rounding. The exact owner remains unchanged. Default errors omit input and custom
+error text; `error.detail()` deliberately exposes the underlying Serde error.
+
+These are value APIs, not schema evaluation or JSON/text transport support.
+Prepared execution still refuses unsupported payload declarations and codecs.
+
 YAML uses granit-parser grammar/events and a bounded JSON-compatible value graph. Original value ranges and alias-use ranges are separate; `Json::raw` is authored source, while `Json::to_json` emits the logical JSON value with exact numbers. Mapping keys use scalar strings, including plain numeric/boolean-looking keys. Explicit non-string keys, non-finite numbers, unknown tags and recursive alias expansion are refused. This initial policy still requires broader independent YAML qualification.

@@ -14,6 +14,7 @@ version = "0.0.0"
 dependencies = [
  "dynamic-asyncapi-client",
  "dynamic-asyncapi-host",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

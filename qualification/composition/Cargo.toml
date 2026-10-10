@@ -10,6 +10,7 @@ publish = false
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
 dynamic-asyncapi-client = { path = "../../rust/client" }
 serde_json = "=1.0.151"
 wasm-bindgen = { version = "=0.2.129", optional = true }

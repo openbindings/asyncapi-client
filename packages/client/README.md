@@ -21,6 +21,30 @@ Each document, operation, compilation, plan and source view owns its backing sou
 
 For a YAML source view, `.raw` is the defining authored snippet and `.json` is its logical JSON representation. `location.bytes` and `location.aliases` use UTF-8 byte offsets, not JavaScript string indices. Alias-use ranges make expansion provenance explicit. Numeric and boolean-looking plain mapping keys stay strings; scalar values use the documented JSON-compatible YAML policy.
 
+Independent values use the same owning Rust views:
+
+```ts
+using exact = client.parseJson('{"id":900719925474099312345}');
+using id = exact.get('id');
+console.log(id?.numberText); // exact decimal token
+using ordinary = client.fromValue({ enabled: true, labels: ['a', 'b'] });
+```
+
+`parseJson` accepts only strict JSON. `fromValue` accepts finite numbers, Unicode
+strings, booleans, null, dense plain arrays and plain records with enumerable own
+string data properties. It preserves negative zero. It rejects undefined,
+nonfinite numbers, BigInt, holes, symbols, cycles, accessors, custom prototypes
+and non-JSON properties. It never invokes getters or `toJSON`. Repeated shared
+objects are allowed when they do not form a cycle. Proxy traps and reflection
+remain caller/host work; enumerating an object's keys can allocate before its
+size is known. Previously rounded JavaScript numbers cannot be recovered.
+
+Both methods accept `{bytes, nodes, depth}` limits; defaults are 16 MiB, 500,000
+nodes and depth 96. Root depth is zero; depth is capped at 96. UTF-16 is checked
+before Wasm conversion so malformed surrogate input cannot silently change.
+The facade converts host representations; Rust owns JSON admission and values.
+These constructors do not validate schemas or enable JSON/text transport yet.
+
 Compile once, then make a reusable deployment plan in Rust through the facade:
 
 ```ts
