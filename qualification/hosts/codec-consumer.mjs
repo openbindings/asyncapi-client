@@ -28,17 +28,18 @@ export async function exerciseCodecs(client,outerCodec,source) {
     sender.sendValue(0,{id:7});const exact=client.parseJson('{"id":900719925474099312345}');try{sender.sendJson(0,exact);}finally{exact.dispose();}
    } else {sender.sendText(0,'snow☃');sender.sendText(0,'');}
    const values=[];let rejected=0,malformed=0;const malformedCodes=[];
-   while(values.length<2) {
-    const next=await session.next({signal:AbortSignal.timeout(3000)});
+   for await(const next of session.incoming({signal:AbortSignal.timeout(3000)})) {
     if(next?.kind==='rejected'){rejected++;continue;}
     if(next?.kind==='invalidPayload'){malformed++;malformedCodes.push(next.diagnostic.code);continue;}
     if(next?.kind!=='message'||next.operation!==1||next.codec!==codec)throw Error('wrong decoded receive type');
     if(codec==='json') {const id=next.value.get('id');values.push(id.numberText);next.value.dispose();retained?.dispose();retained=id;}
     else values.push(next.text);
+    if(values.length===2)break;
    }
    check(`${label}-decoded-values`,values,codec==='json'?['7','900719925474099312345']:['snow☃','']);
    check(`${label}-wrong-frame`,rejected,1);check(`${label}-malformed-body`,malformed,codec==='json'||frame==='binary'?1:0);
    check(`${label}-malformed-code`,malformedCodes,codec==='json'?['InvalidJson']:frame==='binary'?['InvalidValue']:[]);
+   check(`${label}-iterator-releases-queue`,session.usage,{messages:0,bytes:0});
    await session.close();
    if(retained)check(`${label}-retained-value-after-close`,retained.numberText,'900719925474099312345');
   } finally {retained?.dispose();sender.dispose();session.dispose();}

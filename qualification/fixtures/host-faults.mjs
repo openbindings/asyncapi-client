@@ -10,6 +10,10 @@ export async function startHostFaults() {
   websocket.handleUpgrade(request,socket,head,ws=>{
    ws.on('error',error=>records.push({kind:'peer-error',path:request.url,message:error.message}));
    ws.on('close',code=>records.push({kind:'close',path:request.url,code}));
+   if(request.url==='/stream-echo') {
+    ws.on('message',(data,isBinary)=>{records.push({kind:'stream-echo',binary:isBinary,bytes:[...data]});ws.send(data,{binary:isBinary});});
+    return;
+   }
    ws.once('message',()=>{
     records.push({kind:'armed',path:request.url});
     switch(request.url) {
@@ -19,6 +23,7 @@ export async function startHostFaults() {
      case '/text': ws.send('é🙂');break;
      case '/abnormal': ws.terminate();break;
      case '/no-close': ws.send(Buffer.from([0]));ws._socket.pause();break;
+     case '/stream-close': ws.send(Buffer.from([42]));ws.close(1000);break;
      default: break;
     }
    });

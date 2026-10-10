@@ -84,6 +84,23 @@ Dropping/disposal removes callbacks and initiates close, without promising that
 the remote peer has observed it. Call `.dispose()` explicitly if `using` is not
 available. Runtime failures expose `code` and `deliveryUnknown`.
 
+For a receive loop, use `for await (const incoming of session)` or
+`session.incoming({ signal })`. The iterator borrows the session: `break`, a
+consumer exception, `.return()` or awaited `[Symbol.asyncDispose]()` ends that
+iterator and cancels its pending receive. Senders and the session remain usable;
+await `session.close()` to shut down the connection. Only one receive may be
+pending across all iterators and direct `next()` calls; overlaps refuse instead
+of creating an unbounded queue of waits.
+
+An external abort rejects the pending read with `Cancelled` and ends that
+iterator. Returning it cancels an otherwise pending read with a completed
+iterator result. A value already admitted before return still reaches its
+pending `next()` caller; cancellation does not roll back delivery. Yielded JSON
+views remain caller-owned and must be disposed, including when a loop exits
+early. Clean remote completion drains queued observations before ending;
+transport errors still reject the loop. Use an `AbortSignal` when a receive
+deadline is needed.
+
 Options accept `connectTimeoutMs`, `closeTimeoutMs` and `limits` with
 `maxMessages`, `maxBufferedBytes`, `maxMessageBytes`. Defaults/maxima are 64
 library-owned messages and 1 MiB of payload. Queue overflow terminates the
@@ -100,6 +117,9 @@ constructor profile passed the client suites and 800 diagnostic connections,
 while other raw connection paths still reproduced errors. Every host error
 stays a failure even if followed by a clean close event. Full transport
 qualification and deployed Cloudflare destination verification remain open.
+Later JSON codec runs also failed on this selected constructor profile, both
+through the new iterator and through the previous direct-receive consumer on
+the same current engine. Passing lifecycle runs do not close that issue.
 
 ## JSON and text messages
 

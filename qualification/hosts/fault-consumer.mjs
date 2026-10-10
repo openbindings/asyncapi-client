@@ -19,5 +19,59 @@ export async function exerciseFaults(client,source,port){
   await failure(()=>client.openSession(attached,{connectTimeoutMs:50}),'Deadline');
   const controller=new AbortController();const opening=client.openSession(attached,{signal:controller.signal});setTimeout(()=>controller.abort(),20);await failure(()=>opening,'Cancelled');
  }finally{for(const plan of attached)plan.dispose();}observations.push({name:'connect deadline and active cancellation release owner'});
+ async function echo(session,sender,byte) {
+  sender.send(0,new Uint8Array([byte]));
+  const item=await session.next({signal:AbortSignal.timeout(1000)});
+  check(item?.kind==='message' && item.payload.length===1 && item.payload[0]===byte,'stream cleanup lost the next echo');
+ }
+ await withSession('/stream-echo',{},async(session,sender)=>{
+  sender.send(0,new Uint8Array([1]));
+  for await(const item of session) {check(item.kind==='message' && item.payload[0]===1,'default iterator yielded wrong message');break;}
+  await echo(session,sender,2);
+  const expected=new Error('consumer body failed');let observed;
+  sender.send(0,new Uint8Array([3]));
+  try {for await(const item of session.incoming({signal:AbortSignal.timeout(1000)})) {check(item.kind==='message','consumer body received wrong kind');throw expected;}}
+  catch(error){observed=error;}
+  check(observed===expected,'iterator replaced the consumer exception');await echo(session,sender,4);await session.close();
+ });observations.push({name:'iterator break and consumer exception preserve shared session'});
+ await withSession('/stream-echo',{},async(session,sender)=>{
+  for(const kind of ['return','asyncDispose']) {
+   const iterator=session.incoming(),waiting=iterator.next();
+   if(kind==='return')check((await iterator.return()).done,'iterator return did not finish');
+   else await iterator[Symbol.asyncDispose]();
+   check((await waiting).done && (await iterator.next()).done,'iterator retained a pending receive after exit');
+   await echo(session,sender,kind==='return'?5:6);
+  }
+  const iterator=session.incoming(),waiting=iterator.next(),expected=new Error('explicit iterator throw');let observed;
+  try {await iterator.throw(expected);}catch(error){observed=error;}
+  check(observed===expected && (await waiting).done,'iterator throw lost its reason or pending waiter');
+  await echo(session,sender,7);await session.close();
+ });observations.push({name:'iterator return throw and async disposal interrupt pending receive'});
+ await withSession('/stream-echo',{},async(session,sender)=>{
+  const pre=new AbortController();pre.abort();const iterator=session.incoming({signal:pre.signal});
+  await failure(()=>iterator.next(),'Cancelled');check((await iterator.next()).done,'pre-aborted cursor did not finish');await echo(session,sender,8);
+  const active=new AbortController(),stream=session.incoming({signal:active.signal}),waiting=stream.next();active.abort();
+  await failure(()=>waiting,'Cancelled');check((await stream.next()).done,'aborted cursor did not finish');await echo(session,sender,9);await session.close();
+ });observations.push({name:'iterator pre-abort and active abort preserve session'});
+ await withSession('/stream-echo',{},async(session,sender)=>{
+  const iterator=session.incoming(),waiting=iterator.next();
+  await failure(()=>iterator.next(),'InvalidConfiguration');await failure(()=>session.next(),'InvalidConfiguration');
+  const other=session.incoming();await failure(()=>other.next(),'InvalidConfiguration');
+  check((await other.next()).done,'failed second cursor remained active');await iterator.return();check((await waiting).done,'overlap replaced original waiter');
+  await echo(session,sender,10);await session.close();
+ });observations.push({name:'iterator overlapping receives refuse without replacing the first waiter'});
+ await withSession('/stream-close',{},async(session,sender)=>{
+  sender.send(0,new Uint8Array([1]));let count=0;
+  for await(const item of session.incoming({signal:AbortSignal.timeout(1000)})) {check(item.kind==='message' && item.payload[0]===42,'clean end lost queued message');count++;}
+  check(count===1,'clean end did not drain exactly one message');const receipt=await session.close();check(receipt.wasClean && receipt.code===1000,'remote close receipt changed');
+ });observations.push({name:'iterator drains queued message before clean completion'});
+ await withSession('/abnormal',{},async(session,sender)=>{
+  const iterator=session.incoming({signal:AbortSignal.timeout(1000)}),waiting=iterator.next();sender.send(0,new Uint8Array([1]));
+  await failure(()=>waiting,'Connection');check((await iterator.next()).done,'failed transport cursor remained active');
+ });observations.push({name:'iterator preserves abnormal transport failure'});
+ await withSession('/stream-echo',{},async(session,sender)=>{
+  const iterator=session.incoming(),waiting=iterator.next();session.dispose();
+  await failure(()=>waiting,'Closed');check((await iterator.next()).done,'disposed session retained cursor');await failure(()=>sender.send(0,new Uint8Array([1])),'Closed');
+ });observations.push({name:'session disposal wakes pending iterator and invalidates sender'});
  return {status:'passed',observations};
 }

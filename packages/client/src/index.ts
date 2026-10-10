@@ -306,11 +306,21 @@ export class HostSender extends Owner<HostSenderHandle> {
     return runtimeCall(() => JSON.parse(this.handle.send(operation, payload)) as HostReceipt);
   }
 }
-export class HostSession extends Owner<HostSessionHandle> {
+/** A receive cursor borrowing its session. Return stops this cursor, not the socket. */
+export interface IncomingStream extends AsyncIterableIterator<Incoming, undefined>, AsyncDisposable {
+  return(): Promise<IteratorResult<Incoming, undefined>>;
+  throw(error?: unknown): Promise<IteratorResult<Incoming, undefined>>;
+}
+export class HostSession extends Owner<HostSessionHandle> implements AsyncIterable<Incoming> {
   /** @internal Use Client.openSession. Dispose explicitly or await close. */
   constructor(handle: HostSessionHandle) { super(handle); }
   sender(): HostSender { return runtimeCall(() => new HostSender(this.handle.sender())); }
   get usage(): { readonly messages: number; readonly bytes: number } { return runtimeCall(() => JSON.parse(this.handle.usage_json())); }
+  /** One pending receive across all cursors/direct next calls. Yielded JSON views remain caller-owned. */
+  incoming(options: { signal?: AbortSignal } = {}): IncomingStream {
+    return new HostIncomingStream(this, options.signal);
+  }
+  [Symbol.asyncIterator](): IncomingStream { return this.incoming(); }
   async next(options: { signal?: AbortSignal } = {}): Promise<Incoming | undefined> {
     return cancellable(options.signal, async token => {
       const value = await this.handle.next(token) as IncomingHandle | undefined;
@@ -338,4 +348,59 @@ export class HostSession extends Owner<HostSessionHandle> {
     try { return await cancellable(options.signal, async token => JSON.parse(await this.handle.close(token) as string) as HostCloseReceipt); }
     finally { this.dispose(); }
   }
+}
+
+// An async generator queues return behind an awaiting next. This cursor instead
+// cancels that receive explicitly, then waits for Rust to release its waiter.
+class HostIncomingStream implements IncomingStream {
+  #session: HostSession | undefined;
+  #signal: AbortSignal | undefined;
+  #pending: { context: {controller: AbortController; returned: boolean}; promise: Promise<IteratorResult<Incoming, undefined>> } | undefined;
+  constructor(session: HostSession, signal: AbortSignal | undefined) {
+    this.#session = session; this.#signal = signal;
+  }
+  [Symbol.asyncIterator](): IncomingStream { return this; }
+  next(): Promise<IteratorResult<Incoming, undefined>> {
+    if (!this.#session) return Promise.resolve({done:true, value:undefined});
+    if (this.#pending) return Promise.reject(new AsyncApiRuntimeError({
+      code:'InvalidConfiguration', detail:'Only one receive may be pending on an incoming iterator', delivery_unknown:false,
+    }));
+    const context = {controller:new AbortController(), returned:false};
+    const promise = this.#read(this.#session, this.#signal, context);
+    this.#pending = {context, promise};
+    return promise;
+  }
+  async #read(session: HostSession, signal: AbortSignal | undefined, pending: {controller: AbortController; returned: boolean}): Promise<IteratorResult<Incoming, undefined>> {
+    const abort = () => pending.controller.abort();
+    signal?.addEventListener('abort', abort, {once:true});
+    if (signal?.aborted) abort();
+    try {
+      const value = await session.next({signal:pending.controller.signal});
+      if (value === undefined) { this.#finish(); return {done:true, value:undefined}; }
+      // A receive admitted before return still belongs to its next caller.
+      // Discarding it here could silently lose data or leak its owning JsonView.
+      return {done:false, value};
+    } catch (error) {
+      this.#finish();
+      if (pending.returned && error instanceof AsyncApiRuntimeError && error.code === 'Cancelled') return {done:true, value:undefined};
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      this.#pending = undefined;
+    }
+  }
+  #finish(): void { this.#session = undefined; this.#signal = undefined; }
+  async return(): Promise<IteratorResult<Incoming, undefined>> {
+    this.#finish();
+    const pending = this.#pending;
+    if (pending) {
+      if (!pending.context.controller.signal.aborted) { pending.context.returned = true; pending.context.controller.abort(); }
+      await pending.promise;
+    }
+    return {done:true, value:undefined};
+  }
+  async throw(error?: unknown): Promise<never> {
+    try { await this.return(); } finally { throw error; }
+  }
+  async [Symbol.asyncDispose](): Promise<void> { await this.return(); }
 }

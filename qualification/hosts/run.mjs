@@ -17,6 +17,7 @@ const suite = process.argv[2];
 if(!['exchange','faults','codecs'].includes(suite) || !process.argv[3]) throw new Error('Usage: node run.mjs exchange|faults|codecs FRESH_OUTPUT_DIRECTORY');
 const faultSuite = suite==='faults', codecSuite=suite==='codecs';
 const consumerName=codecSuite?'codec-consumer.mjs':faultSuite?'fault-consumer.mjs':'consumer.mjs';
+const consumerPath=process.env.ASYNCAPI_HOST_CONSUMER ?? resolve(here,consumerName);
 const makePeers = codecSuite ? startCodecPeers : faultSuite ? startHostFaults : startPeers;
 const require = createRequire(resolve(hostTools,'package.json'));
 const { chromium } = require('playwright-core');
@@ -35,7 +36,7 @@ for (const [name, path] of Object.entries({
   'asyncapi.wasm':resolve(repo,'packages/client/wasm/asyncapi_bg.wasm'),
   'composition.js':resolve(compositionDir,'composition.js'),
   'composition.wasm':resolve(compositionDir,'composition_bg.wasm'),
-  'consumer.mjs':resolve(here,consumerName),
+  'consumer.mjs':consumerPath,
 })) {
   const bytes = await readFile(path);
   sources[name] = bytes;
@@ -89,7 +90,7 @@ try {
   await writeFile(resolve(out,'report.json'),JSON.stringify(report,null,2));
   const workerEntry = `import {createClient} from ${JSON.stringify(resolve(repo,'packages/client/dist/index.js'))};
 import compositionInit, {exchange_from_outer_api,exchange_codec_from_outer_api} from ${JSON.stringify(resolve(compositionDir,'composition.js'))};
-import * as consumer from ${JSON.stringify(resolve(here,consumerName))};
+import * as consumer from ${JSON.stringify(consumerPath)};
 import engineModule from './engine.wasm';
 import compositionModule from './composition.wasm';
 export default { async fetch(request) {
