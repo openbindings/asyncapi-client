@@ -75,5 +75,12 @@
     "src/mqttbytes/v4/pubrec.rs": "15f6cc62a4332294affe1a33555c1cec1b08662fe6e0f9c1aae0ab926d485bb9",
     "tests/support/tracing_capture.rs": "8809981d9ee1950d3638b8625e859cd563c478d953155efa9d04d5cb6d6158e0",
     "tests/smoke/mosquitto/disconnect.rs": "8c1d653730abbcb260b52f667e2801f6bff69934a913944fcb520675c7da99ae"
+  },
+  "supplemental_upstream_files": {
+    "LICENSE": {
+      "source": "https://github.com/thehouseisonfire/rumqtt/blob/aa7a694f9b76b17d4c31200cf73d79616acae9b3/LICENSE",
+      "git_blob": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
   }
 }

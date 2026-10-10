@@ -2,7 +2,9 @@
 
 This is the published `rumqttc-v4-next` 0.34.0 source, with the Apache-2.0
 license and upstream attribution preserved. `UPSTREAM.json` records original
-file hashes and upstream identity; `LOCAL.patch` is the complete local change.
+file hashes and upstream identity. The published archive omits the root license
+file, so `LICENSE` is preserved from that exact upstream Git commit and recorded
+as a supplemental source; `LOCAL.patch` is the complete local change.
 This dependency is excluded from our workspace member list and is not published.
 
 The MQTT 3.1.1 state repair resends PUBREL for a repeated PUBREC while retaining

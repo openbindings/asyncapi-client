@@ -23,7 +23,10 @@ export async function verifyVendoredMqtt() {
    const bytes=await readFile(resolve(modified.has(file)?temp:root,file));
    if(sha(bytes)!==digest) throw new Error('Vendored source differs beyond the declared patch: '+file);
   }
-  const allowed=new Set([...Object.keys(manifest.original_sha256),'UPSTREAM.json','LOCAL.patch','LOCAL-CHANGES.md']);
+  for(const [file,metadata] of Object.entries(manifest.supplemental_upstream_files??{})) {
+   if(sha(await readFile(resolve(root,file)))!==metadata.sha256) throw new Error('Supplemental upstream file differs: '+file);
+  }
+  const allowed=new Set([...Object.keys(manifest.original_sha256),...Object.keys(manifest.supplemental_upstream_files??{}),'UPSTREAM.json','LOCAL.patch','LOCAL-CHANGES.md']);
   for(const file of await readdir(root,{recursive:true,withFileTypes:true})) {
    if(file.isFile()) {
     const relative=resolve(file.parentPath,file.name).slice(root.length+1);
