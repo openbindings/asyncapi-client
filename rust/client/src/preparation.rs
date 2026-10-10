@@ -45,6 +45,8 @@ pub struct PlanOptions {
     pub client_id: Option<String>,
     #[serde(default)]
     pub websocket_frame: Option<WebSocketFrame>,
+    #[serde(default)]
+    pub security: crate::SecuritySelection,
 }
 impl PlanOptions {
     pub fn application() -> Self {
@@ -58,6 +60,7 @@ impl PlanOptions {
             address: None,
             client_id: None,
             websocket_frame: None,
+            security: Default::default(),
         }
     }
 }
@@ -370,6 +373,7 @@ pub struct PlanDescription {
     pub content_type: String,
     pub codec: Codec,
     pub transport: TransportPlan,
+    pub authentication: crate::AuthenticationPlan,
 }
 /// A reusable immutable message plan; preparation performs no I/O.
 #[derive(Clone, Debug)]
@@ -425,6 +429,34 @@ impl Plan {
 impl CompiledOperation {
     pub fn describe(&self) -> &CompiledDescription {
         &self.0.description
+    }
+    /// Inspect security alternatives for a server, including schemes outside
+    /// current execution profiles. Resolves every alternative; preparation only
+    /// resolves the selected alternatives. No credentials are acquired.
+    pub fn authentication(
+        &self,
+        server: &str,
+    ) -> Result<crate::AuthenticationDescription, Diagnostic> {
+        let server = self
+            .0
+            .servers
+            .iter()
+            .find(|s| s.description.key == server)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    Code::InvalidConfiguration,
+                    "selected server is not available",
+                )
+            })?;
+        crate::authentication::inspect(
+            &self.0.document,
+            server.object.get("security").as_ref(),
+            self.0
+                .operation
+                .get("security")
+                .map(|v| v.source.clone())
+                .as_ref(),
+        )
     }
     pub fn message_source(&self, key: &str) -> Option<Json> {
         self.0
@@ -503,17 +535,6 @@ impl CompiledOperation {
                 "declared reply needs a reply-capable plan",
                 Some(Requirement::Reply),
             ));
-        }
-        for declaration in [&c.operation, &Effective::from(server.object.clone())] {
-            if let Some(security) = declaration.get("security")
-                && !array(&security.source)?.is_empty()
-            {
-                return Err(unsupported(
-                    &security.source,
-                    "security scheme planning is not implemented in this slice",
-                    Some(Requirement::Authentication),
-                ));
-            }
         }
         for field in ["payload", "headers", "correlationId"] {
             if let Some(value) = message.effective.get(field) {
@@ -594,6 +615,16 @@ impl CompiledOperation {
                 .at(server.object.location()));
             }
         };
+        let authentication = crate::authentication::prepare(
+            &c.document,
+            server.object.get("security").as_ref(),
+            c.operation
+                .get("security")
+                .map(|v| v.source.clone())
+                .as_ref(),
+            &options.security,
+            protocol,
+        )?;
         let endpoint = endpoint(&c.document, &server.object, protocol, &options.variables)?;
         let address = address(
             &c.document,
@@ -642,6 +673,7 @@ impl CompiledOperation {
                 content_type: content_type.unwrap().into(),
                 codec,
                 transport,
+                authentication,
             }),
         })
     }

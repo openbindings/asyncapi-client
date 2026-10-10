@@ -4,6 +4,7 @@
 //! Admission is not whole-document or payload validation. No method performs I/O.
 #![forbid(unsafe_code)]
 
+mod authentication;
 mod codec;
 mod document;
 mod effective;
@@ -12,6 +13,10 @@ mod serializable;
 mod source;
 mod yaml;
 
+pub use authentication::{
+    AuthenticationDescription, AuthenticationPlan, SecurityAlternative, SecuritySchemeDescription,
+    SecurityScope, SecuritySelection,
+};
 pub use codec::{Codec, Payload, WebSocketFrame};
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};
 pub use preparation::{
@@ -56,20 +61,36 @@ pub enum Code {
     rename_all_fields = "camelCase"
 )]
 pub enum Requirement {
-    Resource { uri: String },
+    Resource {
+        uri: String,
+    },
     SourceUri,
-    Server { choices: Vec<String> },
-    Message { choices: Vec<String> },
-    Variable { name: String },
-    Parameter { name: String },
+    Server {
+        choices: Vec<String>,
+    },
+    Message {
+        choices: Vec<String>,
+    },
+    Variable {
+        name: String,
+    },
+    Parameter {
+        name: String,
+    },
     Address,
     ClientIdentity,
     ProtocolProfile,
     PeerRoute,
-    Codec { content_type: Option<String> },
+    Codec {
+        content_type: Option<String>,
+    },
     Evaluator,
     Reply,
     Authentication,
+    AuthenticationChoice {
+        scope: SecurityScope,
+        choices: Vec<usize>,
+    },
 }
 
 /// An error tied to the original resource and JSON Pointer when available.

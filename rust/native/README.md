@@ -59,3 +59,12 @@ diagnostic without terminating the stream. WebSocket frame defaults/overrides ar
 explicit in the plan; MQTT publishes the encoded bytes. Schema declarations
 continue to require evaluator support. Queue byte limits describe wire payloads,
 not the complete heap of the decoded exact JSON graph.
+
+Declared `userPassword` requires `SessionOptions.credentials` before connecting;
+`X509` requires a `TlsConfig` returned by `with_client_identity`. Server and
+operation requirements both apply, including across all attached plans. Credentials
+are connection-wide runtime material, separate from serializable plan options.
+Configured material does not guarantee peer authorization. Other declared schemes
+remain unsupported. The TLS peer suite includes document-declared requirements in
+AsyncAPI 2.6, 3.0 and 3.1, missing-material refusal without TCP activity, and actual
+broker rejection of a wrong password.

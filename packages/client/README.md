@@ -56,8 +56,12 @@ console.log(plan.describe().transport);
 ```
 
 Preparation performs no network I/O. Missing choices produce structured requirements;
-unsupported schemas, authentication schemes and replies are refused explicitly by
-this initial slice. A WebSocket peer requires a real peer route, not a second
+unsupported schemas, security mechanisms and replies are refused explicitly by
+this initial slice. `compiled.authentication(serverKey)` inspects security alternatives;
+`prepare({role: "application", security: {server: 0, operation: 1}})` selects them
+independently when needed. Server and operation requirements both apply. MQTT
+username/password and secure-transport X509 plans are available for native drivers;
+host WebSocket sessions refuse these declared schemes before socket construction. A WebSocket peer requires a real peer route, not a second
 connection to the same server. Plan descriptions contain endpoint and client
 identity but never credentials. See [preparation contract](../../docs/preparation.md).
 

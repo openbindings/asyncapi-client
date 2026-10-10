@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub struct TlsConfig {
     roots: Arc<RootCertStore>,
     client: Arc<ClientConfig>,
+    has_client_identity: bool,
 }
 impl std::fmt::Debug for TlsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,6 +72,7 @@ impl TlsConfig {
         Ok(Self {
             roots,
             client: Arc::new(client),
+            has_client_identity: false,
         })
     }
     /// Returns a new configuration with a PEM client chain (leaf first, at most
@@ -104,7 +106,11 @@ impl TlsConfig {
         Ok(Self {
             roots: self.roots.clone(),
             client: Arc::new(client),
+            has_client_identity: true,
         })
+    }
+    pub(crate) fn has_client_identity(&self) -> bool {
+        self.has_client_identity
     }
     fn builder() -> Result<rustls::ConfigBuilder<ClientConfig, rustls::WantsVerifier>, RuntimeError>
     {

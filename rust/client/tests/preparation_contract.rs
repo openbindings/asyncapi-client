@@ -499,9 +499,9 @@ fn preparation_expansion_has_a_bound_even_when_values_are_repeated() {
 }
 
 #[test]
-fn declared_security_and_multiple_message_classification_are_not_silently_ignored() {
+fn unsupported_security_and_multiple_message_classification_are_not_silently_ignored() {
     let mut value = source();
-    value["servers"]["local"]["security"] = json!([{"type":"userPassword"}]);
+    value["servers"]["local"]["security"] = json!([{"type":"scramSha256"}]);
     assert_eq!(
         plan(&value).unwrap_err().requirement,
         Some(Requirement::Authentication)

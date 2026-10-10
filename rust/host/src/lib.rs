@@ -391,6 +391,16 @@ impl Session {
                 "this host driver supports only WebSocket plans",
             ));
         };
+        if plan
+            .plans()
+            .iter()
+            .any(|p| p.describe().authentication.schemes().next().is_some())
+        {
+            return Err(RuntimeError::new(
+                RuntimeCode::Unsupported,
+                "host WebSocket cannot configure the selected security schemes",
+            ));
+        }
         let socket = WebSocket::new(endpoint).map_err(|_| {
             RuntimeError::new(
                 RuntimeCode::Connection,

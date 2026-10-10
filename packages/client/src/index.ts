@@ -11,6 +11,7 @@ export interface SourceLocation {
 export interface OperationIdentity { readonly uri: string | null; readonly pointer: string }
 export type Requirement =
   | { readonly kind: 'sourceUri' | 'address' | 'clientIdentity' | 'protocolProfile' | 'peerRoute' | 'evaluator' | 'reply' | 'authentication' }
+  | { readonly kind: 'authenticationChoice'; readonly scope: 'server' | 'operation'; readonly choices: ReadonlyArray<number> }
   | { readonly kind: 'resource'; readonly uri: string }
   | { readonly kind: 'server' | 'message'; readonly choices: ReadonlyArray<string> }
   | { readonly kind: 'variable' | 'parameter'; readonly name: string }
@@ -39,6 +40,7 @@ export interface PlanOptions {
   readonly address?: string;
   readonly clientId?: string;
   readonly websocketFrame?: 'binary' | 'text';
+  readonly security?: { readonly server?: number; readonly operation?: number };
 }
 export interface MessageDescription {
   readonly key: string;
@@ -67,6 +69,26 @@ export interface CompiledDescription {
 export type TransportPlan =
   | { readonly kind: 'mqtt311'; readonly endpoint: string; readonly clientId: string; readonly cleanSession: boolean; readonly keepAliveSeconds: number; readonly topic: string; readonly qos: 0 | 1 | 2; readonly retain: boolean }
   | { readonly kind: 'webSocket6455'; readonly endpoint: string; readonly method: 'GET'; readonly frame: 'binary' | 'text' };
+export interface SecuritySchemeDescription {
+  readonly schemeType: string;
+  readonly componentName: string | null;
+  readonly selection: SourceLocation;
+  readonly definition: SourceLocation;
+  readonly scopes: ReadonlyArray<string>;
+}
+export interface SecurityAlternative {
+  readonly index: number;
+  readonly location: SourceLocation;
+  readonly schemes: ReadonlyArray<SecuritySchemeDescription>;
+}
+export interface AuthenticationDescription {
+  readonly server: ReadonlyArray<SecurityAlternative>;
+  readonly operation: ReadonlyArray<SecurityAlternative>;
+}
+export interface AuthenticationPlan {
+  readonly server: SecurityAlternative | null;
+  readonly operation: SecurityAlternative | null;
+}
 export interface PlanDescription {
   readonly identity: OperationIdentity;
   readonly role: 'application' | 'peer';
@@ -77,6 +99,7 @@ export interface PlanDescription {
   readonly contentType: string;
   readonly codec: 'binary' | 'utf8' | 'json';
   readonly transport: TransportPlan;
+  readonly authentication: AuthenticationPlan;
 }
 export type Discovery<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: AsyncApiError };
 
@@ -206,6 +229,10 @@ export class CompiledOperation extends Owner<CompiledOperationHandle> {
   /** @internal Use Operation.compile. Owns its snapshot independently. */
   constructor(handle: CompiledOperationHandle) { super(handle); }
   describe(): CompiledDescription { return JSON.parse(this.handle.describe_json()) as CompiledDescription; }
+  /** Inspect all security alternatives for this server, without acquiring credentials. */
+  authentication(server: string): AuthenticationDescription {
+    return call(() => JSON.parse(this.handle.authentication_json(server)) as AuthenticationDescription);
+  }
   messageSource(key: string): JsonView | undefined { const value = this.handle.message_source(key); return value ? new JsonView(value) : undefined; }
   serverSource(key: string): JsonView | undefined { const value = this.handle.server_source(key); return value ? new JsonView(value) : undefined; }
   /** Resolves choices in Rust; does not connect, send, or acquire credentials. */

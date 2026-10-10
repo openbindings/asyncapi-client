@@ -2,6 +2,13 @@ function check(value,message){if(!value)throw new Error(message);}
 async function failure(operation,code){try{await operation();}catch(error){check(error.code===code,`expected ${code}, got ${error.code}: ${error}`);return error.code;}throw new Error(`expected ${code}`);}
 export async function exerciseFaults(client,source,port){
  const observations=[];
+ // Security refusal is a preflight result in both actual hosts. The endpoint
+ // deliberately cannot complete TLS with this plaintext fixture server.
+ const secure=JSON.parse(source);secure.servers.local.protocol='wss';secure.servers.local.security=[{type:'X509'}];
+ const authDoc=client.parse(JSON.stringify(secure)),authOp=authDoc.operation('emit'),authCompiled=authOp.compile(),authPlan=authCompiled.prepare({role:'application'});
+ try {await failure(()=>client.openSession([authPlan]),'Unsupported');}
+ finally {authPlan.dispose();authCompiled.dispose();authOp.dispose();authDoc.dispose();}
+ observations.push({name:'declared X509 refuses before host WebSocket construction'});
  function plans(path){const parsed=JSON.parse(source);parsed.servers.local.host=`127.0.0.1:${port}`;parsed.channels.events.address=path;const document=client.parse(JSON.stringify(parsed));try{return ['emit','listen'].map(id=>{const operation=document.operation(id);try{const compiled=operation.compile();try{return compiled.prepare({role:'application'});}finally{compiled.dispose();}}finally{operation.dispose();}});}finally{document.dispose();}}
  async function withSession(path,options,run){const attached=plans(path);let session,sender;try{session=await client.openSession(attached,options);sender=session.sender();return await run(session,sender);}finally{sender?.dispose();session?.dispose();for(const plan of attached)plan.dispose();}}
  for(const [path,limits,count,size] of [['/count',{maxMessages:2},2,1],['/bytes',{maxBufferedBytes:8,maxMessageBytes:8},1,5]]){

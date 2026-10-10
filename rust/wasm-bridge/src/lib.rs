@@ -87,6 +87,12 @@ impl CompiledOperationHandle {
     pub fn describe_json(&self) -> String {
         encoded(self.0.describe())
     }
+    pub fn authentication_json(&self, server: &str) -> Result<String, JsValue> {
+        self.0
+            .authentication(server)
+            .map(|value| encoded(&value))
+            .map_err(error)
+    }
     pub fn message_source(&self, key: &str) -> Option<JsonHandle> {
         self.0.message_source(key).map(JsonHandle)
     }

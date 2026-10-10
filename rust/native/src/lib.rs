@@ -383,6 +383,31 @@ impl Session {
                 "TLS endpoints require an explicit trust configuration; plaintext endpoints must not supply one",
             ));
         }
+        for scheme in plans
+            .plans()
+            .iter()
+            .flat_map(|p| p.describe().authentication.schemes())
+        {
+            let configured = match scheme.scheme_type.as_str() {
+                "userPassword" => options.credentials.is_some(),
+                "X509" => options
+                    .tls
+                    .as_ref()
+                    .is_some_and(TlsConfig::has_client_identity),
+                _ => {
+                    return Err(RuntimeError::new(
+                        RuntimeCode::Unsupported,
+                        "security scheme has no native runtime support",
+                    ));
+                }
+            };
+            if !configured {
+                return Err(RuntimeError::new(
+                    RuntimeCode::InvalidConfiguration,
+                    "document security requires runtime credentials or a TLS client identity",
+                ));
+            }
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(RuntimeError::new(
                 RuntimeCode::InvalidConfiguration,

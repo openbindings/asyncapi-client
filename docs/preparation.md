@@ -38,3 +38,38 @@ made explicit for later ownership/performance qualification.
 Security requirements, payload/header schemas, correlation declarations, request/reply, last will, multiple-message classification, other protocols and earlier 2.x readers remain required work. They are not silently ignored to make an executable plan. Other protocol bindings may remain inspectable without being applied to the selected transport. Full document validation is not yet provided.
 
 The component-operation location rule, MQTT publish/subscribe binding applicability to a peer role, and the WebSocket binding's POST option versus RFC 6455 GET still need independent review. Current behavior follows the defining component location, refuses a publish-only retain setting on a subscription, and refuses POST for the RFC 6455 profile. The development tests encode these declared policies; they are not independent conformance evidence.
+
+## Document authentication requirements
+
+`CompiledOperation::authentication(server_key)` (TypeScript `authentication(serverKey)`)
+inspects server and effective operation security alternatives with authored and
+resolved coordinates. Server and operation requirements both apply. In 2.6 each
+alternative names components and requires every listed scheme; in 3.x each
+alternative is a scheme or reference. The 2.6 names use the entry document's
+`components.securitySchemes`; scheme references then follow normal resource
+resolution. Inspection reports scheme types and required scopes, without claiming
+complete validation of unsupported OAuth/HTTP/SASL scheme configuration.
+
+A sole alternative is automatic. Multiple alternatives require explicit zero-based
+`PlanOptions.security.server` and/or `.operation` choices, independently. An empty
+2.6 requirement object is an empty conjunction and is never chosen automatically
+among alternatives. Empty operation security does not remove server requirements.
+Preparation resolves selected alternatives only; inspecting all alternatives can
+therefore report a missing resource which an explicitly selected plan does not need.
+
+Current execution plans support `userPassword` on MQTT 3.1.1 and `X509` on secure
+MQTT/WebSocket endpoints. Other mechanisms return an authentication requirement.
+X509 never upgrades a plaintext endpoint implicitly. Plan descriptions expose
+selected requirements, never acquired credentials. Native session configuration
+supplies one connection-wide username/password pair and one optional TLS client
+identity; all attached plans must have their declared mechanisms configured before
+network activity. This is local configuration checking, not proof of authorization
+by the broker or server. Browser/Worker WebSocket sessions cannot configure these
+mechanisms and refuse before socket construction; ambient client certificates are
+not assumed to satisfy declared X509.
+
+Current profile bounds are 64 alternatives per security array, 16 schemes in a
+2.6 alternative, 256 scopes per scheme, and aggregate resolved scope text no larger
+than the document's configured source-byte limit. Selection does not expand a
+server/operation cross product. No credentials are fetched during inspection or
+preparation. Additional mechanisms and host-capable authentication remain open.

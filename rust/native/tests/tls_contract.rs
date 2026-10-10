@@ -74,3 +74,46 @@ async fn tls_configuration_must_match_endpoint_before_connection() {
         assert!(matches!(result,Err(error) if error.code==RuntimeCode::InvalidConfiguration));
     }
 }
+
+#[tokio::test]
+async fn declared_authentication_requires_runtime_material_before_connecting() {
+    for protocol in ["mqtt", "mqtts", "wss"] {
+        for kind in ["userPassword", "X509"] {
+            if (protocol == "mqtt" && kind == "X509")
+                || (protocol == "wss" && kind == "userPassword")
+            {
+                continue;
+            }
+            let v = serde_json::json!({"asyncapi":"3.1.0","info":{"title":"auth","version":"1"},
+                "servers":{"s":{"host":"127.0.0.1:1","protocol":protocol,"protocolVersion":if protocol=="wss" {"13"} else {"3.1.1"},"security":[{"type":kind}]}},
+                "channels":{"c":{"address":if protocol=="wss" {"/events"} else {"events"},"messages":{"m":{"contentType":"application/octet-stream"}}}},
+                "operations":{"emit":{"action":"send","channel":{"$ref":"#/channels/c"}}}});
+            let mut o = PlanOptions::application();
+            if protocol != "wss" {
+                o.client_id = Some("auth-fixture".into());
+            }
+            let p = Document::parse(&v.to_string())
+                .unwrap()
+                .operation_id("emit")
+                .unwrap()
+                .compile()
+                .unwrap()
+                .prepare(&o)
+                .unwrap();
+            let tls = if protocol == "mqtt" {
+                None
+            } else {
+                Some(TlsConfig::from_ca_pem(CA).unwrap())
+            };
+            let result = Session::open(
+                &[p],
+                SessionOptions {
+                    tls,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(matches!(result,Err(e) if e.code==RuntimeCode::InvalidConfiguration));
+        }
+    }
+}
