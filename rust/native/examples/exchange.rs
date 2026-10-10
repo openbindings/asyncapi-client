@@ -1,6 +1,8 @@
 //! Development consumer: every operation/route/setting comes from the input document.
 use dynamic_asyncapi_client::{Document, PlanOptions};
-use dynamic_asyncapi_native::{Credentials, Delivery, Incoming, Session, SessionOptions};
+use dynamic_asyncapi_native::{
+    Credentials, Delivery, Incoming, Session, SessionOptions, TlsConfig,
+};
 use serde_json::json;
 use std::{error::Error, time::Duration};
 use tokio::time::timeout;
@@ -34,10 +36,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
         (Ok(username), Ok(password)) => Some(Credentials::new(username, password)),
         _ => None,
     };
+    let tls = match std::env::var("ASYNCAPI_FIXTURE_CA") {
+        Ok(value) => {
+            let config = if value == "system" {
+                TlsConfig::system_roots()?
+            } else {
+                TlsConfig::from_ca_pem(&std::fs::read(value)?)?
+            };
+            Some(
+                match (
+                    std::env::var("ASYNCAPI_FIXTURE_CERT"),
+                    std::env::var("ASYNCAPI_FIXTURE_KEY"),
+                ) {
+                    (Ok(cert), Ok(key)) => {
+                        config.with_client_identity(&std::fs::read(cert)?, &std::fs::read(key)?)?
+                    }
+                    (Err(_), Err(_)) => config,
+                    _ => {
+                        return Err(
+                            "fixture client identity requires both certificate and key".into()
+                        );
+                    }
+                },
+            )
+        }
+        Err(_) => None,
+    };
+    let connect_timeout = std::env::var("ASYNCAPI_FIXTURE_CONNECT_TIMEOUT_MS")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5));
     let mut session = Session::open(
         &[send, receive],
         SessionOptions {
             credentials,
+            tls,
+            connect_timeout,
             ..Default::default()
         },
     )

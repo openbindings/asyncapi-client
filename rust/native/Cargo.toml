@@ -14,8 +14,10 @@ dynamic-asyncapi-client = { path = "../client" }
 dynamic-asyncapi-session = { path = "../session" }
 serde.workspace = true
 bytes = "=1.12.1"
-rumqttc = { package = "rumqttc-v4-next", path = "../vendor/rumqttc-v4-next", version = "=0.34.0", default-features = false }
-tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
+rumqttc = { package = "rumqttc-v4-next", path = "../vendor/rumqttc-v4-next", version = "=0.34.0", default-features = false, features = ["use-rustls-ring"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "=0.8.4"
 tokio = { version = "=1.53.2", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
 futures-util = { version = "=0.3.32", features = ["sink"] }
 

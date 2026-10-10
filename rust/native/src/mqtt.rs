@@ -29,6 +29,11 @@ pub(crate) async fn connect(
         Broker::tcp(settings.host, settings.port),
     );
     options.set_clean_session(settings.clean_session);
+    if let Some(tls) = &context.options.tls {
+        options.set_transport(rumqttc::Transport::tls_with_config(
+            rumqttc::TlsConfiguration::Rustls(tls.config()),
+        ));
+    }
     options.set_keep_alive(settings.keep_alive_seconds);
     options.set_max_packet_size(
         context.options.max_message_bytes + 4096,
@@ -145,6 +150,12 @@ fn wire_qos(qos: u8) -> QoS {
 fn connection_error(error: rumqttc::ConnectionError) -> RuntimeError {
     use rumqttc::{ConnectionError as C, StateError as S};
     match error {
+        // The backend's framed codec wraps transport I/O (including a late TLS
+        // alert) inside Deserialization. It is not malformed MQTT input.
+        C::MqttState(S::Deserialization(rumqttc::Error::Io(_))) => RuntimeError::new(
+            RuntimeCode::Connection,
+            "MQTT transport failed before protocol progress could continue",
+        ),
         C::MqttState(
             S::Unsolicited(_) | S::InvalidState | S::Deserialization(_) | S::ProtocolViolation(_),
         )

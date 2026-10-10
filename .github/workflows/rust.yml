@@ -39,6 +39,7 @@ jobs:
       - run: cargo build --manifest-path rust/Cargo.toml -p dynamic-asyncapi-native --examples --locked
       - run: node qualification/fixtures/check-native.mjs "$RUNNER_TEMP/asyncapi-native-fixtures"
       - run: node qualification/fixtures/check-codecs.mjs "$RUNNER_TEMP/asyncapi-native-codecs"
+      - run: node qualification/fixtures/check-tls.mjs "$RUNNER_TEMP/asyncapi-native-tls"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -46,6 +47,7 @@ jobs:
           path: |
             ${{ runner.temp }}/asyncapi-native-fixtures
             ${{ runner.temp }}/asyncapi-native-codecs
+            ${{ runner.temp }}/asyncapi-native-tls
 
   typescript-preview:
     runs-on: ubuntu-24.04

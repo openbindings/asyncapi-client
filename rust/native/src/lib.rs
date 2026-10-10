@@ -1,9 +1,11 @@
 //! Explicitly owned native protocol sessions for immutable AsyncAPI plans.
 //! This initial execution slice supports MQTT 3.1.1 QoS 0/1/2 and binary WebSocket,
-//! both over TCP. TLS, recovery and other protocol profiles remain open work.
+//! over TCP or explicitly configured TLS. Recovery and other profiles remain open work.
 #![forbid(unsafe_code)]
 mod mqtt;
+mod tls;
 mod websocket;
+pub use tls::TlsConfig;
 
 pub use bytes::Bytes;
 use dynamic_asyncapi_client::Plan;
@@ -39,6 +41,9 @@ impl std::fmt::Debug for Credentials {
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
     pub credentials: Option<Credentials>,
+    /// Required for mqtts/wss; rejected for plaintext endpoints. Reuse a config
+    /// to avoid reloading/parsing trust material on every connection.
+    pub tls: Option<TlsConfig>,
     pub connect_timeout: Duration,
     pub operation_timeout: Duration,
     pub max_messages: usize,
@@ -49,6 +54,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             credentials: None,
+            tls: None,
             connect_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(5),
             max_messages: 64,
@@ -356,21 +362,26 @@ impl Session {
         let plans = SessionPlan::new(plans)?;
         let connection = plans.connection().clone();
         match &connection {
-            Connection::Mqtt(settings) if settings.tls => {
-                return Err(RuntimeError::new(
-                    RuntimeCode::Unsupported,
-                    "native TLS support is not enabled in this execution slice",
-                ));
-            }
             Connection::WebSocket(endpoint)
-                if !endpoint.starts_with("ws://") || options.credentials.is_some() =>
+                if !(endpoint.starts_with("ws://") || endpoint.starts_with("wss://"))
+                    || options.credentials.is_some() =>
             {
                 return Err(RuntimeError::new(
                     RuntimeCode::Unsupported,
-                    "initial native WebSocket execution requires ws and no MQTT credentials",
+                    "native WebSocket execution requires ws/wss and no MQTT credentials",
                 ));
             }
             _ => {}
+        }
+        let secure = match &connection {
+            Connection::Mqtt(settings) => settings.tls,
+            Connection::WebSocket(endpoint) => endpoint.starts_with("wss://"),
+        };
+        if secure != options.tls.is_some() {
+            return Err(RuntimeError::new(
+                RuntimeCode::InvalidConfiguration,
+                "TLS endpoints require an explicit trust configuration; plaintext endpoints must not supply one",
+            ));
         }
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(RuntimeError::new(

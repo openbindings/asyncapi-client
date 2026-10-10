@@ -2,7 +2,7 @@
 
 This unpublished crate executes prepared plans from `dynamic-asyncapi-client`. It owns Tokio and the protocol libraries; the semantic engine and its Wasm composition remain independent of native dependencies.
 
-The first execution slice supports schema-free binary messages over MQTT 3.1.1 QoS 0/1/2 and WebSocket RFC 6455, over TCP. TLS, MQTT 5, automatic recovery, wildcard receive dispatch, payload schemas, authentication-scheme planning and replies remain required expansion work. Explicit session credentials are currently available for MQTT; they are never copied into a document or plan.
+The first execution slice supports schema-free binary, JSON and UTF-8 messages over MQTT 3.1.1 QoS 0/1/2 and WebSocket RFC 6455, over TCP or explicitly configured TLS. MQTT 5, automatic recovery, wildcard receive dispatch, payload schemas, authentication-scheme planning and replies remain required expansion work. Explicit session credentials are currently available for MQTT; they are never copied into a document or plan.
 
 ```rust,ignore
 let send = document.operation_id("emit")?.compile()?.prepare(&PlanOptions::application())?;
@@ -13,6 +13,29 @@ let receipt = sender.send(0, Vec::from(b"payload".as_slice())).await?;
 let observation = session.next().await?;
 let close = session.close().await?;
 ```
+
+For `mqtts` or `wss`, supply a reusable trust configuration:
+
+```rust,ignore
+let tls = TlsConfig::system_roots()?; // blocking setup; includes SSL_CERT_FILE/DIR overrides
+// Or use only a supplied CA bundle: TlsConfig::from_ca_pem(&ca_bytes)?
+// Optional mutual TLS: tls.with_client_identity(&certificate_chain, &private_key)?
+let options = SessionOptions { tls: Some(tls.clone()), ..Default::default() };
+let session = Session::open(&plans, options).await?;
+```
+
+Secure endpoints without a trust configuration, and plaintext endpoints supplied
+with one, refuse before connecting. Both drivers use rustls with an explicitly
+selected ring provider, TLS 1.2/1.3, certificate validity/chain verification and
+the endpoint hostname or IP identity. There is no verification-bypass option or
+silent TLS downgrade. Custom CA bundles do not merge ambient roots; partial
+system-root loads refuse. Root loading and parsing happen when constructing the
+configuration, which is cheaply cloned across sessions. Handshakes remain within
+the connection deadline. Client identities produce a new configuration, leaving
+the original intact; debug output and runtime errors omit credential material.
+PEM admission permits 4 MiB of certificates, 512 CA certificates, 16 client-chain
+certificates and one unencrypted private key up to 64 KiB. Revocation policy,
+broader TLS profiles and independent security qualification remain open.
 
 The plan slice establishes explicit connection sharing. Plans must agree on connection settings and role; duplicate native operations and ambiguous receive routes refuse before I/O. Readiness requires a successful connection handshake and all MQTT subscription acknowledgments. Once open, `session.mqtt_subscriptions()` exposes each operation’s requested and granted QoS. A subscription QoS is a maximum: a broker may grant a lower value, and delivery metadata reports the actual publication QoS. Publications above a negotiated grant end the session with a protocol error. A separate receive observation does not imply request/reply correlation.
 

@@ -20,7 +20,12 @@ pub(crate) async fn connect(endpoint: &str, context: &Context) -> Result<Driver,
         .max_write_buffer_size(context.options.max_message_bytes + 4096)
         .max_message_size(Some(context.options.max_message_bytes))
         .max_frame_size(Some(context.options.max_message_bytes.max(125)));
-    tokio_tungstenite::connect_async_with_config(endpoint, Some(config), true)
+    let connector = context
+        .options
+        .tls
+        .as_ref()
+        .map(|tls| tokio_tungstenite::Connector::Rustls(tls.config()));
+    tokio_tungstenite::connect_async_tls_with_config(endpoint, Some(config), true, connector)
         .await
         .map(|(socket, _)| socket)
         .map_err(driver_error)
