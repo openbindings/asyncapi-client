@@ -36,13 +36,16 @@ jobs:
           node-version: 22
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: qualification/fixtures
-      - run: cargo build --manifest-path rust/Cargo.toml -p dynamic-asyncapi-native --example exchange --locked
+      - run: cargo build --manifest-path rust/Cargo.toml -p dynamic-asyncapi-native --examples --locked
       - run: node qualification/fixtures/check-native.mjs "$RUNNER_TEMP/asyncapi-native-fixtures"
+      - run: node qualification/fixtures/check-codecs.mjs "$RUNNER_TEMP/asyncapi-native-codecs"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: native-protocol-fixtures-${{ matrix.os }}
-          path: ${{ runner.temp }}/asyncapi-native-fixtures
+          path: |
+            ${{ runner.temp }}/asyncapi-native-fixtures
+            ${{ runner.temp }}/asyncapi-native-codecs
 
   typescript-preview:
     runs-on: ubuntu-24.04

@@ -1,6 +1,6 @@
 # Dynamic AsyncAPI client
 
-An unpublished Rust foundation for a standalone dynamic AsyncAPI client. The current slice is JSON/YAML source admission, native inspection, and pure binary MQTT/WebSocket preparation, with a Rust-backed TypeScript facade. Protocol execution and complete facade journeys are under development. A reader accepting a version does not establish complete support for that edition.
+An unpublished Rust foundation for a standalone dynamic AsyncAPI client. The current slice is JSON/YAML source admission, native inspection, and pure binary/JSON/UTF-8 MQTT/WebSocket preparation, with a Rust-backed TypeScript facade. Protocol execution and complete facade journeys are under development. A reader accepting a version does not establish complete support for that edition.
 
 The engine has no OpenBindings, JavaScript, Tokio or network dependency. Downstream Rust consumers can compose it directly, including inside a Wasm build. Host drivers and the public TypeScript facade will be separate packages.
 
@@ -28,7 +28,8 @@ Rust type. Integer overflow fails; selecting a floating-point destination permit
 rounding. The exact owner remains unchanged. Default errors omit input and custom
 error text; `error.detail()` deliberately exposes the underlying Serde error.
 
-These are value APIs, not schema evaluation or JSON/text transport support.
-Prepared execution still refuses unsupported payload declarations and codecs.
+These value APIs feed the binary/JSON/UTF-8 transport codecs. They are not schema
+evaluation; prepared execution still refuses payload schemas until a supported
+evaluator is available. See `docs/preparation.md` for the codec/framing contract.
 
 YAML uses granit-parser grammar/events and a bounded JSON-compatible value graph. Original value ranges and alias-use ranges are separate; `Json::raw` is authored source, while `Json::to_json` emits the logical JSON value with exact numbers. Mapping keys use scalar strings, including plain numeric/boolean-looking keys. Explicit non-string keys, non-finite numbers, unknown tags and recursive alias expansion are refused. This initial policy still requires broader independent YAML qualification.

@@ -114,6 +114,22 @@ impl HostSessionHandle {
 pub struct HostSenderHandle(Sender);
 #[wasm_bindgen]
 impl HostSenderHandle {
+    pub fn send_text(&self, operation: usize, payload: &JsValue) -> Result<String, JsValue> {
+        self.0
+            .send_js_text(operation, payload)
+            .map(|r| encoded(&r))
+            .map_err(error)
+    }
+    pub fn send_json(
+        &self,
+        operation: usize,
+        payload: &crate::JsonHandle,
+    ) -> Result<String, JsValue> {
+        self.0
+            .send_json(operation, &payload.0)
+            .map(|r| encoded(&r))
+            .map_err(error)
+    }
     pub fn send(&self, operation: usize, payload: &js_sys::Uint8Array) -> Result<String, JsValue> {
         self.0
             .send_js(operation, payload)
@@ -128,7 +144,7 @@ impl IncomingHandle {
     pub fn metadata_json(&self) -> String {
         match self.0.as_ref() {
             Some(Incoming::Message { operation, payload }) => encoded(
-                &serde_json::json!({"kind":"message","operation":operation,"payloadBytes":payload.len()}),
+                &serde_json::json!({"kind":"message","operation":operation,"payloadBytes":payload.len(),"codec":payload.codec()}),
             ),
             Some(Incoming::Rejected {
                 reason,
@@ -136,12 +152,32 @@ impl IncomingHandle {
             }) => encoded(
                 &serde_json::json!({"kind":"rejected","reason":reason,"payloadBytes":payload_bytes}),
             ),
+            Some(Incoming::InvalidPayload {
+                diagnostic,
+                payload_bytes,
+            }) => encoded(
+                &serde_json::json!({"kind":"invalidPayload","diagnostic":diagnostic,"payloadBytes":payload_bytes}),
+            ),
             None => "null".into(),
+        }
+    }
+    pub fn json(&self) -> Option<crate::JsonHandle> {
+        match self.0.as_ref() {
+            Some(Incoming::Message { payload, .. }) => {
+                payload.as_json().cloned().map(crate::JsonHandle)
+            }
+            _ => None,
+        }
+    }
+    pub fn text(&self) -> Option<String> {
+        match self.0.as_ref() {
+            Some(Incoming::Message { payload, .. }) => payload.as_text().map(str::to_owned),
+            _ => None,
         }
     }
     pub fn take_payload(&mut self) -> Option<Vec<u8>> {
         match self.0.take() {
-            Some(Incoming::Message { payload, .. }) => Some(payload),
+            Some(Incoming::Message { payload, .. }) => Some(payload.into_bytes().into()),
             _ => None,
         }
     }

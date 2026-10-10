@@ -9,13 +9,15 @@ import { createHash } from 'node:crypto';
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../..');
 const {startPeers,verifyRecords}=await import(resolve(repo,'qualification/fixtures/peers.mjs'));
+const {startCodecPeers,verifyCodecRecords}=await import(resolve(repo,'qualification/fixtures/codec-peers.mjs'));
 const {startHostFaults}=await import(resolve(repo,'qualification/fixtures/host-faults.mjs'));
 const hostTools = process.env.ASYNCAPI_HOST_TOOLS ?? here;
 const compositionDir = process.env.ASYNCAPI_COMPOSITION_WASM ?? resolve(repo,'qualification/composition/wasm');
 const suite = process.argv[2];
-if(!['exchange','faults'].includes(suite) || !process.argv[3]) throw new Error('Usage: node run.mjs exchange|faults FRESH_OUTPUT_DIRECTORY');
-const faultSuite = suite==='faults';
-const makePeers = faultSuite ? startHostFaults : startPeers;
+if(!['exchange','faults','codecs'].includes(suite) || !process.argv[3]) throw new Error('Usage: node run.mjs exchange|faults|codecs FRESH_OUTPUT_DIRECTORY');
+const faultSuite = suite==='faults', codecSuite=suite==='codecs';
+const consumerName=codecSuite?'codec-consumer.mjs':faultSuite?'fault-consumer.mjs':'consumer.mjs';
+const makePeers = codecSuite ? startCodecPeers : faultSuite ? startHostFaults : startPeers;
 const require = createRequire(resolve(hostTools,'package.json'));
 const { chromium } = require('playwright-core');
 const esbuild = require('esbuild');
@@ -33,14 +35,14 @@ for (const [name, path] of Object.entries({
   'asyncapi.wasm':resolve(repo,'packages/client/wasm/asyncapi_bg.wasm'),
   'composition.js':resolve(compositionDir,'composition.js'),
   'composition.wasm':resolve(compositionDir,'composition_bg.wasm'),
-  'consumer.mjs':resolve(here,faultSuite?'fault-consumer.mjs':'consumer.mjs'),
+  'consumer.mjs':resolve(here,consumerName),
 })) {
   const bytes = await readFile(path);
   sources[name] = bytes;
   report[name] = { sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length };
 }
 report.sourceHashes={};
-for(const path of [fileURLToPath(import.meta.url),resolve(repo,'qualification/fixtures/peers.mjs'),resolve(repo,'qualification/fixtures/host-faults.mjs')]) report.sourceHashes[path]=createHash('sha256').update(await readFile(path)).digest('hex');
+for(const path of [fileURLToPath(import.meta.url),resolve(repo,'qualification/fixtures/peers.mjs'),resolve(repo,'qualification/fixtures/host-faults.mjs'),resolve(repo,'qualification/fixtures/codec-peers.mjs')]) report.sourceHashes[path]=createHash('sha256').update(await readFile(path)).digest('hex');
 let browser, child, peers;
 const routes = {
   '/': { type:'text/html', bytes:Buffer.from('<!doctype html><title>AsyncAPI inspection development consumer</title>') },
@@ -71,29 +73,30 @@ try {
   peers=await makePeers();
   const template=await readFile(resolve(repo,'qualification/fixtures/documents/ws-3.json'),'utf8');
   let source=template.replaceAll('__PORT__',String(peers.websocketPort ?? peers.port));
-  report.checks.browser = await page.evaluate(async ({source,faultSuite}) => {
+  report.checks.browser = await page.evaluate(async ({source,faultSuite,codecSuite}) => {
     const {createClient} = await import('/client.js');
     const composition = await import('/composition.js');
     const consumer = await import('/consumer.mjs');
     const [client] = await Promise.all([createClient(), composition.default()]);
-    return faultSuite ? consumer.exerciseFaults(client,source,Number(JSON.parse(source).servers.local.host.split(':')[1])) : consumer.exerciseSessions(client, composition.exchange_from_outer_api, source);
-  },{source,faultSuite});
+    return codecSuite ? consumer.exerciseCodecs(client,composition.exchange_codec_from_outer_api,source) : faultSuite ? consumer.exerciseFaults(client,source,Number(JSON.parse(source).servers.local.host.split(':')[1])) : consumer.exerciseSessions(client, composition.exchange_from_outer_api, source);
+  },{source,faultSuite,codecSuite});
   const browserRecords=peers.records.filter(r=>r.digest);
-  if(!faultSuite) report.browserPeer=[verifyRecords(browserRecords.slice(0,8),{protocol:'websocket',count:8,size:1024}),verifyRecords(browserRecords.slice(8),{protocol:'websocket',count:8,size:1024})];
+  if(codecSuite) report.browserPeer=verifyCodecRecords(peers.records);
+  else if(!faultSuite) report.browserPeer=[verifyRecords(browserRecords.slice(0,8),{protocol:'websocket',count:8,size:1024}),verifyRecords(browserRecords.slice(8),{protocol:'websocket',count:8,size:1024})];
   await writeFile(resolve(out,'browser-peer.json'),JSON.stringify(peers.records,null,2));
   await peers.close();peers=await makePeers();source=template.replaceAll('__PORT__',String(peers.websocketPort ?? peers.port));
   await browser.close(); browser = undefined;
   await writeFile(resolve(out,'report.json'),JSON.stringify(report,null,2));
   const workerEntry = `import {createClient} from ${JSON.stringify(resolve(repo,'packages/client/dist/index.js'))};
-import compositionInit, {exchange_from_outer_api} from ${JSON.stringify(resolve(compositionDir,'composition.js'))};
-import * as consumer from ${JSON.stringify(resolve(here,faultSuite?'fault-consumer.mjs':'consumer.mjs'))};
+import compositionInit, {exchange_from_outer_api,exchange_codec_from_outer_api} from ${JSON.stringify(resolve(compositionDir,'composition.js'))};
+import * as consumer from ${JSON.stringify(resolve(here,consumerName))};
 import engineModule from './engine.wasm';
 import compositionModule from './composition.wasm';
 export default { async fetch(request) {
   if(new URL(request.url).pathname==='/ready') return new Response('ready');
   const [client] = await Promise.all([createClient({wasm:engineModule}),compositionInit({module_or_path:compositionModule})]);
-  const raw=${faultSuite?'[]':`await consumer.rawCloseControl(${JSON.stringify(source)})`};
-  try { return Response.json({raw,...await ${faultSuite?'consumer.exerciseFaults(client, '+JSON.stringify(source)+', '+peers.port+')':'consumer.exerciseSessions(client,exchange_from_outer_api,'+JSON.stringify(source)+')'}}); } catch(error) { return Response.json({raw,error:String(error)},{status:500}); }
+  const raw=${faultSuite||codecSuite?'[]':`await consumer.rawCloseControl(${JSON.stringify(source)})`};
+  try { return Response.json({raw,...await ${codecSuite?'consumer.exerciseCodecs(client,exchange_codec_from_outer_api,'+JSON.stringify(source)+')':faultSuite?'consumer.exerciseFaults(client, '+JSON.stringify(source)+', '+peers.port+')':'consumer.exerciseSessions(client,exchange_from_outer_api,'+JSON.stringify(source)+')'}}); } catch(error) { return Response.json({raw,error:String(error)},{status:500}); }
 }};`;
   await writeFile(resolve(out,'worker-entry.mjs'),workerEntry);
   await esbuild.build({stdin:{contents:workerEntry,resolveDir:out,sourcefile:'worker-entry.mjs'},bundle:true,format:'esm',platform:'browser',target:'es2022',external:['./engine.wasm','./composition.wasm'],outfile:resolve(out,'worker.mjs')});
@@ -127,7 +130,8 @@ const config :Workerd.Config = (
   if(!response?.ok) throw new Error(`workerd response ${response?.status}: ${await response?.text()}`);
   report.checks.workerd = await response.json();
   const workerRecords=peers.records.filter(r=>r.digest);
-  if(!faultSuite) report.workerPeer=[verifyRecords(workerRecords.slice(0,8),{protocol:'websocket',count:8,size:1024}),verifyRecords(workerRecords.slice(8),{protocol:'websocket',count:8,size:1024})];
+  if(codecSuite) report.workerPeer=verifyCodecRecords(peers.records);
+  else if(!faultSuite) report.workerPeer=[verifyRecords(workerRecords.slice(0,8),{protocol:'websocket',count:8,size:1024}),verifyRecords(workerRecords.slice(8),{protocol:'websocket',count:8,size:1024})];
   await writeFile(resolve(out,'workerd-peer.json'),JSON.stringify(peers.records,null,2));
   report.status = 'passed';
 } catch(error) {

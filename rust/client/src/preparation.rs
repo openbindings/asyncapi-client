@@ -1,8 +1,8 @@
 //! Reusable, pure preparation. No transport is opened by this module.
 use crate::effective::{Effective, with_traits};
 use crate::{
-    Action, Code, Diagnostic, Document, Edition, Json, Location, Operation, OperationDescription,
-    OperationIdentity, Requirement,
+    Action, Code, Codec, Diagnostic, Document, Edition, Json, Location, Operation,
+    OperationDescription, OperationIdentity, Payload, Requirement, WebSocketFrame,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +43,8 @@ pub struct PlanOptions {
     pub address: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
+    #[serde(default)]
+    pub websocket_frame: Option<WebSocketFrame>,
 }
 impl PlanOptions {
     pub fn application() -> Self {
@@ -55,6 +57,7 @@ impl PlanOptions {
             parameters: BTreeMap::new(),
             address: None,
             client_id: None,
+            websocket_frame: None,
         }
     }
 }
@@ -352,6 +355,7 @@ pub enum TransportPlan {
     WebSocket6455 {
         endpoint: String,
         method: String,
+        frame: WebSocketFrame,
     },
 }
 #[derive(Clone, Debug, Serialize)]
@@ -364,9 +368,10 @@ pub struct PlanDescription {
     pub server: String,
     pub message: String,
     pub content_type: String,
+    pub codec: Codec,
     pub transport: TransportPlan,
 }
-/// A reusable immutable binary plan; preparation performs no I/O.
+/// A reusable immutable message plan; preparation performs no I/O.
 #[derive(Clone, Debug)]
 pub struct Plan {
     compiled: CompiledOperation,
@@ -379,10 +384,42 @@ impl Plan {
     pub fn operation(&self) -> &CompiledOperation {
         &self.compiled
     }
-    /// This initial codec is identity on bytes. No allocation, validation claim,
-    /// source traversal or hidden copy. Runtime admission limits remain separate.
-    pub fn prepare_bytes<'a>(&self, bytes: &'a [u8]) -> &'a [u8] {
-        bytes
+    /// Validate encoded bytes without changing them. Binary/UTF-8 need no body
+    /// allocation; JSON is parsed for admission. Use decode_payload to retain
+    /// that exact view instead of repeating the parse later.
+    pub fn prepare_bytes<'a>(&self, bytes: &'a [u8]) -> Result<&'a [u8], Diagnostic> {
+        match self.description.codec {
+            Codec::Binary => {}
+            Codec::Utf8 | Codec::Json => {
+                let text = std::str::from_utf8(bytes).map_err(|_| {
+                    Diagnostic::new(Code::InvalidValue, "message is not valid UTF-8")
+                })?;
+                if self.description.codec == Codec::Json {
+                    Json::parse(text, Default::default())?;
+                }
+            }
+        }
+        Ok(bytes)
+    }
+    pub fn decode_payload(&self, bytes: impl Into<bytes::Bytes>) -> Result<Payload, Diagnostic> {
+        Payload::decode(self.description.codec, bytes.into(), Default::default())
+    }
+    /// Check a typed payload against the prepared codec. Schema-bearing messages
+    /// still require an evaluator at preparation; this does not waive that rule.
+    pub fn prepare_payload(&self, payload: &Payload) -> Result<(), Diagnostic> {
+        if payload.codec() != self.description.codec {
+            return Err(Diagnostic::new(
+                Code::InvalidValue,
+                "payload representation does not match the prepared codec",
+            ));
+        }
+        Ok(())
+    }
+    pub fn websocket_frame(&self) -> Option<WebSocketFrame> {
+        match self.description.transport {
+            TransportPlan::WebSocket6455 { frame, .. } => Some(frame),
+            _ => None,
+        }
     }
 }
 impl CompiledOperation {
@@ -488,15 +525,15 @@ impl CompiledOperation {
             }
         }
         let content_type = message.description.content_type.as_deref();
-        if !content_type.is_some_and(|s| s.eq_ignore_ascii_case("application/octet-stream")) {
-            return Err(unsupported(
+        let codec = content_type.and_then(crate::codec::select).ok_or_else(|| {
+            unsupported(
                 &message.effective.source,
-                "this slice requires an explicit binary content type",
+                "content type needs a supported payload codec",
                 Some(Requirement::Codec {
                     content_type: message.description.content_type.clone(),
                 }),
-            ));
-        }
+            )
+        })?;
         let action = c.description.operation.action;
         let wire_action = match (options.role, action) {
             (Role::Application, a) => a,
@@ -564,7 +601,13 @@ impl CompiledOperation {
             c.description.operation.address.as_deref(),
             options,
         )?;
-        let transport = match profile {
+        if profile == ProtocolProfile::Mqtt311 && options.websocket_frame.is_some() {
+            return Err(Diagnostic::new(
+                Code::InvalidConfiguration,
+                "WebSocket framing does not apply to MQTT",
+            ));
+        }
+        let mut transport = match profile {
             ProtocolProfile::Mqtt311 => {
                 mqtt(c, server, message, options, wire_action, endpoint, address)?
             }
@@ -572,6 +615,21 @@ impl CompiledOperation {
                 websocket(c, server, message, options, endpoint, address)?
             }
         };
+        if let TransportPlan::WebSocket6455 { frame, .. } = &mut transport {
+            *frame = options
+                .websocket_frame
+                .unwrap_or(if codec == Codec::Binary {
+                    WebSocketFrame::Binary
+                } else {
+                    WebSocketFrame::Text
+                });
+            if codec == Codec::Binary && *frame == WebSocketFrame::Text {
+                return Err(Diagnostic::new(
+                    Code::InvalidConfiguration,
+                    "binary content cannot use the UTF-8 text frame profile",
+                ));
+            }
+        }
         Ok(Plan {
             compiled: self.clone(),
             description: Arc::new(PlanDescription {
@@ -582,6 +640,7 @@ impl CompiledOperation {
                 server: server.description.key.clone(),
                 message: message.description.key.clone(),
                 content_type: content_type.unwrap().into(),
+                codec,
                 transport,
             }),
         })
@@ -900,7 +959,11 @@ fn websocket(
         endpoint = format!("{}{}", endpoint.trim_end_matches('/'), address);
     }
     validate_endpoint(&endpoint, "ws")?;
-    Ok(TransportPlan::WebSocket6455 { endpoint, method })
+    Ok(TransportPlan::WebSocket6455 {
+        endpoint,
+        method,
+        frame: WebSocketFrame::Binary,
+    })
 }
 
 fn endpoint(

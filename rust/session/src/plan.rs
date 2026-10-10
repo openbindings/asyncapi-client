@@ -128,7 +128,9 @@ impl SessionPlan {
                         keep_alive_seconds: *keep_alive_seconds,
                     })
                 }
-                TransportPlan::WebSocket6455 { endpoint, method } => {
+                TransportPlan::WebSocket6455 {
+                    endpoint, method, ..
+                } => {
                     if method != "GET"
                         || !(endpoint.starts_with("ws://") || endpoint.starts_with("wss://"))
                     {
@@ -185,16 +187,20 @@ impl SessionPlan {
         Ok(plan)
     }
     pub fn websocket_route(&self, binary: bool) -> Route {
-        if !binary {
-            return Route::Rejected("text WebSocket frame does not match the binary codec");
+        let Some(operation) = self.0.websocket_receiver else {
+            return Route::Rejected("WebSocket frame has no attached receive operation");
+        };
+        let expected = self.0.plans[operation].websocket_frame();
+        if binary != (expected == Some(dynamic_asyncapi_client::WebSocketFrame::Binary)) {
+            return Route::Rejected(if !binary {
+                "text WebSocket frame does not match the binary codec"
+            } else {
+                "binary WebSocket frame does not match the text frame policy"
+            });
         }
-        self.0
-            .websocket_receiver
-            .map(Route::Operation)
-            .unwrap_or(Route::Rejected(
-                "binary WebSocket frame has no attached receive operation",
-            ))
+        Route::Operation(operation)
     }
+
     pub fn mqtt_route(&self, topic: &str, qos: u8) -> Route {
         if let Some((operation, requested)) = self.0.mqtt_receivers.get(topic)
             && qos <= *requested

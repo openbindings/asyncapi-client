@@ -38,6 +38,7 @@ export interface PlanOptions {
   readonly parameters?: Readonly<Record<string, string>>;
   readonly address?: string;
   readonly clientId?: string;
+  readonly websocketFrame?: 'binary' | 'text';
 }
 export interface MessageDescription {
   readonly key: string;
@@ -65,7 +66,7 @@ export interface CompiledDescription {
 }
 export type TransportPlan =
   | { readonly kind: 'mqtt311'; readonly endpoint: string; readonly clientId: string; readonly cleanSession: boolean; readonly keepAliveSeconds: number; readonly topic: string; readonly qos: 0 | 1 | 2; readonly retain: boolean }
-  | { readonly kind: 'webSocket6455'; readonly endpoint: string; readonly method: 'GET' };
+  | { readonly kind: 'webSocket6455'; readonly endpoint: string; readonly method: 'GET'; readonly frame: 'binary' | 'text' };
 export interface PlanDescription {
   readonly identity: OperationIdentity;
   readonly role: 'application' | 'peer';
@@ -74,6 +75,7 @@ export interface PlanDescription {
   readonly server: string;
   readonly message: string;
   readonly contentType: string;
+  readonly codec: 'binary' | 'utf8' | 'json';
   readonly transport: TransportPlan;
 }
 export type Discovery<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: AsyncApiError };
@@ -217,6 +219,8 @@ export class Plan extends Owner<PlanHandle> {
   attachTo(builder: HostSessionBuilder): void { runtimeCall(() => builder.add(this.handle)); }
 }
 export class JsonView extends Owner<JsonHandle> {
+  /** @internal Keep the generated handle private to the owning facade. */
+  sendTo(sender: HostSenderHandle, operation: number): string { return sender.send_json(operation, this.handle); }
   /** @internal Obtain a source view from a document or operation. */
   constructor(handle: JsonHandle) { super(handle); }
   get kind(): 'null' | 'boolean' | 'number' | 'string' | 'array' | 'object' {
@@ -245,14 +249,17 @@ export interface HostSessionOptions {
 export interface HostReceipt { readonly kind: 'webSocketHostAccepted' }
 export interface HostCloseReceipt { readonly code: number; readonly wasClean: boolean }
 export type Incoming =
-  | { readonly kind: 'message'; readonly operation: number; readonly payload: Uint8Array }
+  | ({ readonly kind: 'message'; readonly operation: number; readonly payload: Uint8Array } & (
+      {readonly codec:'binary'} | {readonly codec:'utf8'; readonly text:string} | {readonly codec:'json'; readonly value:JsonView}))
+  | { readonly kind:'invalidPayload'; readonly diagnostic:Diagnostic; readonly payloadBytes:number }
   | { readonly kind: 'rejected'; readonly reason: string; readonly payloadBytes: number };
 export class AsyncApiRuntimeError extends Error {
   readonly code: string;
   readonly deliveryUnknown: boolean;
-  constructor(value: { code: string; detail: string; delivery_unknown: boolean }) {
+  readonly diagnostic: Diagnostic | undefined;
+  constructor(value: { code: string; detail: string; delivery_unknown: boolean; diagnostic?: Diagnostic | null }) {
     super(value.detail); this.name = 'AsyncApiRuntimeError';
-    this.code = value.code; this.deliveryUnknown = value.delivery_unknown;
+    this.code = value.code; this.deliveryUnknown = value.delivery_unknown; this.diagnostic = value.diagnostic ?? undefined;
   }
 }
 function runtimeError(error: unknown): unknown {
@@ -273,12 +280,28 @@ async function cancellable<T>(signal: AbortSignal | undefined, operation: (token
   catch (error) { throw runtimeError(error); }
   finally { signal?.removeEventListener('abort', abort); token.free(); }
 }
+function operationIndex(operation:number): void {
+  if (!Number.isSafeInteger(operation) || operation < 0 || operation > 0xffff_ffff) throw new AsyncApiRuntimeError({code:'InvalidConfiguration',detail:'Operation index must be a nonnegative 32-bit integer',delivery_unknown:false});
+}
 export class HostSender extends Owner<HostSenderHandle> {
+  sendText(operation:number, text:string): HostReceipt {
+    operationIndex(operation);
+    return runtimeCall(()=>JSON.parse(this.handle.send_text(operation,text)) as HostReceipt);
+  }
+  sendJson(operation:number, value:JsonView): HostReceipt {
+    operationIndex(operation);
+    return runtimeCall(()=>JSON.parse(value.sendTo(this.handle,operation)) as HostReceipt);
+  }
+  sendValue(operation:number, value:unknown, limits:ValueLimits = {}): HostReceipt {
+    operationIndex(operation);
+    const exact=new RustClient().fromValue(value,limits);
+    try { return this.sendJson(operation,exact); } finally { exact.dispose(); }
+  }
   /** @internal Use HostSession.sender. Retaining this does not retain the socket. */
   constructor(handle: HostSenderHandle) { super(handle); }
   /** Returns host-buffer acceptance. Does not promise flush or peer delivery. */
   send(operation: number, payload: Uint8Array): HostReceipt {
-    if (!Number.isSafeInteger(operation) || operation < 0 || operation > 0xffff_ffff) throw new AsyncApiRuntimeError({code:'InvalidConfiguration',detail:'Operation index must be a nonnegative 32-bit integer',delivery_unknown:false});
+    operationIndex(operation);
     if (!(payload instanceof Uint8Array)) throw new TypeError('Payload must be a Uint8Array');
     return runtimeCall(() => JSON.parse(this.handle.send(operation, payload)) as HostReceipt);
   }
@@ -293,8 +316,20 @@ export class HostSession extends Owner<HostSessionHandle> {
       const value = await this.handle.next(token) as IncomingHandle | undefined;
       if (!value) return undefined;
       try {
-        const metadata = JSON.parse(value.metadata_json()) as {kind:'message';operation:number} | {kind:'rejected';reason:string;payloadBytes:number};
-        if (metadata.kind === 'message') return {kind:'message',operation:metadata.operation,payload:value.take_payload()!};
+        const metadata = JSON.parse(value.metadata_json()) as
+          {kind:'message';operation:number;codec:'binary'|'utf8'|'json'} |
+          {kind:'rejected';reason:string;payloadBytes:number} |
+          {kind:'invalidPayload';diagnostic:Diagnostic;payloadBytes:number};
+        if (metadata.kind === 'message') {
+          if (metadata.codec==='json') {
+            const handle=value.json();
+            if (!handle) throw new Error('Rust message omitted its JSON view');
+            try { return {...metadata,codec:'json',value:new JsonView(handle),payload:value.take_payload()!}; }
+            catch(error) { handle.free(); throw error; }
+          }
+          if (metadata.codec==='utf8') return {...metadata,codec:'utf8',text:value.text()!,payload:value.take_payload()!};
+          return {...metadata,codec:'binary',payload:value.take_payload()!};
+        }
         return metadata;
       } finally { value.free(); }
     });

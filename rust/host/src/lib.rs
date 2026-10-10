@@ -2,7 +2,7 @@
 //! A send receipt means host-buffer acceptance, never socket flush or delivery.
 #![forbid(unsafe_code)]
 mod wait;
-use dynamic_asyncapi_client::Plan;
+use dynamic_asyncapi_client::{Codec, Payload, Plan, WebSocketFrame};
 use dynamic_asyncapi_session::{Budget, ConnectionPlan, Lease, Route, SessionPlan, Usage};
 pub use dynamic_asyncapi_session::{Limits, RuntimeCode, RuntimeError};
 use serde::{Deserialize, Serialize};
@@ -71,9 +71,13 @@ pub enum SessionState {
 }
 #[derive(Debug)]
 pub enum Incoming {
+    InvalidPayload {
+        diagnostic: dynamic_asyncapi_client::Diagnostic,
+        payload_bytes: usize,
+    },
     Message {
         operation: usize,
-        payload: Vec<u8>,
+        payload: Payload,
     },
     Rejected {
         reason: &'static str,
@@ -134,15 +138,29 @@ impl Shared {
         }
         let (incoming, lease) = match self.plan.websocket_route(binary) {
             Route::Operation(operation) => {
-                let bytes = js_sys::Uint8Array::new(&data);
-                let lease = self.budget.reserve(bytes.length() as usize)?;
-                (
-                    Incoming::Message {
-                        operation,
-                        payload: bytes.to_vec(),
+                let size = if binary {
+                    js_sys::Uint8Array::new(&data).length() as usize
+                } else {
+                    js_string_utf8_length(&data, self.options.limits.max_message_bytes as u32)
+                };
+                let lease = self.budget.reserve(size)?;
+                let bytes = if binary {
+                    js_sys::Uint8Array::new(&data).to_vec()
+                } else {
+                    data.as_string()
+                        .ok_or_else(|| {
+                            RuntimeError::new(RuntimeCode::Protocol, "host text conversion failed")
+                        })?
+                        .into_bytes()
+                };
+                let incoming = match self.plan.plans()[operation].decode_payload(bytes) {
+                    Ok(payload) => Incoming::Message { operation, payload },
+                    Err(diagnostic) => Incoming::InvalidPayload {
+                        diagnostic,
+                        payload_bytes: size,
                     },
-                    lease,
-                )
+                };
+                (incoming, lease)
             }
             Route::Rejected(reason) => {
                 // Text byte length is counted by the host without retaining or
@@ -178,11 +196,13 @@ impl Shared {
 // Host-side UTF-16 length traversal avoids one Wasm crossing per character and
 // never allocates a payload-sized Rust string for a rejected text frame.
 #[wasm_bindgen(
-    inline_js = "export function asyncapiUtf8Length(value, limit) { let n=0; for(let i=0;i<value.length;i++) { const u=value.charCodeAt(i); if(u<128)n++; else if(u<2048)n+=2; else if(u>=0xd800 && u<=0xdbff && i+1<value.length && value.charCodeAt(i+1)>=0xdc00 && value.charCodeAt(i+1)<=0xdfff) { n+=4;i++; } else n+=3; if(n>limit)return limit+1; } return n; }"
+    inline_js = "export function asyncapiUtf8Length(value, limit) { let n=0; for(let i=0;i<value.length;i++) { const u=value.charCodeAt(i); if(u<128)n++; else if(u<2048)n+=2; else if(u>=0xd800 && u<=0xdbff && i+1<value.length && value.charCodeAt(i+1)>=0xdc00 && value.charCodeAt(i+1)<=0xdfff) { n+=4;i++; } else n+=3; if(n>limit)return limit+1; } return n; } export function asyncapiWellFormed(value) { for(let i=0;i<value.length;i++) { const n=value.charCodeAt(i); if(n>=0xd800 && n<=0xdbff) { const next=value.charCodeAt(++i); if(!(next>=0xdc00 && next<=0xdfff)) return false; } else if(n>=0xdc00 && n<=0xdfff) return false; } return true; }"
 )]
 extern "C" {
     #[wasm_bindgen(js_name = asyncapiUtf8Length)]
     fn js_string_utf8_length(value: &JsValue, limit: u32) -> usize;
+    #[wasm_bindgen(js_name = asyncapiWellFormed)]
+    fn js_string_well_formed(value: &JsValue) -> bool;
 }
 struct Driver {
     socket: WebSocket,
@@ -254,25 +274,101 @@ impl Sender {
         let lease = driver.shared.budget.reserve(bytes)?;
         Ok((driver, lease))
     }
-    pub fn send(&self, operation: usize, payload: &[u8]) -> Result<Receipt, RuntimeError> {
-        let (driver, _lease) = self.driver(operation, payload.len())?;
-        driver.socket.send_with_u8_array(payload).map_err(|_| {
+    fn write(driver: &Driver, operation: usize, payload: &[u8]) -> Result<Receipt, RuntimeError> {
+        let result = if driver.shared.plan.plans()[operation].websocket_frame()
+            == Some(WebSocketFrame::Text)
+        {
+            driver
+                .socket
+                .send_with_str(std::str::from_utf8(payload).map_err(|_| {
+                    RuntimeError::new(RuntimeCode::InvalidPayload, "text frame requires UTF-8")
+                })?)
+        } else {
+            driver.socket.send_with_u8_array(payload)
+        };
+        result.map_err(|_| {
             RuntimeError::new(RuntimeCode::Connection, "host rejected WebSocket send").uncertain()
         })?;
         Ok(Receipt::WebSocketHostAccepted)
     }
-    /// Private-ABI-friendly binary path: admission happens before any Rust body
-    /// allocation and the host receives the original Uint8Array view.
+    pub fn send(&self, operation: usize, payload: &[u8]) -> Result<Receipt, RuntimeError> {
+        let (driver, _lease) = self.driver(operation, payload.len())?;
+        driver.shared.plan.plans()[operation]
+            .prepare_bytes(payload)
+            .map_err(RuntimeError::payload)?;
+        Self::write(&driver, operation, payload)
+    }
+    pub fn send_payload(
+        &self,
+        operation: usize,
+        payload: &Payload,
+    ) -> Result<Receipt, RuntimeError> {
+        let (driver, _lease) = self.driver(operation, payload.len())?;
+        driver.shared.plan.plans()[operation]
+            .prepare_payload(payload)
+            .map_err(RuntimeError::payload)?;
+        Self::write(&driver, operation, payload.as_bytes())
+    }
+    pub fn send_text(&self, operation: usize, payload: &str) -> Result<Receipt, RuntimeError> {
+        self.send_payload(operation, &Payload::text(payload))
+    }
+    pub fn send_json(
+        &self,
+        operation: usize,
+        payload: &dynamic_asyncapi_client::Json,
+    ) -> Result<Receipt, RuntimeError> {
+        self.send_payload(operation, &Payload::from_json(payload.clone()))
+    }
+    /// The binary identity codec uses the original JS view. Other codecs admit
+    /// bytes in Rust before the host sees a send. Quota precedes the body copy.
     pub fn send_js(
         &self,
         operation: usize,
         payload: &js_sys::Uint8Array,
     ) -> Result<Receipt, RuntimeError> {
         let (driver, _lease) = self.driver(operation, payload.length() as usize)?;
-        driver.socket.send_with_js_u8_array(payload).map_err(|_| {
-            RuntimeError::new(RuntimeCode::Connection, "host rejected WebSocket send").uncertain()
+        let plan = &driver.shared.plan.plans()[operation];
+        if plan.describe().codec == Codec::Binary {
+            driver.socket.send_with_js_u8_array(payload).map_err(|_| {
+                RuntimeError::new(RuntimeCode::Connection, "host rejected WebSocket send")
+                    .uncertain()
+            })?;
+            Ok(Receipt::WebSocketHostAccepted)
+        } else {
+            let bytes = payload.to_vec();
+            plan.prepare_bytes(&bytes).map_err(RuntimeError::payload)?;
+            Self::write(&driver, operation, &bytes)
+        }
+    }
+    pub fn send_js_text(
+        &self,
+        operation: usize,
+        payload: &JsValue,
+    ) -> Result<Receipt, RuntimeError> {
+        if !payload.is_string() {
+            return Err(RuntimeError::new(
+                RuntimeCode::InvalidPayload,
+                "text input is not well-formed Unicode",
+            ));
+        }
+        let size = js_string_utf8_length(payload, Limits::default().max_message_bytes as u32);
+        let (driver, _lease) = self.driver(operation, size)?;
+        // Oversized input stops at bounded UTF-8 counting, before a complete
+        // Unicode traversal or any Rust body allocation.
+        if !js_string_well_formed(payload) {
+            return Err(RuntimeError::new(
+                RuntimeCode::InvalidPayload,
+                "text input is not well-formed Unicode",
+            ));
+        }
+        let text = payload.as_string().ok_or_else(|| {
+            RuntimeError::new(RuntimeCode::InvalidPayload, "text conversion failed")
         })?;
-        Ok(Receipt::WebSocketHostAccepted)
+        let payload = Payload::text(text);
+        driver.shared.plan.plans()[operation]
+            .prepare_payload(&payload)
+            .map_err(RuntimeError::payload)?;
+        Self::write(&driver, operation, payload.as_bytes())
     }
 }
 /// Owns callback registrations and a host socket. Drop removes handlers and

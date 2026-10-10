@@ -33,7 +33,7 @@ pub fn prepare_from_outer_api(source: &str, operation: &str) -> Result<String, S
         .map_err(|e| e.to_string())?;
     drop(compiled);
     let payload = [0, 255, 32];
-    if plan.prepare_bytes(&payload) != payload {
+    if plan.prepare_bytes(&payload).unwrap() != payload {
         return Err("binary codec altered the payload".into());
     }
     serde_json::to_string(plan.describe()).map_err(|e| e.to_string())
@@ -89,7 +89,7 @@ pub async fn exchange_from_outer_api(source: &str, payload: Vec<u8>) -> Result<V
             Some(Incoming::Message {
                 operation: 1,
                 payload,
-            }) => break payload,
+            }) => break payload.into_bytes().into(),
             Some(Incoming::Rejected { .. }) => {}
             _ => return Err("outer Rust consumer did not receive its operation".into()),
         }
@@ -119,4 +119,68 @@ pub fn values_from_outer_api(source: &str) -> Result<String, String> {
 fn external_typed_values_do_not_cross_a_javascript_number() {
     let source = r#"{"id":900719925474099312345,"label":"event"}"#;
     assert_eq!(values_from_outer_api(source).unwrap(), source);
+}
+
+/// JSON transport and decoding stay inside the downstream Rust/Wasm module.
+#[cfg(feature = "wasm")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub async fn exchange_codec_from_outer_api(
+    source: &str,
+    binary_frame: bool,
+) -> Result<String, String> {
+    use dynamic_asyncapi_client::{Json, PlanOptions, WebSocketFrame};
+    use dynamic_asyncapi_host::{Incoming, Session, SessionOptions};
+    let document = Document::parse(source).map_err(|e| e.to_string())?;
+    let mut options = PlanOptions::application();
+    if binary_frame {
+        options.websocket_frame = Some(WebSocketFrame::Binary);
+    }
+    let plans = ["emit", "listen"]
+        .map(|id| document.operation_id(id)?.compile()?.prepare(&options))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let session = Session::open(&plans, SessionOptions::default(), None)
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(plans);
+    drop(document);
+    #[derive(serde::Serialize)]
+    struct Event {
+        id: u128,
+    }
+    let value = Json::from_serializable(
+        &Event {
+            id: 900719925474099312345,
+        },
+        Default::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    session
+        .sender()
+        .send_json(0, &value)
+        .map_err(|e| e.to_string())?;
+    drop(value);
+    let (mut rejected, mut malformed) = (0, 0);
+    let value = loop {
+        match session.next(None).await.map_err(|e| e.to_string())? {
+            Some(Incoming::Rejected { .. }) => rejected += 1,
+            Some(Incoming::InvalidPayload { .. }) => malformed += 1,
+            Some(Incoming::Message {
+                operation: 1,
+                payload,
+            }) => {
+                break payload
+                    .as_json()
+                    .and_then(|j| j.get("id"))
+                    .ok_or("no exact JSON id")?;
+            }
+            _ => return Err("wrong receive outcome".into()),
+        }
+    };
+    session.close(None).await.map_err(|e| e.to_string())?;
+    Ok(
+        serde_json::json!({"id":value.number_text(),"rejected":rejected,"malformed":malformed})
+            .to_string(),
+    )
 }

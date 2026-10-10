@@ -1,6 +1,6 @@
 # Rust-backed AsyncAPI TypeScript preview
 
-This private development package exposes the same Rust source inspection, compilation and pure preparation as the native crate. JSON/YAML documents in the 2.6, 3.0 and 3.1 reader families are admitted; complete edition conformance and protocol qualification remain open work. Preparation currently supports a single schema-free binary message over MQTT 3.1.1 or WebSocket RFC 6455. The historical TypeScript engine is not used.
+This private development package exposes the same Rust source inspection, compilation and pure preparation as the native crate. JSON/YAML documents in the 2.6, 3.0 and 3.1 reader families are admitted; complete edition conformance and protocol qualification remain open work. Preparation currently supports a single schema-free binary, JSON or UTF-8 text message over MQTT 3.1.1 or WebSocket RFC 6455. The historical TypeScript engine is not used.
 
 Build with `npm run build:wasm` (Rust and wasm-bindgen 0.2.129 for package developers), then `npm run build`. A consumer of the built package needs the included Wasm assets, not Rust. Package-consumer and actual browser/Worker execution qualification is still pending.
 
@@ -43,7 +43,7 @@ Both methods accept `{bytes, nodes, depth}` limits; defaults are 16 MiB, 500,000
 nodes and depth 96. Root depth is zero; depth is capped at 96. UTF-16 is checked
 before Wasm conversion so malformed surrogate input cannot silently change.
 The facade converts host representations; Rust owns JSON admission and values.
-These constructors do not validate schemas or enable JSON/text transport yet.
+These constructors do not validate schemas. Prepared JSON/text transport uses the same value model.
 
 Compile once, then make a reusable deployment plan in Rust through the facade:
 
@@ -100,3 +100,23 @@ constructor profile passed the client suites and 800 diagnostic connections,
 while other raw connection paths still reproduced errors. Every host error
 stays a failure even if followed by a clean close event. Full transport
 qualification and deployed Cloudflare destination verification remain open.
+
+## JSON and text messages
+
+The prepared content type selects the codec; WebSocket frame policy is exposed in
+`plan.describe().transport.frame`. JSON/text default to text frames, with an
+explicit `websocketFrame: 'binary'` option. Schema-bearing declarations still
+require an evaluator and are refused during preparation.
+
+`sender.sendText(operation, text)` sends UTF-8 values. For JSON, use
+`sender.sendValue(operation, plainValue)` or `sender.sendJson(operation, exactView)`.
+`send(operation, Uint8Array)` admits already encoded bytes through the selected
+codec. Invalid outbound values fail before the host send, with `deliveryUnknown`
+false. Runtime codec diagnostics are available as `error.diagnostic`.
+
+Every accepted incoming message has `payload` bytes and a `codec` discriminator.
+UTF-8 messages additionally expose `text`; JSON messages expose an owning `value`
+(JsonView), which the caller must dispose. A retained child remains valid after
+that value or the session is disposed. `kind: 'invalidPayload'` includes a safe
+`diagnostic` and `payloadBytes`; it is distinct from wrong-frame `rejected` and
+terminal session errors. Neither observation prevents the next valid message.

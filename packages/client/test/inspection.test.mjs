@@ -115,7 +115,7 @@ test('Rust compilation and pure preparation survive disposal and preserve typed 
   message.dispose();
   assert.equal(compiled.describe().messages[0].selection.pointer, '/channels/events/messages/event');
   const plan = compiled.prepare({role:'application'});
-  assert.deepEqual(plan.describe().transport, {kind:'webSocket6455',endpoint:'wss://example.test/events',method:'GET'});
+  assert.deepEqual(plan.describe().transport, {kind:'webSocket6455',endpoint:'wss://example.test/events',method:'GET',frame:'binary'});
   assert.throws(() => compiled.prepare({role:'peer'}), error => error instanceof AsyncApiError && error.requirement.kind === 'peerRoute');
   assert.throws(() => compiled.prepare({role:'application',surprise:true}), error => error.code === 'InvalidConfiguration');
   compiled.dispose();
@@ -135,4 +135,18 @@ test('empty messages and codec requirements survive the TypeScript boundary dist
     });
     compiled.dispose();operation.dispose();doc.dispose();
   }
+});
+
+test('JSON and text codecs expose frame policy while schema obligations remain explicit', () => {
+  for(const [contentType,codec] of [['application/json','json'],['text/plain; charset=utf-8','utf8']]) {
+    const document=client.parse(binarySource.replace('application/octet-stream',contentType));
+    const operation=document.operation('emit'), compiled=operation.compile();
+    const automatic=compiled.prepare({role:'application'}), binary=compiled.prepare({role:'application',websocketFrame:'binary'});
+    assert.equal(automatic.describe().codec,codec);assert.equal(automatic.describe().transport.frame,'text');assert.equal(binary.describe().transport.frame,'binary');
+    automatic.dispose();binary.dispose();compiled.dispose();operation.dispose();document.dispose();
+  }
+  const source=JSON.parse(binarySource);source.channels.events.messages.event.contentType='application/json';source.channels.events.messages.event.payload={type:'object'};
+  const document=client.parse(JSON.stringify(source)), operation=document.operation('emit'),compiled=operation.compile();
+  assert.throws(()=>compiled.prepare({role:'application'}),error=>error.requirement?.kind==='evaluator');
+  compiled.dispose();operation.dispose();document.dispose();
 });

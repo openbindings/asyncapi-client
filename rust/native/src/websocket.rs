@@ -1,6 +1,5 @@
 use crate::{
-    CloseReceipt, Context, Delivery, Incoming, Receipt, Received, RuntimeCode, RuntimeError,
-    SendCommand,
+    CloseReceipt, Context, Delivery, Incoming, Receipt, RuntimeCode, RuntimeError, SendCommand,
 };
 use dynamic_asyncapi_session::Route;
 use futures_util::{SinkExt, StreamExt};
@@ -50,7 +49,10 @@ pub(crate) async fn run<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin 
                 {
                     // Keep both halves progressing under backpressure. A peer
                     // may itself be waiting for us to drain its outgoing frame.
-                    let writing=timeout_at(command.deadline,writer.send(Message::Binary(command.payload.clone())));
+                    let outgoing=if context.plans.plans()[command.operation].websocket_frame()==Some(dynamic_asyncapi_client::WebSocketFrame::Text) {
+                        Message::Text(command.payload.clone().try_into().map_err(|_|RuntimeError::new(RuntimeCode::InvalidPayload,"text frame requires UTF-8"))?)
+                    } else { Message::Binary(command.payload.clone()) };
+                    let writing=timeout_at(command.deadline,writer.send(outgoing));
                     tokio::pin!(writing);
                     loop {
                         tokio::select! {
@@ -89,21 +91,8 @@ enum Observed {
 }
 fn observe(context: &Context, message: Message) -> Result<Observed, RuntimeError> {
     match message {
-        Message::Binary(payload) => match context.plans.websocket_route(true) {
-            Route::Operation(operation) => context.deliver(Incoming::Message(Received {
-                operation,
-                payload,
-                delivery: Delivery::WebSocket,
-            }))?,
-            Route::Rejected(reason) => context.deliver(Incoming::Rejected {
-                reason,
-                payload_bytes: payload.len(),
-            })?,
-        },
-        Message::Text(text) => context.deliver(Incoming::Rejected {
-            reason: "text WebSocket frame does not match the binary codec",
-            payload_bytes: text.len(),
-        })?,
+        Message::Binary(payload) => observe_payload(context, payload, true)?,
+        Message::Text(text) => observe_payload(context, text.into(), false)?,
         Message::Ping(_) | Message::Pong(_) => return Ok(Observed::Control),
         Message::Close(_) => return Ok(Observed::Close),
         Message::Frame(_) => {
@@ -116,6 +105,21 @@ fn observe(context: &Context, message: Message) -> Result<Observed, RuntimeError
     Ok(Observed::Data)
 }
 
+fn observe_payload(
+    context: &Context,
+    payload: bytes::Bytes,
+    binary: bool,
+) -> Result<(), RuntimeError> {
+    match context.plans.websocket_route(binary) {
+        Route::Operation(operation) => {
+            context.deliver_payload(operation, payload, Delivery::WebSocket)
+        }
+        Route::Rejected(reason) => context.deliver(Incoming::Rejected {
+            reason,
+            payload_bytes: payload.len(),
+        }),
+    }
+}
 fn driver_error(error: tokio_tungstenite::tungstenite::Error) -> RuntimeError {
     use tokio_tungstenite::tungstenite::Error;
     match error {

@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     received += 1;
                     break;
                 }
+                Incoming::InvalidPayload { .. } => return Err("invalid fixture payload".into()),
                 Incoming::Rejected {
                     reason,
                     payload_bytes,

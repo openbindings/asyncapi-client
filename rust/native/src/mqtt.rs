@@ -1,5 +1,5 @@
 use crate::{
-    CloseReceipt, Context, Delivery, Incoming, MqttSubscription, Receipt, Received, RuntimeCode,
+    CloseReceipt, Context, Delivery, Incoming, MqttSubscription, Receipt, RuntimeCode,
     RuntimeError, SendCommand,
 };
 use dynamic_asyncapi_client::{Action, TransportPlan};
@@ -186,17 +186,17 @@ fn deliver(
         ));
     }
     match context.plans.mqtt_route(topic, message.qos as u8) {
-        Route::Operation(operation) => context.deliver(Incoming::Message(Received {
+        Route::Operation(operation) => context.deliver_payload(
             operation,
-            payload: message.payload,
-            delivery: Delivery::Mqtt {
+            message.payload,
+            Delivery::Mqtt {
                 topic: topic.to_owned(),
                 qos: message.qos as u8,
                 retain: message.retain,
                 duplicate: message.dup,
                 packet_id: message.pkid,
             },
-        })),
+        ),
         Route::Rejected(reason) => context.deliver(Incoming::Rejected {
             reason,
             payload_bytes: message.payload.len(),

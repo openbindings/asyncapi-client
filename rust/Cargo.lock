@@ -97,6 +97,7 @@ dependencies = [
 name = "dynamic-asyncapi-client"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "fluent-uri",
  "granit-parser",
  "serde",

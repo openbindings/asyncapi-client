@@ -33,7 +33,7 @@ fn binary_plan_is_reusable_and_outlives_document_and_compiler_handles() {
     drop(compiled);
     let bytes = [0, 255, 16];
     assert!(std::ptr::eq(
-        plan.prepare_bytes(&bytes).as_ptr(),
+        plan.prepare_bytes(&bytes).unwrap().as_ptr(),
         bytes.as_ptr()
     ));
     assert_eq!(plan.describe().application_action, Action::Send);
@@ -382,7 +382,7 @@ fn websocket_source() -> Value {
 fn websocket_path_and_handshake_are_explicit_and_peer_cannot_open_an_unrelated_connection() {
     let mut value = websocket_source();
     assert!(
-        matches!(&plan(&value).unwrap().describe().transport, TransportPlan::WebSocket6455 { endpoint, method } if endpoint == "wss://example.test/base/events" && method == "GET")
+        matches!(&plan(&value).unwrap().describe().transport, TransportPlan::WebSocket6455 { endpoint, method, frame: dynamic_asyncapi_client::WebSocketFrame::Binary } if endpoint == "wss://example.test/base/events" && method == "GET")
     );
     let compiled = doc(&value).operation_id("emit").unwrap().compile().unwrap();
     let mut options = PlanOptions::application();

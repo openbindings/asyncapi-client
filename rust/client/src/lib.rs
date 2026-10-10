@@ -4,6 +4,7 @@
 //! Admission is not whole-document or payload validation. No method performs I/O.
 #![forbid(unsafe_code)]
 
+mod codec;
 mod document;
 mod effective;
 mod preparation;
@@ -11,6 +12,7 @@ mod serializable;
 mod source;
 mod yaml;
 
+pub use codec::{Codec, Payload, WebSocketFrame};
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};
 pub use preparation::{
     CompiledDescription, CompiledOperation, MessageDescription, Plan, PlanDescription, PlanOptions,

@@ -130,12 +130,12 @@ pub enum SessionState {
     Failed(RuntimeError),
 }
 
-/// A binary message classified to exactly one attached receive operation.
+/// A decoded message classified to exactly one attached receive operation.
 /// `operation` is its index in the slice supplied to `Session::open`.
 #[derive(Clone, Debug)]
 pub struct Received {
     pub operation: usize,
-    pub payload: Bytes,
+    pub payload: dynamic_asyncapi_client::Payload,
     pub delivery: Delivery,
 }
 #[derive(Clone, Debug)]
@@ -153,6 +153,10 @@ pub enum Delivery {
 #[derive(Clone, Debug)]
 pub enum Incoming {
     Message(Received),
+    InvalidPayload {
+        diagnostic: dynamic_asyncapi_client::Diagnostic,
+        payload_bytes: usize,
+    },
     /// Preserves the observation without treating an unexpected frame as an
     /// operation's message. Payload content is not placed in error strings.
     Rejected {
@@ -196,9 +200,33 @@ impl Context {
     fn deliver(&self, incoming: Incoming) -> Result<(), RuntimeError> {
         let size = match &incoming {
             Incoming::Message(message) => message.payload.len(),
-            Incoming::Rejected { .. } => 0,
+            Incoming::Rejected { .. } | Incoming::InvalidPayload { .. } => 0,
         };
         let lease = self.budget.reserve(size)?;
+        self.enqueue(incoming, lease)
+    }
+    fn deliver_payload(
+        &self,
+        operation: usize,
+        payload: Bytes,
+        delivery: Delivery,
+    ) -> Result<(), RuntimeError> {
+        let payload_bytes = payload.len();
+        let lease = self.budget.reserve(payload_bytes)?;
+        let incoming = match self.plans.plans()[operation].decode_payload(payload) {
+            Ok(payload) => Incoming::Message(Received {
+                operation,
+                payload,
+                delivery,
+            }),
+            Err(diagnostic) => Incoming::InvalidPayload {
+                diagnostic,
+                payload_bytes,
+            },
+        };
+        self.enqueue(incoming, lease)
+    }
+    fn enqueue(&self, incoming: Incoming, lease: Lease) -> Result<(), RuntimeError> {
         self.events
             .try_send(Queued {
                 incoming,
@@ -229,6 +257,44 @@ impl Sender {
         operation: usize,
         payload: impl Into<Bytes>,
     ) -> Result<Receipt, RuntimeError> {
+        self.send_inner(operation, payload.into(), false).await
+    }
+    pub async fn send_payload(
+        &self,
+        operation: usize,
+        payload: dynamic_asyncapi_client::Payload,
+    ) -> Result<Receipt, RuntimeError> {
+        self.plans
+            .send_plan(operation)?
+            .prepare_payload(&payload)
+            .map_err(RuntimeError::payload)?;
+        self.send_inner(operation, payload.into_bytes(), true).await
+    }
+    pub async fn send_text(
+        &self,
+        operation: usize,
+        text: impl Into<String>,
+    ) -> Result<Receipt, RuntimeError> {
+        self.send_payload(operation, dynamic_asyncapi_client::Payload::text(text))
+            .await
+    }
+    pub async fn send_json(
+        &self,
+        operation: usize,
+        value: &dynamic_asyncapi_client::Json,
+    ) -> Result<Receipt, RuntimeError> {
+        self.send_payload(
+            operation,
+            dynamic_asyncapi_client::Payload::from_json(value.clone()),
+        )
+        .await
+    }
+    async fn send_inner(
+        &self,
+        operation: usize,
+        payload: Bytes,
+        validated: bool,
+    ) -> Result<Receipt, RuntimeError> {
         if *self.shutdown.borrow() {
             return Err(RuntimeError::new(RuntimeCode::Closed, "session is closing"));
         }
@@ -237,9 +303,11 @@ impl Sender {
             return Err(error);
         }
         let plan = self.plans.send_plan(operation)?;
-        let payload = payload.into();
-        let _ = plan.prepare_bytes(&payload);
         let lease = self.budget.reserve(payload.len())?;
+        if !validated {
+            plan.prepare_bytes(&payload)
+                .map_err(RuntimeError::payload)?;
+        }
         let (response, receipt) = oneshot::channel();
         self.commands
             .try_send(SendCommand {

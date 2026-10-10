@@ -27,3 +27,12 @@ Default and maximum admission limits in this slice are 16 attached plans, 64 que
 The development checks include actual loopback peers, wrong-route and serialized-I/O controls, readiness, cancellation, deadlines, idle control traffic, queue/byte limits and repeated closes. These are development evidence; the full independent protocol, ownership, host and performance gates remain open.
 
 MQTT 3.1.1 uses a [pinned repaired transport](../vendor/rumqttc-v4-next/LOCAL-CHANGES.md). Source provenance, the original license and the exact local patch are retained. It suppresses duplicate QoS 2 publication delivery, responds to repeated PUBREC/PUBREL, permits completed packet identifier reuse and validates acknowledgment type/phase/identity. Inbound QoS 2 tracking uses fixed packet-identifier bitsets; it does not retain already-delivered payloads. Live packet tests include 1,000 completed sends with one reusable queue slot. Recovery, manual settlement and independent conformance/performance qualification remain open; these tests do not imply an exactly-once application transaction.
+
+JSON and UTF-8 text use the same prepared plans as binary messages. Clone a sender
+and call `send_text`, `send_json`, or `send_payload`; `send` accepts encoded bytes
+and validates the selected codec. Received `Payload` retains wire bytes and offers
+`as_text`/`as_json` without reparsing. `Incoming::InvalidPayload` preserves a codec
+diagnostic without terminating the stream. WebSocket frame defaults/overrides are
+explicit in the plan; MQTT publishes the encoded bytes. Schema declarations
+continue to require evaluator support. Queue byte limits describe wire payloads,
+not the complete heap of the decoded exact JSON graph.

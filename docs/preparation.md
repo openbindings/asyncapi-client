@@ -1,4 +1,4 @@
-# Pure preparation development slice
+# Pure message preparation development slice
 
 `Operation::compile()` produces an owning `CompiledOperation`. It resolves native operation/channel/message/server relationships and merges traits while retaining authored field origins. References inherited from an external trait resolve against that trait's source URI. Native selectors and resolved definitions remain distinct in inspection. Compilation does not convert a 2.x document into a 3.x document.
 
@@ -7,7 +7,7 @@
 ## Current positive path
 
 - AsyncAPI 2.6, 3.0 and 3.1, JSON or YAML; exactly one message in the selected channel/2.x message set.
-- Explicit `application/octet-stream` on the message or as the document default, with no payload/header schema or correlation declaration.
+- Explicit binary (`application/octet-stream`), JSON (`application/json` or application `+json` media types), or UTF-8 text (`text/plain`) on the message or as the document default, with no payload/header schema or correlation declaration. JSON/text accept a single optional `charset=utf-8` parameter, including a quoted value. Other parameters/charsets require another codec profile. The UTF-8 default for text/plain is an explicit client-profile choice.
 - MQTT 3.1.1: application or peer action, topic/filter, QoS 0/1/2, retain for publishing, client identity, clean session and keepalive. The plan supports these settings; runtime execution is still separate work.
 - WebSocket RFC 6455: application action, server base path plus channel path, GET handshake. Peer plans require an established-connection/hosting route, which this slice reports as a requirement.
 
@@ -17,7 +17,21 @@ Parameter substitution retains protocol syntax: an MQTT parameter value containi
 
 MQTT QoS defaults to 0, retain to false, clean session to true, keepalive to 60 seconds. These are this profile's explicit choices, not additional AsyncAPI rules. The document must state MQTT 3.1.1 or the caller must select that profile. MQTT 5-only binding fields refuse under 3.1.1. A peer must supply its own client identity and cannot reuse the described application's declared identity. Driver packet limits are distinct from MQTT 5 properties.
 
-`Plan::prepare_bytes` currently borrows the same byte slice without copying or source traversal. It implements only the binary identity codec and does not claim schema validation. Runtime message-size admission, cancellation, subscriptions and delivery receipts live in the separate `dynamic-asyncapi-native` crate; they are not side effects of this preparation API.
+`Plan::prepare_bytes` validates encoded bytes and borrows the original slice. Binary identity and UTF-8 validation need no body allocation; JSON admission parses an exact value. `Plan::decode_payload` retains encoded bytes plus the exact JSON view so receive consumers do not need another parse. `Payload::text` and `Payload::from_json` provide typed inputs; `prepare_payload` checks the selected codec. These APIs do not claim schema validation. Runtime message-size admission, cancellation, subscriptions and delivery receipts live in the separate `dynamic-asyncapi-native` crate; they are not side effects of this preparation API.
+
+WebSocket framing is explicit in the prepared transport. The default is binary for
+binary content and text for JSON/UTF-8. `PlanOptions::websocket_frame` (TypeScript
+`websocketFrame`) can select a binary frame for JSON or text. Binary content cannot
+be placed in a text frame by this profile. These are client defaults, not AsyncAPI
+requirements. MQTT carries the encoded bytes without WebSocket framing options.
+
+Invalid incoming payloads are observations with a diagnostic, distinct from
+wrong-frame/route rejection and terminal transport failures. Subsequent valid
+messages can still progress. Queue limits count wire payload bytes and message
+slots; decoded JSON source/index storage is separately bounded by value admission
+and is not included in a claim about total heap use. JSON currently retains its
+original Bytes alongside its exact source/index, with that additional storage
+made explicit for later ownership/performance qualification.
 
 ## Explicit limits
 

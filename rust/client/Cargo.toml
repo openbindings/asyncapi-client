@@ -10,6 +10,7 @@ description = "Dynamic AsyncAPI interpretation with exact values and explicit ho
 readme = "README.md"
 
 [dependencies]
+bytes = "=1.12.1"
 serde.workspace = true
 serde_json.workspace = true
 fluent-uri.workspace = true
