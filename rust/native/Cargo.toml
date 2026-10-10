@@ -1,0 +1,26 @@
+[package]
+name = "dynamic-asyncapi-native"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Native sessions for prepared dynamic AsyncAPI interactions"
+readme = "README.md"
+
+[dependencies]
+dynamic-asyncapi-client = { path = "../client" }
+fluent-uri.workspace = true
+serde.workspace = true
+bytes = "=1.12.1"
+rumqttc = { version = "=0.25.1", default-features = false }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
+tokio = { version = "=1.53.2", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
+futures-util = { version = "=0.3.32", features = ["sink"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -17,7 +17,7 @@ Parameter substitution retains protocol syntax: an MQTT parameter value containi
 
 MQTT QoS defaults to 0, retain to false, clean session to true, keepalive to 60 seconds. These are this profile's explicit choices, not additional AsyncAPI rules. The document must state MQTT 3.1.1 or the caller must select that profile. MQTT 5-only binding fields refuse under 3.1.1. A peer must supply its own client identity and cannot reuse the described application's declared identity. Driver packet limits are distinct from MQTT 5 properties.
 
-`Plan::prepare_bytes` currently borrows the same byte slice without copying or source traversal. It implements only the binary identity codec and does not claim schema validation. Runtime message-size admission, cancellation, subscriptions and delivery receipts are not implemented here yet.
+`Plan::prepare_bytes` currently borrows the same byte slice without copying or source traversal. It implements only the binary identity codec and does not claim schema validation. Runtime message-size admission, cancellation, subscriptions and delivery receipts live in the separate `dynamic-asyncapi-native` crate; they are not side effects of this preparation API.
 
 ## Explicit limits
 

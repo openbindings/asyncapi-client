@@ -25,6 +25,12 @@ export async function startPeers() {
     records.push(value);
   }
   const broker = await Aedes.createBroker({connectTimeout:3000,drainTimeout:3000,maxInflightInbound:32});
+  broker.preConnect = (_client,packet,done) => {
+    record({protocol:'mqtt',kind:'connect',client:packet.clientId,version:packet.protocolVersion,clean:packet.clean,keepalive:packet.keepalive});
+    done(null,true);
+  };
+  broker.on('clientDisconnect',client=>record({protocol:'mqtt',kind:'disconnect',client:client.id}));
+  broker.on('ping',(_packet,client)=>record({protocol:'mqtt',kind:'ping',client:client.id}));
   broker.authenticate = (_client,username,password,done) => done(null,
     username===profile.username && password?.toString()===profile.password);
   broker.on('publish',(packet,client) => {
@@ -36,7 +42,9 @@ export async function startPeers() {
   const mqtt = tcpServer(socket => { sockets.add(socket);socket.on('close',()=>sockets.delete(socket));broker.handle(socket); });
   const http = httpServer((_request,response)=>{response.writeHead(404);response.end();});
   const websocket = new WebSocketServer({server:http,path:'/events',maxPayload:profile.maxMessageBytes,perMessageDeflate:false});
-  websocket.on('connection',socket => {
+  websocket.on('connection',(socket,request) => {
+    record({protocol:'websocket',kind:'connect',path:request.url,method:request.method});
+    socket.on('close',(code)=>record({protocol:'websocket',kind:'close',code}));
     socket.send('{"kind":"unsolicited-notice"}');
     socket.on('message',(bytes,binary) => {
       record({protocol:'websocket',binary,bytes:bytes.length,digest:digest(bytes)});
