@@ -1,8 +1,9 @@
 use crate::{
     CloseReceipt, Context, Delivery, Incoming, Receipt, Received, RuntimeCode, RuntimeError,
-    SendCommand, wire::MqttSettings,
+    SendCommand,
 };
 use dynamic_asyncapi_client::{Action, TransportPlan};
+use dynamic_asyncapi_session::{MqttSettings, Route};
 use rumqttc::{
     AsyncClient, ConnectReturnCode, Event, EventLoop, Incoming as Packet, MqttOptions, Outgoing,
     QoS, SubscribeFilter, SubscribeReasonCode,
@@ -49,6 +50,7 @@ pub(crate) async fn connect(
     }
     let topics: Vec<_> = context
         .plans
+        .plans()
         .iter()
         .filter(|p| p.describe().wire_action == Action::Receive)
         .map(|p| match &p.describe().transport {
@@ -119,23 +121,20 @@ fn connection_error(error: rumqttc::ConnectionError) -> RuntimeError {
     }
 }
 fn deliver(context: &Context, message: rumqttc::Publish) -> Result<(), RuntimeError> {
-    let operation=context.plans.iter().position(|p|p.describe().wire_action==Action::Receive && matches!(&p.describe().transport,TransportPlan::Mqtt311 { topic,.. } if topic==&message.topic));
-    match operation {
-        Some(operation) if message.qos == QoS::AtLeastOnce => {
-            context.deliver(Incoming::Message(Received {
-                operation,
-                payload: message.payload,
-                delivery: Delivery::Mqtt {
-                    topic: message.topic,
-                    qos: 1,
-                    retain: message.retain,
-                    duplicate: message.dup,
-                    packet_id: message.pkid,
-                },
-            }))
-        }
-        _ => context.deliver(Incoming::Rejected {
-            reason: "MQTT message has no matching receive operation at the configured QoS",
+    match context.plans.mqtt_route(&message.topic, message.qos as u8) {
+        Route::Operation(operation) => context.deliver(Incoming::Message(Received {
+            operation,
+            payload: message.payload,
+            delivery: Delivery::Mqtt {
+                topic: message.topic,
+                qos: 1,
+                retain: message.retain,
+                duplicate: message.dup,
+                packet_id: message.pkid,
+            },
+        })),
+        Route::Rejected(reason) => context.deliver(Incoming::Rejected {
+            reason,
             payload_bytes: message.payload.len(),
         }),
     }
@@ -174,7 +173,7 @@ pub(crate) async fn run(
                     let Some(command)=command else { return Err(RuntimeError::new(RuntimeCode::Closed,"session command owner ended")); };
                     if command.response.is_closed() { continue; }
                     if Instant::now()>=command.deadline { command.complete(Err(RuntimeError::new(RuntimeCode::Deadline,"send expired before driver submission")));continue; }
-                    let TransportPlan::Mqtt311 { topic,retain,.. }=&context.plans[command.operation].describe().transport else { unreachable!() };
+                    let TransportPlan::Mqtt311 { topic,retain,.. }=&context.plans.plans()[command.operation].describe().transport else { unreachable!() };
                     driver.client.try_publish(topic,QoS::AtLeastOnce,*retain,command.payload.clone()).map_err(|_|RuntimeError::new(RuntimeCode::DriverFailed,"driver rejected prepared publish"))?;
                     pending=Some(Pending { command,packet_id:None });
                 },

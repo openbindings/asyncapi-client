@@ -1,4 +1,4 @@
-import initializeWasm, { DocumentHandle, OperationHandle, CompiledOperationHandle, PlanHandle, JsonHandle, type InitInput } from '../wasm/asyncapi.js';
+import initializeWasm, { DocumentHandle, OperationHandle, CompiledOperationHandle, PlanHandle, JsonHandle, HostSessionBuilder, HostSessionHandle, HostSenderHandle, CancellationHandle, IncomingHandle, type InitInput } from '../wasm/asyncapi.js';
 
 export interface SourceLocation {
   readonly uri: string | null;
@@ -129,8 +129,17 @@ export async function createClient(options: { wasm?: InitInput | Promise<InitInp
 }
 export interface Client {
   parse(source: string, options?: { sourceUri?: string }): Document;
+  openSession(plans: readonly Plan[], options?: HostSessionOptions & { signal?: AbortSignal }): Promise<HostSession>;
 }
 class RustClient implements Client {
+  async openSession(plans: readonly Plan[], options: HostSessionOptions & { signal?: AbortSignal } = {}): Promise<HostSession> {
+    const builder = new HostSessionBuilder();
+    try {
+      for (const plan of plans) plan.attachTo(builder);
+      const {signal, ...configuration} = options;
+      return await cancellable(signal, async token => new HostSession(await builder.open(JSON.stringify(configuration), token) as HostSessionHandle));
+    } finally { builder.free(); }
+  }
   /** Parses original JSON/YAML source; admission is not full document validation. */
   parse(source: string, options: { sourceUri?: string } = {}): Document {
     return call(() => new Document(new DocumentHandle(source, options.sourceUri)));
@@ -186,6 +195,8 @@ export class Plan extends Owner<PlanHandle> {
   /** @internal Use CompiledOperation.prepare. */
   constructor(handle: PlanHandle) { super(handle); }
   describe(): PlanDescription { return JSON.parse(this.handle.describe_json()) as PlanDescription; }
+  /** @internal Adds the owning Rust plan to a session builder. */
+  attachTo(builder: HostSessionBuilder): void { runtimeCall(() => builder.add(this.handle)); }
 }
 export class JsonView extends Owner<JsonHandle> {
   /** @internal Obtain a source view from a document or operation. */
@@ -205,4 +216,73 @@ export class JsonView extends Owner<JsonHandle> {
     const handle = this.handle.at(index); return handle ? new JsonView(handle) : undefined;
   }
   pointer(pointer: string): JsonView | undefined { const handle = this.handle.pointer(pointer); return handle ? new JsonView(handle) : undefined; }
+}
+
+/** Limits account for Rust-owned queues. Host network buffers are separate. */
+export interface HostSessionOptions {
+  readonly limits?: { readonly maxMessages?: number; readonly maxBufferedBytes?: number; readonly maxMessageBytes?: number };
+  readonly connectTimeoutMs?: number;
+  readonly closeTimeoutMs?: number;
+}
+export interface HostReceipt { readonly kind: 'webSocketHostAccepted' }
+export interface HostCloseReceipt { readonly code: number; readonly wasClean: boolean }
+export type Incoming =
+  | { readonly kind: 'message'; readonly operation: number; readonly payload: Uint8Array }
+  | { readonly kind: 'rejected'; readonly reason: string; readonly payloadBytes: number };
+export class AsyncApiRuntimeError extends Error {
+  readonly code: string;
+  readonly deliveryUnknown: boolean;
+  constructor(value: { code: string; detail: string; delivery_unknown: boolean }) {
+    super(value.detail); this.name = 'AsyncApiRuntimeError';
+    this.code = value.code; this.deliveryUnknown = value.delivery_unknown;
+  }
+}
+function runtimeError(error: unknown): unknown {
+  if (typeof error !== 'string') return error;
+  let value: unknown; try { value = JSON.parse(error); } catch { return error; }
+  if (value && typeof value === 'object' && 'code' in value && typeof value.code === 'string'
+    && 'detail' in value && typeof value.detail === 'string'
+    && 'delivery_unknown' in value && typeof value.delivery_unknown === 'boolean') return new AsyncApiRuntimeError(value as {code:string;detail:string;delivery_unknown:boolean});
+  return error;
+}
+function runtimeCall<T>(operation: () => T): T { try { return operation(); } catch (error) { throw runtimeError(error); } }
+async function cancellable<T>(signal: AbortSignal | undefined, operation: (token: CancellationHandle) => Promise<T>): Promise<T> {
+  const token = new CancellationHandle();
+  const abort = () => token.cancel();
+  signal?.addEventListener('abort', abort, {once:true});
+  if (signal?.aborted) token.cancel();
+  try { return await operation(token); }
+  catch (error) { throw runtimeError(error); }
+  finally { signal?.removeEventListener('abort', abort); token.free(); }
+}
+export class HostSender extends Owner<HostSenderHandle> {
+  /** @internal Use HostSession.sender. Retaining this does not retain the socket. */
+  constructor(handle: HostSenderHandle) { super(handle); }
+  /** Returns host-buffer acceptance. Does not promise flush or peer delivery. */
+  send(operation: number, payload: Uint8Array): HostReceipt {
+    if (!Number.isSafeInteger(operation) || operation < 0 || operation > 0xffff_ffff) throw new AsyncApiRuntimeError({code:'InvalidConfiguration',detail:'Operation index must be a nonnegative 32-bit integer',delivery_unknown:false});
+    if (!(payload instanceof Uint8Array)) throw new TypeError('Payload must be a Uint8Array');
+    return runtimeCall(() => JSON.parse(this.handle.send(operation, payload)) as HostReceipt);
+  }
+}
+export class HostSession extends Owner<HostSessionHandle> {
+  /** @internal Use Client.openSession. Dispose explicitly or await close. */
+  constructor(handle: HostSessionHandle) { super(handle); }
+  sender(): HostSender { return runtimeCall(() => new HostSender(this.handle.sender())); }
+  get usage(): { readonly messages: number; readonly bytes: number } { return runtimeCall(() => JSON.parse(this.handle.usage_json())); }
+  async next(options: { signal?: AbortSignal } = {}): Promise<Incoming | undefined> {
+    return cancellable(options.signal, async token => {
+      const value = await this.handle.next(token) as IncomingHandle | undefined;
+      if (!value) return undefined;
+      try {
+        const metadata = JSON.parse(value.metadata_json()) as {kind:'message';operation:number} | {kind:'rejected';reason:string;payloadBytes:number};
+        if (metadata.kind === 'message') return {kind:'message',operation:metadata.operation,payload:value.take_payload()!};
+        return metadata;
+      } finally { value.free(); }
+    });
+  }
+  async close(options: { signal?: AbortSignal } = {}): Promise<HostCloseReceipt> {
+    try { return await cancellable(options.signal, async token => JSON.parse(await this.handle.close(token) as string) as HostCloseReceipt); }
+    finally { this.dispose(); }
+  }
 }

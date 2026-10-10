@@ -1,6 +1,6 @@
 # Rust-backed AsyncAPI TypeScript preview
 
-This private development package exposes the same Rust source inspection, compilation and pure preparation as the native crate. JSON/YAML documents in the 2.6, 3.0 and 3.1 reader families are admitted; complete edition conformance and protocol execution remain open work. Preparation currently supports a single schema-free binary message over MQTT 3.1.1 or WebSocket RFC 6455. The historical TypeScript engine is not used.
+This private development package exposes the same Rust source inspection, compilation and pure preparation as the native crate. JSON/YAML documents in the 2.6, 3.0 and 3.1 reader families are admitted; complete edition conformance and protocol qualification remain open work. Preparation currently supports a single schema-free binary message over MQTT 3.1.1 or WebSocket RFC 6455. The historical TypeScript engine is not used.
 
 Build with `npm run build:wasm` (Rust and wasm-bindgen 0.2.129 for package developers), then `npm run build`. A consumer of the built package needs the included Wasm assets, not Rust. Package-consumer and actual browser/Worker execution qualification is still pending.
 
@@ -36,3 +36,40 @@ unsupported schemas, authentication schemes and replies are refused explicitly b
 this initial slice. A WebSocket peer requires a real peer route, not a second
 connection to the same server. Plan descriptions contain endpoint and client
 identity but never credentials. See [preparation contract](../../docs/preparation.md).
+
+## Host WebSocket sessions
+
+The first transport API uses Rust session policy and Rust-owned host callbacks.
+Prepare send and receive plans for the same WebSocket endpoint, then:
+
+```ts
+using session = await client.openSession([sendPlan, receivePlan]);
+using sender = session.sender();
+const receipt = sender.send(0, new Uint8Array([1, 2, 3]));
+// receipt.kind === 'webSocketHostAccepted': no flush/delivery promise.
+const incoming = await session.next({ signal: AbortSignal.timeout(5000) });
+if (incoming?.kind === 'message') console.log(incoming.operation, incoming.payload);
+else if (incoming?.kind === 'rejected') console.log(incoming.reason);
+await session.close();
+```
+
+`next` allows one pending wait. Cancellation leaves a queued observation intact;
+closing or disposing a session invalidates retained senders. Close consumes its
+owner and waits for a clean close event. Canceling close disposes that owner.
+Dropping/disposal removes callbacks and initiates close, without promising that
+the remote peer has observed it. Call `.dispose()` explicitly if `using` is not
+available. Runtime failures expose `code` and `deliveryUnknown`.
+
+Options accept `connectTimeoutMs`, `closeTimeoutMs` and `limits` with
+`maxMessages`, `maxBufferedBytes`, `maxMessageBytes`. Defaults/maxima are 64
+library-owned messages and 1 MiB of payload. Queue overflow terminates the
+session, with queued observations drained before the terminal error. The host
+send-buffer amount is checked separately before submission. Browser buffering
+before a message event cannot be controlled by this API and is outside the Rust
+queue budget. Authentication headers and protocol profiles beyond this initial
+binary WebSocket path are still open.
+
+Actual local Worker exchanges have succeeded, but an intermittent Worker
+shutdown anomaly remains under investigation. A host error stays a failure even
+when followed by a clean close event. This preview does not claim full Worker
+transport qualification or a deployed Cloudflare destination profile.

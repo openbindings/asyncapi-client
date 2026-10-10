@@ -104,12 +104,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamic-asyncapi-host"
+version = "0.0.0"
+dependencies = [
+ "dynamic-asyncapi-client",
+ "dynamic-asyncapi-session",
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "dynamic-asyncapi-native"
 version = "0.0.0"
 dependencies = [
  "bytes",
  "dynamic-asyncapi-client",
- "fluent-uri",
+ "dynamic-asyncapi-session",
  "futures-util",
  "rumqttc",
  "serde",
@@ -119,13 +131,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamic-asyncapi-session"
+version = "0.0.0"
+dependencies = [
+ "dynamic-asyncapi-client",
+ "fluent-uri",
+ "serde",
+]
+
+[[package]]
 name = "dynamic-asyncapi-wasm-bridge"
 version = "0.0.0"
 dependencies = [
  "dynamic-asyncapi-client",
+ "dynamic-asyncapi-host",
+ "js-sys",
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -251,6 +275,17 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "js-sys"
+version = "0.3.106"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "libc"
@@ -630,6 +665,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbab34de2d982e9b48e18d216d04c4a6f641066ff19ffb699980f591ee3610e"
+dependencies = [
+ "js-sys",
+ "tokio",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "wasm-bindgen-macro"
 version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -659,6 +705,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web-sys"
+version = "0.3.106"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

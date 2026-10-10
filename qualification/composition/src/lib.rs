@@ -57,3 +57,43 @@ mod tests {
         assert_eq!(facts[0]["address"], "events");
     }
 }
+
+/// Full transport execution remains inside this consumer's Rust/Wasm module.
+#[cfg(feature = "wasm")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub async fn exchange_from_outer_api(source: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+    use dynamic_asyncapi_client::PlanOptions;
+    use dynamic_asyncapi_host::{Incoming, Session, SessionOptions};
+    let document = Document::parse(source).map_err(|e| e.to_string())?;
+    let plans = ["emit", "listen"]
+        .into_iter()
+        .map(|id| {
+            document
+                .operation_id(id)?
+                .compile()?
+                .prepare(&PlanOptions::application())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(document);
+    let session = Session::open(&plans, SessionOptions::default(), None)
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(plans);
+    session
+        .sender()
+        .send(0, &payload)
+        .map_err(|e| e.to_string())?;
+    let received = loop {
+        match session.next(None).await.map_err(|e| e.to_string())? {
+            Some(Incoming::Message {
+                operation: 1,
+                payload,
+            }) => break payload,
+            Some(Incoming::Rejected { .. }) => {}
+            _ => return Err("outer Rust consumer did not receive its operation".into()),
+        }
+    };
+    session.close(None).await.map_err(|e| e.to_string())?;
+    Ok(received)
+}

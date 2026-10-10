@@ -11,7 +11,7 @@ if(!out) throw new Error('Provide an output directory for retained development e
 await mkdir(dirname(resolve(out)),{recursive:true});
 await mkdir(out);
 const report={classification:'dynamic-client development execution with independent peer observations; no independent authorship claim',independent:false,binarySha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],sourceHashes:{}};
-for(const file of ['peers.mjs','check-native.mjs','../../rust/Cargo.lock','../../rust/native/src/lib.rs','../../rust/native/src/wire.rs','../../rust/native/src/mqtt.rs','../../rust/native/src/websocket.rs','../../rust/native/examples/exchange.rs']) {report.sourceHashes[file]=createHash('sha256').update(await readFile(resolve(here,file))).digest('hex');}
+for(const file of ['peers.mjs','check-native.mjs','../../rust/Cargo.lock','../../rust/native/src/lib.rs','../../rust/session/src/plan.rs','../../rust/session/src/budget.rs','../../rust/session/src/error.rs','../../rust/native/src/mqtt.rs','../../rust/native/src/websocket.rs','../../rust/native/examples/exchange.rs']) {report.sourceHashes[file]=createHash('sha256').update(await readFile(resolve(here,file))).digest('hex');}
 async function run(protocol,edition,format,size,wrongRoute=false) {
  const peers=await startPeers();
  const name=`${protocol}-${edition}-${format}-${size}${wrongRoute?'-wrong-route':''}`;

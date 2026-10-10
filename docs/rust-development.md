@@ -5,10 +5,12 @@ The replacement is a standalone dynamic AsyncAPI client: portable Rust semantics
 | Location | Responsibility | Current status |
 | --- | --- | --- |
 | `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON/YAML inspection and pure MQTT/WebSocket preparation; reader families 2.6, 3.0, 3.1 |
+| `rust/session` | Portable admission, plan ownership, routing and shared payload quotas | Used by native and host runtimes |
+| `rust/host` | Rust-owned browser/Worker WebSocket callbacks and lifecycle | Binary execution, cancellation and bounded queues in development |
 | `rust/native` | Explicitly owned Tokio sessions and protocol drivers | Initial binary MQTT 3.1.1 QoS 1 and WebSocket over TCP |
-| `rust/wasm-bridge` | Private ABI for the TypeScript facade | Inspection, compilation and pure plan handles; no transport logic |
+| `rust/wasm-bridge` | Private ABI for the TypeScript facade | Owning inspection/plan/session handles; delegates host execution to Rust |
 | `packages/client` | Supported TypeScript API under development | Private preview; exact values, structured errors and deterministic disposal |
-| `qualification/composition` | External Rust consumer with optional outer Wasm API | Direct inspection and preparation calls; message exchange still required |
+| `qualification/composition` | External Rust consumer with optional outer Wasm API | Direct inspection, preparation and host WebSocket exchange inside an outer Rust/Wasm module |
 
 The target editions are 2.0–2.6, 3.0 and 3.1 in JSON and YAML. The native protocol target is MQTT 3.1.1/5, WebSocket, Kafka, AMQP 0-9-1, HTTP and Core NATS. Browser and Worker execution begins with WebSocket and HTTP clients. This table describes work in progress; neither accepting a version nor compiling Wasm establishes that target's support.
 
@@ -55,3 +57,19 @@ node qualification/fixtures/check-native.mjs /tmp/asyncapi-fixture-run
 ```
 
 Choose a fresh output directory; the runner refuses to overwrite a previous receipt. It preserves source documents, binary/source hashes, stdout/stderr and peer records, including a wrong-route control. Native Linux/macOS CI runs these fixtures and uploads the records. Native transport execution does not establish browser/Worker transport support.
+
+## Browser and Worker development
+
+The `dynamic-asyncapi-host` crate composes directly in Rust/Wasm and backs the
+TypeScript `openSession` API. It uses the ordinary WebSocket host interface,
+without arbitrary handshake headers. The first positive fixture is binary
+WebSocket over local TCP; TLS and broader profiles need their own evidence.
+Host send receipts mean acceptance into the host buffer, not socket flush or
+peer processing. See [host sessions](../rust/host/README.md).
+
+Chrome and local workerd have exercised binary exchange, cancellation, queue
+limits and callback release. Worker shutdown is not qualified: workerd
+1.20261006.1 intermittently emits an error followed by a clean close after
+traffic, also observed in a direct raw-host control. The client preserves the
+error; it does not silently relabel a failed session as successful. The cause
+and an appropriate host/profile resolution remain open.

@@ -1,4 +1,5 @@
 //! Private ABI used by the handwritten TypeScript facade. Not a second engine.
+mod session;
 use dynamic_asyncapi_client::{
     Code, CompiledOperation, Diagnostic, Document, Json, Operation, Plan, PlanOptions,
 };

@@ -11,7 +11,7 @@ readme = "README.md"
 
 [dependencies]
 dynamic-asyncapi-client = { path = "../client" }
-fluent-uri.workspace = true
+dynamic-asyncapi-session = { path = "../session" }
 serde.workspace = true
 bytes = "=1.12.1"
 rumqttc = { version = "=0.25.1", default-features = false }

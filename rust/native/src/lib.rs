@@ -4,57 +4,18 @@
 #![forbid(unsafe_code)]
 mod mqtt;
 mod websocket;
-mod wire;
 
 pub use bytes::Bytes;
-use dynamic_asyncapi_client::{Action, Plan};
+use dynamic_asyncapi_client::Plan;
+use dynamic_asyncapi_session::{Budget, ConnectionPlan as Connection, Lease, Limits, SessionPlan};
+pub use dynamic_asyncapi_session::{RuntimeCode, RuntimeError};
 use serde::Serialize;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, timeout},
 };
-use wire::Connection;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[non_exhaustive]
-pub enum RuntimeCode {
-    InvalidConfiguration,
-    Unsupported,
-    Closed,
-    Backpressure,
-    Deadline,
-    Connection,
-    Protocol,
-    DriverFailed,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RuntimeError {
-    pub code: RuntimeCode,
-    pub detail: &'static str,
-    /// On a failed send, bytes may have left the process without a final receipt.
-    pub delivery_unknown: bool,
-}
-impl RuntimeError {
-    fn new(code: RuntimeCode, detail: &'static str) -> Self {
-        Self {
-            code,
-            detail,
-            delivery_unknown: false,
-        }
-    }
-    fn uncertain(mut self) -> Self {
-        self.delivery_unknown = true;
-        self
-    }
-}
-impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}: {}", self.code, self.detail)
-    }
-}
-impl std::error::Error for RuntimeError {}
 
 /// Per-session credentials. Debug output never prints either value.
 #[derive(Clone)]
@@ -97,14 +58,16 @@ impl Default for SessionOptions {
     }
 }
 impl SessionOptions {
+    fn limits(&self) -> Limits {
+        Limits {
+            max_messages: self.max_messages,
+            max_buffered_bytes: self.max_buffered_bytes,
+            max_message_bytes: self.max_message_bytes,
+        }
+    }
     fn validate(&self) -> Result<(), RuntimeError> {
-        if self.max_messages == 0
-            || self.max_messages > 64
-            || self.max_buffered_bytes == 0
-            || self.max_buffered_bytes > 1024 * 1024
-            || self.max_message_bytes == 0
-            || self.max_message_bytes > self.max_buffered_bytes
-            || self.connect_timeout.is_zero()
+        self.limits().validate()?;
+        if self.connect_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.connect_timeout > Duration::from_secs(300)
             || self.operation_timeout > Duration::from_secs(300)
@@ -178,43 +141,6 @@ pub enum Incoming {
         payload_bytes: usize,
     },
 }
-struct Lease {
-    _messages: OwnedSemaphorePermit,
-    _bytes: OwnedSemaphorePermit,
-}
-#[derive(Clone)]
-struct Budget {
-    messages: Arc<Semaphore>,
-    bytes: Arc<Semaphore>,
-    max_message: usize,
-}
-impl Budget {
-    fn reserve(&self, bytes: usize) -> Result<Lease, RuntimeError> {
-        if bytes > self.max_message {
-            return Err(RuntimeError::new(
-                RuntimeCode::Backpressure,
-                "message exceeds the configured byte limit",
-            ));
-        }
-        let messages = self.messages.clone().try_acquire_owned().map_err(|_| {
-            RuntimeError::new(
-                RuntimeCode::Backpressure,
-                "session message capacity exhausted",
-            )
-        })?;
-        let bytes = self
-            .bytes
-            .clone()
-            .try_acquire_many_owned(bytes as u32)
-            .map_err(|_| {
-                RuntimeError::new(RuntimeCode::Backpressure, "session byte capacity exhausted")
-            })?;
-        Ok(Lease {
-            _messages: messages,
-            _bytes: bytes,
-        })
-    }
-}
 struct Queued {
     incoming: Incoming,
     _lease: Lease,
@@ -242,7 +168,7 @@ impl SendCommand {
 }
 #[derive(Clone)]
 struct Context {
-    plans: Arc<[Plan]>,
+    plans: SessionPlan,
     events: mpsc::Sender<Queued>,
     budget: Budget,
     options: SessionOptions,
@@ -272,7 +198,7 @@ impl Context {
 #[derive(Clone)]
 pub struct Sender {
     commands: mpsc::Sender<SendCommand>,
-    plans: Arc<[Plan]>,
+    plans: SessionPlan,
     budget: Budget,
     terminal: watch::Receiver<SessionState>,
     shutdown: watch::Receiver<bool>,
@@ -291,18 +217,7 @@ impl Sender {
             error.delivery_unknown = false;
             return Err(error);
         }
-        let plan = self.plans.get(operation).ok_or_else(|| {
-            RuntimeError::new(
-                RuntimeCode::InvalidConfiguration,
-                "operation index is not attached to this session",
-            )
-        })?;
-        if plan.describe().wire_action != Action::Send {
-            return Err(RuntimeError::new(
-                RuntimeCode::InvalidConfiguration,
-                "operation is a receive operation",
-            ));
-        }
+        let plan = self.plans.send_plan(operation)?;
         let payload = payload.into();
         let _ = plan.prepare_bytes(&payload);
         let lease = self.budget.reserve(payload.len())?;
@@ -350,19 +265,32 @@ pub struct Session {
 impl Session {
     pub async fn open(plans: &[Plan], options: SessionOptions) -> Result<Self, RuntimeError> {
         options.validate()?;
-        let connection = Connection::from_plans(plans, &options)?;
+        let plans = SessionPlan::new(plans)?;
+        let connection = plans.connection().clone();
+        match &connection {
+            Connection::Mqtt(settings) if settings.tls => {
+                return Err(RuntimeError::new(
+                    RuntimeCode::Unsupported,
+                    "native TLS support is not enabled in this execution slice",
+                ));
+            }
+            Connection::WebSocket(endpoint)
+                if !endpoint.starts_with("ws://") || options.credentials.is_some() =>
+            {
+                return Err(RuntimeError::new(
+                    RuntimeCode::Unsupported,
+                    "initial native WebSocket execution requires ws and no MQTT credentials",
+                ));
+            }
+            _ => {}
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(RuntimeError::new(
                 RuntimeCode::InvalidConfiguration,
                 "native sessions require a Tokio runtime",
             ));
         }
-        let plans: Arc<[Plan]> = plans.into();
-        let budget = Budget {
-            messages: Arc::new(Semaphore::new(options.max_messages)),
-            bytes: Arc::new(Semaphore::new(options.max_buffered_bytes)),
-            max_message: options.max_message_bytes,
-        };
+        let budget = Budget::new(options.limits())?;
         let (events, receiver) = mpsc::channel(options.max_messages);
         let context = Context {
             plans: plans.clone(),

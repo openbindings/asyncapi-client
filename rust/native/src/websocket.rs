@@ -2,7 +2,7 @@ use crate::{
     CloseReceipt, Context, Delivery, Incoming, Receipt, Received, RuntimeCode, RuntimeError,
     SendCommand,
 };
-use dynamic_asyncapi_client::Action;
+use dynamic_asyncapi_session::Route;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::{
@@ -33,10 +33,6 @@ pub(crate) async fn run<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin 
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<CloseReceipt, RuntimeError> {
     let (mut writer, mut reader) = socket.split();
-    let receive_operation = context
-        .plans
-        .iter()
-        .position(|p| p.describe().wire_action == Action::Receive);
     let mut closing: Option<Instant> = None;
     loop {
         let deadline = closing.unwrap_or_else(|| Instant::now() + Duration::from_secs(300));
@@ -61,7 +57,7 @@ pub(crate) async fn run<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin 
                             result=&mut writing=> { result.map_err(|_|RuntimeError::new(RuntimeCode::Deadline,"WebSocket flush deadline expired").uncertain())?.map_err(|error|driver_error(error).uncertain())?;break; },
                             incoming=reader.next()=> {
                                 let message=incoming.ok_or_else(||RuntimeError::new(RuntimeCode::Connection,"WebSocket ended while flushing").uncertain())?.map_err(|error|driver_error(error).uncertain())?;
-                                if matches!(observe(&context,receive_operation,message)?,Observed::Close) { peer_closed=true; }
+                                if matches!(observe(&context,message)?,Observed::Close) { peer_closed=true; }
                             }
                         }
                     }
@@ -71,7 +67,7 @@ pub(crate) async fn run<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin 
             },
             incoming=reader.next()=> {
                 let message=incoming.ok_or_else(||RuntimeError::new(RuntimeCode::Connection,"WebSocket ended without a close handshake"))?.map_err(driver_error)?;
-                match observe(&context,receive_operation,message)? {
+                match observe(&context,message)? {
                     Observed::Data=>{},
                     Observed::Control=> {
                         timeout(context.options.operation_timeout,writer.flush()).await.map_err(|_|RuntimeError::new(RuntimeCode::Deadline,"WebSocket control flush deadline expired"))?.map_err(driver_error)?;
@@ -91,20 +87,16 @@ enum Observed {
     Control,
     Close,
 }
-fn observe(
-    context: &Context,
-    receive_operation: Option<usize>,
-    message: Message,
-) -> Result<Observed, RuntimeError> {
+fn observe(context: &Context, message: Message) -> Result<Observed, RuntimeError> {
     match message {
-        Message::Binary(payload) => match receive_operation {
-            Some(operation) => context.deliver(Incoming::Message(Received {
+        Message::Binary(payload) => match context.plans.websocket_route(true) {
+            Route::Operation(operation) => context.deliver(Incoming::Message(Received {
                 operation,
                 payload,
                 delivery: Delivery::WebSocket,
             }))?,
-            None => context.deliver(Incoming::Rejected {
-                reason: "binary WebSocket frame has no attached receive operation",
+            Route::Rejected(reason) => context.deliver(Incoming::Rejected {
+                reason,
                 payload_bytes: payload.len(),
             })?,
         },
@@ -148,28 +140,29 @@ fn driver_error(error: tokio_tungstenite::tungstenite::Error) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Budget, SessionOptions};
+    use crate::{Budget, Limits, SessionOptions, SessionPlan};
     use dynamic_asyncapi_client::{Document, PlanOptions};
-    use std::sync::Arc;
-    use tokio::sync::{Semaphore, oneshot};
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn simultaneous_writes_progress_with_only_sixty_four_bytes_of_transport_capacity() {
         let source = r##"{"asyncapi":"3.1.0","info":{"title":"duplex","version":"1"},"servers":{"s":{"host":"localhost","protocol":"ws"}},"channels":{"c":{"address":"/","messages":{"m":{"contentType":"application/octet-stream"}}}},"operations":{"send":{"action":"send","channel":{"$ref":"#/channels/c"}},"receive":{"action":"receive","channel":{"$ref":"#/channels/c"}}}}"##;
         let document = Document::parse(source).unwrap();
-        let plans: Arc<[_]> = vec!["send", "receive"]
-            .into_iter()
-            .map(|name| {
-                document
-                    .operation_id(name)
-                    .unwrap()
-                    .compile()
-                    .unwrap()
-                    .prepare(&PlanOptions::application())
-                    .unwrap()
-            })
-            .collect::<Vec<_>>()
-            .into();
+        let plans = SessionPlan::new(
+            &vec!["send", "receive"]
+                .into_iter()
+                .map(|name| {
+                    document
+                        .operation_id(name)
+                        .unwrap()
+                        .compile()
+                        .unwrap()
+                        .prepare(&PlanOptions::application())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let (client, server) = tokio::io::duplex(64);
         let (client, server) = tokio::join!(
             tokio_tungstenite::client_async("ws://localhost/", client),
@@ -178,11 +171,12 @@ mod tests {
         let client = client.unwrap().0;
         let mut server = server.unwrap();
         let (events, mut received) = mpsc::channel(4);
-        let budget = Budget {
-            messages: Arc::new(Semaphore::new(4)),
-            bytes: Arc::new(Semaphore::new(2048)),
-            max_message: 1024,
-        };
+        let budget = Budget::new(Limits {
+            max_messages: 4,
+            max_buffered_bytes: 2048,
+            max_message_bytes: 1024,
+        })
+        .unwrap();
         let context = Context {
             plans,
             events,

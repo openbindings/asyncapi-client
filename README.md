@@ -12,7 +12,9 @@ This repository is also the execution substrate used by the OpenBindings AsyncAP
 > [`packages/client/`](packages/client/README.md). It currently supports JSON
 > and YAML admission, operation inspection, and pure binary MQTT/WebSocket plans.
 > The initial native runtime executes binary MQTT 3.1.1 QoS 1 and WebSocket
-> interactions over TCP. Full profile/edition conformance remains in development. See [Rust development](docs/rust-development.md).
+> interactions over TCP. A Rust host runtime and TypeScript session API now
+> exercise browser/Worker WebSocket traffic; host qualification remains open.
+> Full profile/edition conformance remains in development. See [Rust development](docs/rust-development.md).
 >
 > Existing Go and independent TypeScript engines are retained for transition.
 > The invocation examples and conformance claims below describe those legacy

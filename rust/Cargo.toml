@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["client", "wasm-bridge", "native"]
+members = ["client", "wasm-bridge", "native", "session", "host"]
 
 [workspace.package]
 edition = "2024"
