@@ -4,7 +4,7 @@ The replacement is a standalone dynamic AsyncAPI client: portable Rust semantics
 
 | Location | Responsibility | Current status |
 | --- | --- | --- |
-| `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON source/inspection prototype; reader families 2.6, 3.0, 3.1 |
+| `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON/YAML source/inspection prototype; reader families 2.6, 3.0, 3.1 |
 | `rust/wasm-bridge` | Private ABI for the TypeScript facade | Inspection/owning handles; no transport logic |
 | `packages/client` | Supported TypeScript API under development | Private preview; exact values, structured errors and deterministic disposal |
 | `qualification/composition` | External Rust consumer with optional outer Wasm API | Direct inspection calls; preparation/message exchange still required |
@@ -39,6 +39,6 @@ The package currently lives outside the legacy pnpm workspace to avoid resolving
 
 Source admission rejects duplicate decoded JSON keys, retains original byte ranges and exact numeric tokens, and bounds source size, depth, nodes and reference/trait work. Limits are development policy, not completed performance qualification. The implementation's depth ceiling is 96. Each document/resource completion is immutable; retained operations and source views own their data.
 
-Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. Effective-field source traces, complete message/server inspection, YAML, preparation, drivers and payload schemas remain open.
+Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait-field source traces, complete message/server inspection, broader format qualification, preparation, drivers and payload schemas remain open.
 
 Development assertions are regression evidence. Independent wire observations, installed-package consumers, memory/performance budgets, long runs and fresh conformance challenges are required before mature-product claims. The prior Go/TypeScript behavior is not an oracle for new semantics.

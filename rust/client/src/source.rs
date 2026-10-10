@@ -6,12 +6,15 @@ use std::{
     sync::Arc,
 };
 
-/// Coordinates in an original UTF-8 source, not a reserialized document.
+/// Original UTF-8 byte coordinates plus a logical JSON Pointer. Alias expansion
+/// identifies the defining value and its use sites, never normalized byte ranges.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Location {
     pub uri: Option<String>,
     pub pointer: String,
     pub bytes: Range<usize>,
+    /// Alias-use ranges leading to this defining value, outermost first.
+    pub aliases: Vec<Range<usize>>,
 }
 
 #[derive(Debug)]
@@ -20,6 +23,9 @@ pub(crate) struct Source {
     pub text: Arc<str>,
     pub value: Value,
     spans: BTreeMap<String, Range<usize>>,
+    aliases: BTreeMap<String, Vec<Range<usize>>>,
+    numbers: BTreeMap<String, String>,
+    yaml: bool,
 }
 
 impl Source {
@@ -28,8 +34,18 @@ impl Source {
             return Err(Diagnostic::new(Code::Limit, "source byte limit exceeded"));
         }
         // Validate syntax without first materializing an unbounded Value tree.
-        let _: &RawValue = serde_json::from_str(text)
-            .map_err(|_| Diagnostic::new(Code::InvalidJson, "invalid JSON source"))?;
+        if serde_json::from_str::<&RawValue>(text).is_err() {
+            let parsed = crate::yaml::parse(text, uri.as_deref(), limits)?;
+            return Ok(Arc::new(Self {
+                uri,
+                text: Arc::from(text),
+                value: parsed.value,
+                spans: parsed.spans,
+                aliases: parsed.aliases,
+                numbers: parsed.numbers,
+                yaml: true,
+            }));
+        }
         let mut scanner = Scanner {
             text,
             uri: uri.clone(),
@@ -44,6 +60,9 @@ impl Source {
             text: Arc::from(text),
             value,
             spans: scanner.spans,
+            aliases: BTreeMap::new(),
+            numbers: BTreeMap::new(),
+            yaml: false,
         }))
     }
     pub fn root(self: &Arc<Self>) -> Json {
@@ -82,6 +101,12 @@ impl Json {
             uri: self.source.uri.clone(),
             pointer: self.pointer.clone(),
             bytes: self.source.spans[&self.pointer].clone(),
+            aliases: self
+                .source
+                .aliases
+                .get(&self.pointer)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
     pub fn source_text(&self) -> &str {
@@ -99,13 +124,53 @@ impl Json {
     pub fn is_null(&self) -> bool {
         self.value().is_null()
     }
-    /// The authored numeric token, including negative zero and exponent spelling.
+    /// Exact JSON numeric token. JSON keeps its authored spelling; YAML radix and
+    /// non-JSON decimal spellings normalize without floating-point conversion.
     pub fn number_text(&self) -> Option<&str> {
-        self.value().is_number().then(|| self.raw())
+        self.value().is_number().then(|| {
+            self.source
+                .numbers
+                .get(&self.pointer)
+                .map_or_else(|| self.raw(), String::as_str)
+        })
     }
-    /// Original JSON for this value, preserving all numeric tokens and members.
+    /// JSON for this logical value. YAML values preserve exact numbers, while
+    /// formatting/escapes use JSON. `raw()` separately returns authored source.
     pub fn to_json(&self) -> String {
-        self.raw().to_owned()
+        if !self.source.yaml {
+            return self.raw().to_owned();
+        }
+        let mut output = String::new();
+        self.write_json(&mut output);
+        output
+    }
+    fn write_json(&self, output: &mut String) {
+        match self.value() {
+            Value::Number(_) => output.push_str(self.number_text().unwrap()),
+            Value::Array(values) => {
+                output.push('[');
+                for index in 0..values.len() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    self.at(index).unwrap().write_json(output);
+                }
+                output.push(']');
+            }
+            Value::Object(fields) => {
+                output.push('{');
+                for (index, key) in fields.keys().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(&serde_json::to_string(key).unwrap());
+                    output.push(':');
+                    self.get(key).unwrap().write_json(output);
+                }
+                output.push('}');
+            }
+            value => output.push_str(&value.to_string()),
+        }
     }
     pub fn get(&self, key: &str) -> Option<Self> {
         self.value().as_object()?.get(key)?;
@@ -201,6 +266,7 @@ impl Scanner<'_> {
             uri: self.uri.clone(),
             pointer: pointer.into(),
             bytes: start..self.at,
+            aliases: Vec::new(),
         })
     }
     fn value(&mut self, pointer: String, depth: usize) -> Result<Value, Diagnostic> {

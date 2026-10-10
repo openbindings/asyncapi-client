@@ -6,6 +6,23 @@ import { AsyncApiError, createClient } from '../dist/index.js';
 const client = await createClient({ wasm: await readFile(new URL('../wasm/asyncapi_bg.wasm', import.meta.url)) });
 const source = '{"asyncapi":"3.1.0","info":{"title":"test","version":"1"},"channels":{"events":{"address":null}},"operations":{"emit":{"action":"send","channel":{"$ref":"#/channels/events"}}},"x-data":{"huge":900719925474099312345,"zero":-0,"nil":null}}';
 
+test('YAML values retain exact JSON and explicit alias provenance', () => {
+  const source = "asyncapi: 2.6.0\ninfo: {title: YAML, version: '1'}\nchannels:\n  events:\n    subscribe: {operationId: emit}\nx-base: &base {n: 0xffffffffffffffffffff}\nx-copy: *base\n";
+  const document = client.parse(source);
+  const operation = document.operation('emit');
+  const root = document.root;
+  const value = root.pointer('/x-copy/n');
+  assert.equal(operation.describe().action, 'send');
+  assert.equal(value.numberText, '1208925819614629174706175');
+  assert.equal(value.raw, '0xffffffffffffffffffff');
+  assert.equal(value.json, '1208925819614629174706175');
+  assert.equal(value.location.aliases.length, 1);
+  assert.equal(value.location.pointer, '/x-copy/n');
+  operation.dispose(); root.dispose(); document.dispose();
+  assert.equal(value.json, '1208925819614629174706175');
+  value.dispose();
+});
+
 test('public facade uses native identity, authored locations, and application direction', () => {
   const document = client.parse(source, { sourceUri:'https://example.test/api.json' });
   const op = document.operation('emit');

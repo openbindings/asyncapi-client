@@ -1,11 +1,12 @@
 //! A standalone AsyncAPI semantic engine with explicit source ownership.
 //!
-//! Source admission and inspection are currently implemented for JSON documents.
+//! Source admission and inspection are implemented for JSON and YAML documents.
 //! Admission is not whole-document or payload validation. No method performs I/O.
 #![forbid(unsafe_code)]
 
 mod document;
 mod source;
+mod yaml;
 
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};
 pub use source::{Json, Location};
@@ -15,6 +16,8 @@ pub use source::{Json, Location};
 #[non_exhaustive]
 pub enum Code {
     InvalidJson,
+    InvalidYaml,
+    UnsupportedYaml,
     DuplicateMember,
     InvalidDocument,
     UnsupportedVersion,
@@ -42,7 +45,7 @@ pub enum Requirement {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Diagnostic {
     pub code: Code,
-    pub location: Option<Location>,
+    pub location: Option<Box<Location>>,
     pub requirement: Option<Requirement>,
     pub detail: String,
 }
@@ -57,7 +60,7 @@ impl Diagnostic {
         }
     }
     pub(crate) fn at(mut self, location: Location) -> Self {
-        self.location = Some(location);
+        self.location = Some(Box::new(location));
         self
     }
     pub(crate) fn needs(mut self, requirement: Requirement) -> Self {
@@ -85,6 +88,10 @@ pub struct Limits {
     pub reference_steps: usize,
     pub trait_count: usize,
     pub merge_nodes: usize,
+    /// Maximum JSON bytes represented by an expanded YAML value graph.
+    pub expanded_bytes: usize,
+    /// Aggregate squared radix-digit count admitted for exact YAML conversion.
+    pub number_conversion_work: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -97,6 +104,8 @@ impl Default for Limits {
             reference_steps: 64,
             trait_count: 64,
             merge_nodes: 500_000,
+            expanded_bytes: 16 * 1024 * 1024,
+            number_conversion_work: 4_000_000,
         }
     }
 }

@@ -4,6 +4,7 @@ export interface SourceLocation {
   readonly uri: string | null;
   readonly pointer: string;
   readonly bytes: { readonly start: number; readonly end: number };
+  readonly aliases: ReadonlyArray<{ readonly start: number; readonly end: number }>;
 }
 export interface OperationIdentity { readonly uri: string | null; readonly pointer: string }
 export type Requirement = { readonly kind: 'sourceUri' } | { readonly kind: 'resource'; readonly uri: string };
@@ -78,7 +79,7 @@ export interface Client {
   parse(source: string, options?: { sourceUri?: string }): Document;
 }
 class RustClient implements Client {
-  /** Parses original JSON source; admission is not full document validation. */
+  /** Parses original JSON/YAML source; admission is not full document validation. */
   parse(source: string, options: { sourceUri?: string } = {}): Document {
     return call(() => new Document(new DocumentHandle(source, options.sourceUri)));
   }
@@ -127,6 +128,7 @@ export class JsonView extends Owner<JsonHandle> {
   }
   get location(): SourceLocation { return JSON.parse(this.handle.location_json()) as SourceLocation; }
   get raw(): string { return this.handle.raw(); }
+  get json(): string { return this.handle.json(); }
   get numberText(): string | undefined { return this.handle.number_text(); }
   get string(): string | undefined { return this.handle.string(); }
   get boolean(): boolean | undefined { return this.handle.boolean(); }

@@ -82,6 +82,9 @@ impl JsonHandle {
         self.0.kind().into()
     }
     pub fn raw(&self) -> String {
+        self.0.raw().into()
+    }
+    pub fn json(&self) -> String {
         self.0.to_json()
     }
     pub fn location_json(&self) -> String {
