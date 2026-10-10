@@ -1,0 +1,2774 @@
+#![doc = include_str!("../README.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+#[cfg(all(feature = "use-rustls-ring", feature = "use-rustls-aws-lc"))]
+compile_error!(
+    "Features `use-rustls-ring` and `use-rustls-aws-lc` are mutually exclusive. Enable only one rustls provider feature."
+);
+
+#[macro_use]
+extern crate log;
+
+use bytes::Bytes;
+use std::fmt::{self, Debug, Formatter};
+use std::io;
+use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::{TcpStream, lookup_host};
+use tokio::task::JoinSet;
+
+#[cfg(all(feature = "url", unix))]
+use percent_encoding::percent_decode_str;
+
+#[cfg(all(feature = "url", unix))]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+mod client;
+mod eventloop;
+mod framed;
+#[cfg(feature = "tracing")]
+mod instrumentation;
+pub mod mqttbytes;
+mod notice;
+mod session;
+mod state;
+mod transport;
+
+#[cfg(any(feature = "use-rustls-no-provider", feature = "use-native-tls"))]
+mod tls;
+
+#[cfg(feature = "websocket")]
+mod websockets;
+
+#[cfg(feature = "websocket")]
+use std::{
+    future::{Future, IntoFuture},
+    pin::Pin,
+};
+
+#[cfg(feature = "websocket")]
+type RequestModifierError = Box<dyn std::error::Error + Send + Sync>;
+
+#[cfg(feature = "websocket")]
+type RequestModifierFn = Arc<
+    dyn Fn(http::Request<()>) -> Pin<Box<dyn Future<Output = http::Request<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(feature = "websocket")]
+type FallibleRequestModifierFn = Arc<
+    dyn Fn(
+            http::Request<()>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<http::Request<()>, RequestModifierError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(feature = "proxy")]
+mod proxy;
+
+pub use client::{
+    AsyncClient, AsyncClientBuilder, Client, ClientBuildError, ClientBuilder, ClientError,
+    Connection, IntoPublishPayload, InvalidTopic, InvalidTopicFilter, Iter, ManualAck,
+    PublishOptions, PublishTopic, RecvError, RecvTimeoutError, SubscribeFilterInput, TopicFilter,
+    TryRecvError, ValidatedTopic, ValidatedTopicFilter,
+};
+pub use eventloop::{
+    ConnectionError, Event, EventLoop, EventLoopDiagnostics, QueueDiagnostics,
+    RuntimeConfigDiagnostics, SessionDiagnostics,
+};
+pub use mqttbytes::v4::*;
+pub use mqttbytes::*;
+pub use notice::{
+    NoticeFailureReason, PublishNotice, PublishNoticeError, PublishResult, SubscribeNotice,
+    SubscribeNoticeError, UnsubscribeNotice, UnsubscribeNoticeError,
+};
+pub use rumqttc_core::NetworkOptions;
+#[cfg(any(feature = "use-rustls-no-provider", feature = "use-native-tls"))]
+pub use rumqttc_core::TlsConfiguration;
+pub use rumqttc_core::default_socket_connect;
+pub use session::{
+    PersistedAckMode, PersistedFilter, PersistedIncomingQos2, PersistedPubRel, PersistedPublish,
+    PersistedQoS, PersistedRequest, PersistedSession, PersistedSubscribe, PersistedUnsubscribe,
+    SessionDecodeError, SessionEncodeError, SessionRestoreError, SessionStore, SessionStoreError,
+    SessionStoreKey,
+};
+pub use state::{MqttState, MqttStateBuilder, OutboundDiagnostics, ProtocolViolation, StateError};
+#[cfg(any(feature = "use-rustls-no-provider", feature = "use-native-tls"))]
+pub use tls::Error as TlsError;
+#[cfg(feature = "use-native-tls")]
+pub use tokio_native_tls;
+#[cfg(feature = "use-rustls-no-provider")]
+pub use tokio_rustls;
+pub use transport::Transport;
+
+#[cfg(feature = "proxy")]
+pub use proxy::{Proxy, ProxyAuth, ProxyType};
+
+pub type Incoming = Packet;
+
+/// Session lifetime mode for MQTT client state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionMode {
+    /// Start with a clean broker session on each connection.
+    Clean,
+    /// Reuse broker-retained session state across reconnects.
+    Persistent,
+}
+
+/// Controls how incoming publish acknowledgements are handled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AckMode {
+    /// Automatically send the MQTT-required response for incoming publishes.
+    ///
+    /// This is the fully protocol-managed path. Incoming `QoS` 0 publishes get
+    /// no response, incoming `QoS` 1 publishes get `PUBACK`, and incoming
+    /// `QoS` 2 publishes get `PUBREC`.
+    #[default]
+    Automatic,
+    /// Leave incoming publish acknowledgement completion to the application.
+    ///
+    /// This is an advanced, application-managed mode. The client suppresses
+    /// automatic `PUBACK`/`PUBREC` for incoming `QoS` 1/`QoS` 2 publishes.
+    /// Applications must acknowledge every such publish with [`Client::ack`],
+    /// [`AsyncClient::ack`], or `prepare_ack(...)` plus `manual_ack(...)` to
+    /// remain MQTT-compliant. The library validates manual ACK packet IDs and
+    /// rejects invalid or duplicate ACKs, but it cannot guarantee eventual ACK
+    /// completion by the application.
+    Manual,
+}
+
+/// Current outgoing activity on the eventloop
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outgoing {
+    /// Publish packet with packet identifier. 0 implies `QoS` 0
+    Publish(u16),
+    /// Subscribe packet with packet identifier
+    Subscribe(u16),
+    /// Unsubscribe packet with packet identifier
+    Unsubscribe(u16),
+    /// `PubAck` packet
+    PubAck(u16),
+    /// `PubRec` packet
+    PubRec(u16),
+    /// `PubRel` packet
+    PubRel(u16),
+    /// `PubComp` packet
+    PubComp(u16),
+    /// Ping request packet
+    PingReq,
+    /// Ping response packet
+    PingResp,
+    /// Disconnect packet
+    Disconnect,
+    /// Await for an ack for more outgoing progress
+    AwaitAck(u16),
+}
+
+/// An MQTT operation request generated by a client.
+///
+/// Normally constructed clients route these requests to their associated [`EventLoop`].
+/// [`AsyncClient::from_senders`] and [`Client::from_sender`] instead expose them through a
+/// caller-supplied Flume channel for request capture or bespoke processing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Publish(Publish),
+    PubAck(PubAck),
+    PubRec(PubRec),
+    PubComp(PubComp),
+    PubRel(PubRel),
+    PingReq,
+    PingResp,
+    Subscribe(Subscribe),
+    SubAck(SubAck),
+    Unsubscribe(Unsubscribe),
+    UnsubAck(UnsubAck),
+    Disconnect(Disconnect),
+    DisconnectNow(Disconnect),
+    DisconnectWithTimeout(Disconnect, Duration),
+}
+
+impl From<Publish> for Request {
+    fn from(publish: Publish) -> Self {
+        Self::Publish(publish)
+    }
+}
+
+impl From<Subscribe> for Request {
+    fn from(subscribe: Subscribe) -> Self {
+        Self::Subscribe(subscribe)
+    }
+}
+
+impl From<Unsubscribe> for Request {
+    fn from(unsubscribe: Unsubscribe) -> Self {
+        Self::Unsubscribe(unsubscribe)
+    }
+}
+
+/// Custom socket connector used to establish the underlying stream before optional proxy/TLS layers.
+pub(crate) type SocketConnector = rumqttc_core::SocketConnector;
+
+const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(100);
+
+async fn first_success_with_stagger<T, I, F, Fut>(
+    items: I,
+    attempt_delay: Duration,
+    connect_fn: F,
+) -> io::Result<T>
+where
+    T: Send + 'static,
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    F: Fn(I::Item) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = io::Result<T>> + Send + 'static,
+{
+    let mut join_set = JoinSet::new();
+    let mut item_count = 0usize;
+
+    for (index, item) in items.into_iter().enumerate() {
+        item_count += 1;
+        let delay = attempt_delay.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
+        let connect_fn = connect_fn.clone();
+        join_set.spawn(async move {
+            tokio::time::sleep(delay).await;
+            connect_fn(item).await
+        });
+    }
+
+    if item_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not resolve to any address",
+        ));
+    }
+
+    let mut last_err = None;
+
+    while let Some(task_result) = join_set.join_next().await {
+        match task_result {
+            Ok(Ok(stream)) => {
+                join_set.abort_all();
+                return Ok(stream);
+            }
+            Ok(Err(err)) => {
+                last_err = Some(err);
+            }
+            Err(err) => {
+                last_err = Some(io::Error::other(format!(
+                    "concurrent connect task failed: {err}"
+                )));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not resolve to any address",
+        )
+    }))
+}
+
+async fn first_success_sequential<T, I, F, Fut>(items: I, connect_fn: F) -> io::Result<T>
+where
+    I: IntoIterator,
+    F: Fn(I::Item) -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>>,
+{
+    let mut item_count = 0usize;
+    let mut last_err = None;
+
+    for item in items {
+        item_count += 1;
+        match connect_fn(item).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    if item_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not resolve to any address",
+        ));
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not resolve to any address",
+        )
+    }))
+}
+
+fn should_stagger_connect_attempts(network_options: &NetworkOptions) -> bool {
+    network_options
+        .bind_addr()
+        .is_none_or(|bind_addr| bind_addr.port() == 0)
+}
+
+async fn connect_with_retry_mode<T, I, F, Fut>(
+    items: I,
+    network_options: NetworkOptions,
+    connect_fn: F,
+) -> io::Result<T>
+where
+    T: Send + 'static,
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    F: Fn(I::Item, NetworkOptions) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = io::Result<T>> + Send + 'static,
+{
+    connect_with_retry_mode_and_delay(items, network_options, CONNECTION_ATTEMPT_DELAY, connect_fn)
+        .await
+}
+
+async fn connect_with_retry_mode_and_delay<T, I, F, Fut>(
+    items: I,
+    network_options: NetworkOptions,
+    connection_attempt_delay: Duration,
+    connect_fn: F,
+) -> io::Result<T>
+where
+    T: Send + 'static,
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    F: Fn(I::Item, NetworkOptions) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = io::Result<T>> + Send + 'static,
+{
+    if should_stagger_connect_attempts(&network_options) {
+        first_success_with_stagger(items, connection_attempt_delay, move |item| {
+            let network_options = network_options.clone();
+            let connect_fn = connect_fn.clone();
+            async move { connect_fn(item, network_options).await }
+        })
+        .await
+    } else {
+        first_success_sequential(items, move |item| {
+            let network_options = network_options.clone();
+            let connect_fn = connect_fn.clone();
+            async move { connect_fn(item, network_options).await }
+        })
+        .await
+    }
+}
+
+async fn connect_resolved_addrs_staggered(
+    addrs: Vec<SocketAddr>,
+    network_options: NetworkOptions,
+) -> io::Result<TcpStream> {
+    connect_with_retry_mode(
+        addrs,
+        network_options,
+        move |addr, network_options| async move {
+            rumqttc_core::connect_socket_addr(addr, network_options).await
+        },
+    )
+    .await
+}
+
+async fn default_socket_connect_staggered(
+    host: String,
+    network_options: NetworkOptions,
+) -> io::Result<TcpStream> {
+    let addrs = lookup_host(host).await?.collect::<Vec<_>>();
+    connect_resolved_addrs_staggered(addrs, network_options).await
+}
+
+fn default_socket_connector() -> SocketConnector {
+    Arc::new(|host, network_options| {
+        Box::pin(async move {
+            let tcp = default_socket_connect_staggered(host, network_options).await?;
+            let stream: Box<dyn crate::framed::AsyncReadWrite> = Box::new(tcp);
+            Ok(stream)
+        })
+    })
+}
+
+const DEFAULT_BROKER_PORT: u16 = 1883;
+
+/// Broker target used to construct [`MqttOptions`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Broker {
+    inner: BrokerInner,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BrokerInner {
+    Tcp {
+        host: String,
+        port: u16,
+    },
+    #[cfg(unix)]
+    Unix {
+        path: PathBuf,
+    },
+    #[cfg(feature = "websocket")]
+    Websocket {
+        url: String,
+        secure: bool,
+    },
+}
+
+impl Broker {
+    #[must_use]
+    pub fn tcp<S: Into<String>>(host: S, port: u16) -> Self {
+        Self {
+            inner: BrokerInner::Tcp {
+                host: host.into(),
+                port,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[must_use]
+    pub fn unix<P: Into<PathBuf>>(path: P) -> Self {
+        Self {
+            inner: BrokerInner::Unix { path: path.into() },
+        }
+    }
+
+    #[cfg(feature = "websocket")]
+    /// # Errors
+    ///
+    /// Returns [`OptionError::WebsocketUrl`] when `url` is not a valid websocket URL or cannot
+    /// be split into broker components, [`OptionError::WssRequiresExplicitTransport`] for `wss://`
+    /// URLs, and [`OptionError::Scheme`] for unsupported schemes.
+    pub fn websocket<S: Into<String>>(url: S) -> Result<Self, OptionError> {
+        let url = url.into();
+        let uri = url
+            .parse::<http::Uri>()
+            .map_err(|_| OptionError::WebsocketUrl)?;
+
+        match uri.scheme_str() {
+            Some("ws") => {
+                rumqttc_core::split_url(&url).map_err(|_| OptionError::WebsocketUrl)?;
+                Ok(Self {
+                    inner: BrokerInner::Websocket { url, secure: false },
+                })
+            }
+            Some("wss") => Err(OptionError::WssRequiresExplicitTransport),
+            _ => Err(OptionError::Scheme),
+        }
+    }
+
+    #[cfg(all(
+        any(feature = "use-rustls-no-provider", feature = "use-native-tls"),
+        feature = "websocket"
+    ))]
+    fn secure_websocket<S: Into<String>>(url: S) -> Result<Self, OptionError> {
+        let url = url.into();
+        let uri = url
+            .parse::<http::Uri>()
+            .map_err(|_| OptionError::WebsocketUrl)?;
+
+        match uri.scheme_str() {
+            Some("wss") => {
+                rumqttc_core::split_url(&url).map_err(|_| OptionError::WebsocketUrl)?;
+                Ok(Self {
+                    inner: BrokerInner::Websocket { url, secure: true },
+                })
+            }
+            Some("ws") => Err(OptionError::WssUrlRequired),
+            _ => Err(OptionError::Scheme),
+        }
+    }
+
+    #[must_use]
+    pub const fn tcp_address(&self) -> Option<(&str, u16)> {
+        match &self.inner {
+            BrokerInner::Tcp { host, port } => Some((host.as_str(), *port)),
+            #[cfg(unix)]
+            BrokerInner::Unix { .. } => None,
+            #[cfg(feature = "websocket")]
+            BrokerInner::Websocket { .. } => None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[must_use]
+    pub fn unix_path(&self) -> Option<&std::path::Path> {
+        match &self.inner {
+            BrokerInner::Unix { path } => Some(path.as_path()),
+            BrokerInner::Tcp { .. } => None,
+            #[cfg(feature = "websocket")]
+            BrokerInner::Websocket { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "websocket")]
+    #[must_use]
+    pub const fn websocket_url(&self) -> Option<&str> {
+        match &self.inner {
+            BrokerInner::Websocket { url, .. } => Some(url.as_str()),
+            BrokerInner::Tcp { .. } => None,
+            #[cfg(unix)]
+            BrokerInner::Unix { .. } => None,
+        }
+    }
+
+    pub(crate) const fn default_transport(&self) -> Transport {
+        match &self.inner {
+            BrokerInner::Tcp { .. } => Transport::tcp(),
+            #[cfg(unix)]
+            BrokerInner::Unix { .. } => Transport::unix(),
+            #[cfg(feature = "websocket")]
+            BrokerInner::Websocket { .. } => Transport::Ws,
+        }
+    }
+}
+
+impl From<&str> for Broker {
+    fn from(host: &str) -> Self {
+        Self::tcp(host, DEFAULT_BROKER_PORT)
+    }
+}
+
+impl From<String> for Broker {
+    fn from(host: String) -> Self {
+        Self::tcp(host, DEFAULT_BROKER_PORT)
+    }
+}
+
+impl<S: Into<String>> From<(S, u16)> for Broker {
+    fn from((host, port): (S, u16)) -> Self {
+        Self::tcp(host, port)
+    }
+}
+
+/// Options to configure the behaviour of MQTT connection
+#[derive(Clone)]
+pub struct MqttOptions {
+    /// broker target that you want to connect to
+    broker: Broker,
+    transport: Transport,
+    /// keep alive time to send pingreq to broker when the connection is idle
+    keep_alive: Duration,
+    /// clean (or) persistent session
+    clean_session: bool,
+    /// client identifier
+    client_id: String,
+    /// CONNECT authentication fields
+    auth: ConnectAuth,
+    /// maximum incoming packet size (verifies remaining length of the packet)
+    max_incoming_packet_size: usize,
+    /// Maximum outgoing packet size (only verifies publish payload size)
+    max_outgoing_packet_size: usize,
+    /// request (publish, subscribe) channel capacity
+    request_channel_capacity: usize,
+    /// Max internal request batching
+    max_request_batch: usize,
+    /// Maximum number of packets processed in a single network read batch.
+    /// `0` enables adaptive batching.
+    read_batch_size: usize,
+    /// Minimum delay time between consecutive outgoing packets
+    /// while retransmitting pending packets
+    pending_throttle: Duration,
+    /// maximum number of outgoing inflight messages
+    inflight: u16,
+    /// Last will that will be issued on unexpected disconnect
+    last_will: Option<LastWill>,
+    /// Controls how incoming publish acknowledgements are handled.
+    ack_mode: AckMode,
+    /// Optional durable storage for MQTT 3.1.1 persistent client session state.
+    session_store: Option<Arc<dyn SessionStore>>,
+    /// Application-defined scope for durable session storage keys.
+    session_store_scope: String,
+    #[cfg(feature = "proxy")]
+    /// Proxy configuration.
+    proxy: Option<Proxy>,
+    #[cfg(feature = "websocket")]
+    request_modifier: Option<RequestModifierFn>,
+    #[cfg(feature = "websocket")]
+    fallible_request_modifier: Option<FallibleRequestModifierFn>,
+    socket_connector: Option<SocketConnector>,
+}
+
+/// Returns whether `client_id` matches the MQTT 3.1.1 `ClientId` interoperability
+/// profile that every compliant server must accept.
+///
+/// MQTT 3.1.1 allows servers to accept broader `ClientId`s, so this helper is
+/// advisory only. It checks for a 1-23 byte ASCII alphanumeric `ClientId`.
+#[must_use]
+pub fn is_mqtt_minimum_client_id(client_id: &str) -> bool {
+    (1..=23).contains(&client_id.len())
+        && client_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+impl MqttOptions {
+    /// Create an [`MqttOptions`] object that contains default values for all settings other than
+    /// - id: A string to identify the device connecting to a broker
+    /// - broker: The broker target to connect to
+    ///
+    /// ```
+    /// # use rumqttc::MqttOptions;
+    /// let options = MqttOptions::new("123", "localhost");
+    /// ```
+    pub fn new<S: Into<String>, B: Into<Broker>>(id: S, broker: B) -> Self {
+        let broker = broker.into();
+        Self {
+            transport: broker.default_transport(),
+            broker,
+            keep_alive: Duration::from_secs(60),
+            clean_session: true,
+            client_id: id.into(),
+            auth: ConnectAuth::None,
+            max_incoming_packet_size: 10 * 1024,
+            max_outgoing_packet_size: 10 * 1024,
+            request_channel_capacity: 10,
+            max_request_batch: 0,
+            read_batch_size: 0,
+            pending_throttle: Duration::from_micros(0),
+            inflight: 100,
+            last_will: None,
+            ack_mode: AckMode::Automatic,
+            session_store: None,
+            session_store_scope: String::new(),
+            #[cfg(feature = "proxy")]
+            proxy: None,
+            #[cfg(feature = "websocket")]
+            request_modifier: None,
+            #[cfg(feature = "websocket")]
+            fallible_request_modifier: None,
+            socket_connector: None,
+        }
+    }
+
+    #[cfg(all(
+        any(feature = "use-rustls-no-provider", feature = "use-native-tls"),
+        feature = "websocket"
+    ))]
+    /// Create [`MqttOptions`] for a secure websocket endpoint with explicit TLS configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OptionError`] if `url` is not a valid `wss://` websocket URL.
+    pub fn websocket_with_tls_config<S: Into<String>, U: Into<String>>(
+        id: S,
+        url: U,
+        tls_config: TlsConfiguration,
+    ) -> Result<Self, OptionError> {
+        let broker = Broker::secure_websocket(url)?;
+        let mut options = Self::new(id, broker);
+        options.set_transport(Transport::wss_with_config(tls_config));
+        Ok(options)
+    }
+
+    #[cfg(all(
+        any(feature = "use-rustls-no-provider", feature = "use-native-tls"),
+        feature = "websocket"
+    ))]
+    /// Create [`MqttOptions`] for a secure websocket endpoint with the default TLS configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebsocketTlsOptionsError`] if `url` is not a valid `wss://` websocket URL or the
+    /// default TLS configuration cannot be built.
+    pub fn try_websocket_with_default_tls<S: Into<String>, U: Into<String>>(
+        id: S,
+        url: U,
+    ) -> Result<Self, WebsocketTlsOptionsError> {
+        let broker = Broker::secure_websocket(url)?;
+        let transport = Transport::try_wss_with_default_config()?;
+        let mut options = Self::new(id, broker);
+        options.set_transport(transport);
+        Ok(options)
+    }
+
+    /// Create a builder for [`MqttOptions`].
+    ///
+    /// ```
+    /// # use rumqttc::MqttOptions;
+    /// let options = MqttOptions::builder("123", "localhost")
+    ///     .keep_alive(5)
+    ///     .clean_session(true)
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn builder<S: Into<String>, B: Into<Broker>>(id: S, broker: B) -> MqttOptionsBuilder {
+        MqttOptionsBuilder::new(id, broker)
+    }
+
+    #[cfg(feature = "url")]
+    /// Creates an [`MqttOptions`] object by parsing provided string with the [url] crate's
+    /// [`Url::parse(url)`](url::Url::parse) method and is only enabled when run using the "url" feature.
+    ///
+    /// ```
+    /// # use rumqttc::MqttOptions;
+    /// let options = MqttOptions::parse_url("mqtt://example.com:1883?client_id=123").unwrap();
+    /// ```
+    ///
+    /// **NOTE:** A url must be prefixed with one of either `tcp://`, `mqtt://` or `ws://` to
+    /// denote the protocol for establishing a connection with the broker. On Unix platforms,
+    /// `unix:///path/to/socket` is also supported.
+    ///
+    /// **NOTE:** Secure transports are configured explicitly with
+    /// [`set_transport`](MqttOptions::set_transport). Secure URL schemes such as `mqtts://`,
+    /// `ssl://`, and `wss://` are rejected.
+    ///
+    /// ```ignore
+    /// # use rumqttc::{MqttOptions, Transport};
+    /// # use tokio_rustls::rustls::ClientConfig;
+    /// # let root_cert_store = rustls::RootCertStore::empty();
+    /// # let client_config = ClientConfig::builder()
+    /// #    .with_root_certificates(root_cert_store)
+    /// #    .with_no_client_auth();
+    /// let mut options = MqttOptions::parse_url("mqtt://example.com?client_id=123").unwrap();
+    /// options.set_transport(Transport::tls_with_config(client_config.into()));
+    /// ```
+    ///
+    /// On Unix platforms, `unix:///tmp/mqtt.sock?client_id=123` is also supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`OptionError`] produced while parsing the URL, validating its scheme,
+    /// interpreting query parameters, or constructing the broker options from it.
+    pub fn parse_url<S: Into<String>>(url: S) -> Result<Self, OptionError> {
+        let url = url::Url::parse(&url.into())?;
+        let options = Self::try_from(url)?;
+
+        Ok(options)
+    }
+
+    /// Broker target
+    pub const fn broker(&self) -> &Broker {
+        &self.broker
+    }
+
+    /// Validate locally-checkable MQTT option invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for invalid broker/transport combinations or
+    /// option values that can be detected before opening a network connection.
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        if !broker_transport_matches(&self.broker, &self.transport) {
+            return Err(ConfigError::BrokerTransportMismatch);
+        }
+
+        if !self.clean_session && self.client_id.is_empty() {
+            return Err(ConfigError::PersistentSessionRequiresClientId);
+        }
+
+        if self.inflight == 0 {
+            return Err(ConfigError::Inflight);
+        }
+
+        if self.max_incoming_packet_size == 0 {
+            return Err(ConfigError::MaxIncomingPacketSize);
+        }
+
+        if self.max_outgoing_packet_size == 0 {
+            return Err(ConfigError::MaxOutgoingPacketSize);
+        }
+
+        Ok(())
+    }
+
+    pub fn set_last_will(&mut self, will: LastWill) -> &mut Self {
+        self.last_will = Some(will);
+        self
+    }
+
+    pub fn last_will(&self) -> Option<LastWill> {
+        self.last_will.clone()
+    }
+
+    /// Try to set the client identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::PersistentSessionRequiresClientId`] if `client_id`
+    /// is empty when `clean_session` is false.
+    pub fn try_set_client_id(&mut self, client_id: String) -> Result<&mut Self, ConfigError> {
+        if client_id.is_empty() && !self.clean_session {
+            return Err(ConfigError::PersistentSessionRequiresClientId);
+        }
+
+        self.client_id = client_id;
+        Ok(self)
+    }
+
+    /// Set the client identifier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `client_id` is empty when `clean_session` is false.
+    ///
+    /// ```should_panic
+    /// # use rumqttc::MqttOptions;
+    /// let mut options = MqttOptions::new("id", "localhost");
+    /// options.set_clean_session(false);
+    /// options.set_client_id("".to_owned());
+    /// ```
+    pub fn set_client_id(&mut self, client_id: String) -> &mut Self {
+        self.try_set_client_id(client_id)
+            .expect("Cannot set empty client id when clean session is false")
+    }
+
+    #[cfg(not(any(feature = "use-rustls-no-provider", feature = "use-native-tls")))]
+    pub const fn set_transport(&mut self, transport: Transport) -> &mut Self {
+        self.transport = transport;
+        self
+    }
+
+    #[cfg(any(feature = "use-rustls-no-provider", feature = "use-native-tls"))]
+    pub fn set_transport(&mut self, transport: Transport) -> &mut Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Returns the configured transport.
+    pub fn transport(&self) -> Transport {
+        self.transport.clone()
+    }
+
+    /// Set number of seconds after which client should ping the broker
+    /// if there is no other data exchange
+    pub fn set_keep_alive(&mut self, seconds: u16) -> &mut Self {
+        self.keep_alive = Duration::from_secs(u64::from(seconds));
+        self
+    }
+
+    /// Keep alive time
+    pub const fn keep_alive(&self) -> Duration {
+        self.keep_alive
+    }
+
+    /// Client identifier
+    pub fn client_id(&self) -> String {
+        self.client_id.clone()
+    }
+
+    /// Set packet size limit for outgoing and incoming packets
+    pub const fn set_max_packet_size(&mut self, incoming: usize, outgoing: usize) -> &mut Self {
+        self.max_incoming_packet_size = incoming;
+        self.max_outgoing_packet_size = outgoing;
+        self
+    }
+
+    /// Maximum packet size
+    pub const fn max_packet_size(&self) -> usize {
+        self.max_incoming_packet_size
+    }
+
+    /// `clean_session = true` removes all the state from queues & instructs the broker
+    /// to clean all the client state when client disconnects.
+    ///
+    /// When set `false`, broker will hold the client state and performs pending
+    /// operations on the client when reconnection with same `client_id`
+    /// happens. Local queue state is also held to retransmit packets after reconnection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::PersistentSessionRequiresClientId`] if
+    /// `clean_session` is false when `client_id` is empty.
+    pub const fn try_set_clean_session(
+        &mut self,
+        clean_session: bool,
+    ) -> Result<&mut Self, ConfigError> {
+        if self.client_id.is_empty() && !clean_session {
+            return Err(ConfigError::PersistentSessionRequiresClientId);
+        }
+
+        self.clean_session = clean_session;
+        Ok(self)
+    }
+
+    /// `clean_session = true` removes all the state from queues & instructs the broker
+    /// to clean all the client state when client disconnects.
+    ///
+    /// When set `false`, broker will hold the client state and performs pending
+    /// operations on the client when reconnection with same `client_id`
+    /// happens. Local queue state is also held to retransmit packets after reconnection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `clean_session` is false when `client_id` is empty.
+    ///
+    /// ```should_panic
+    /// # use rumqttc::MqttOptions;
+    /// let mut options = MqttOptions::new("", "localhost");
+    /// options.set_clean_session(false);
+    /// ```
+    pub fn set_clean_session(&mut self, clean_session: bool) -> &mut Self {
+        self.try_set_clean_session(clean_session)
+            .expect("Cannot unset clean session when client id is empty")
+    }
+
+    /// Try to set whether this client uses a clean or persistent session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::PersistentSessionRequiresClientId`] if mode is
+    /// [`SessionMode::Persistent`] when `client_id` is empty.
+    pub const fn try_set_session_mode(
+        &mut self,
+        mode: SessionMode,
+    ) -> Result<&mut Self, ConfigError> {
+        self.try_set_clean_session(matches!(mode, SessionMode::Clean))
+    }
+
+    /// Set whether this client uses a clean or persistent session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if mode is [`SessionMode::Persistent`] when `client_id` is empty.
+    pub fn set_session_mode(&mut self, mode: SessionMode) -> &mut Self {
+        self.try_set_session_mode(mode)
+            .expect("Cannot unset clean session when client id is empty")
+    }
+
+    /// Clean session
+    pub const fn clean_session(&self) -> bool {
+        self.clean_session
+    }
+
+    /// Replace the current CONNECT authentication state.
+    ///
+    /// ```
+    /// use rumqttc::{ConnectAuth, MqttOptions};
+    ///
+    /// let mut options = MqttOptions::new("client", "localhost");
+    /// options.set_auth(ConnectAuth::Username {
+    ///     username: "user".into(),
+    /// });
+    /// ```
+    pub fn set_auth(&mut self, auth: ConnectAuth) -> &mut Self {
+        self.auth = auth;
+        self
+    }
+
+    /// Clear CONNECT authentication fields.
+    pub fn clear_auth(&mut self) -> &mut Self {
+        self.auth = ConnectAuth::None;
+        self
+    }
+
+    /// Set only the MQTT username field.
+    ///
+    /// ```
+    /// use rumqttc::{ConnectAuth, MqttOptions};
+    ///
+    /// let mut options = MqttOptions::new("client", "localhost");
+    /// options.set_username("user");
+    ///
+    /// assert_eq!(
+    ///     options.auth(),
+    ///     &ConnectAuth::Username {
+    ///         username: "user".into(),
+    ///     }
+    /// );
+    /// ```
+    pub fn set_username<U: Into<String>>(&mut self, username: U) -> &mut Self {
+        self.auth = ConnectAuth::Username {
+            username: username.into(),
+        };
+        self
+    }
+
+    /// Set both MQTT username and binary password fields.
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use rumqttc::{ConnectAuth, MqttOptions};
+    ///
+    /// let mut options = MqttOptions::new("client", "localhost");
+    /// options.set_credentials("user", Bytes::from_static(b"\x00\xfftoken"));
+    ///
+    /// assert_eq!(
+    ///     options.auth(),
+    ///     &ConnectAuth::UsernamePassword {
+    ///         username: "user".into(),
+    ///         password: Bytes::from_static(b"\x00\xfftoken"),
+    ///     }
+    /// );
+    /// ```
+    pub fn set_credentials<U: Into<String>, P: Into<Bytes>>(
+        &mut self,
+        username: U,
+        password: P,
+    ) -> &mut Self {
+        self.auth = ConnectAuth::UsernamePassword {
+            username: username.into(),
+            password: password.into(),
+        };
+        self
+    }
+
+    /// CONNECT authentication fields.
+    ///
+    /// ```
+    /// use rumqttc::{ConnectAuth, MqttOptions};
+    ///
+    /// let mut options = MqttOptions::new("client", "localhost");
+    /// options.set_credentials("user", "pw");
+    ///
+    /// match options.auth() {
+    ///     ConnectAuth::UsernamePassword { username, .. } => assert_eq!(username, "user"),
+    ///     auth => panic!("unexpected auth state: {auth:?}"),
+    /// }
+    /// ```
+    pub const fn auth(&self) -> &ConnectAuth {
+        &self.auth
+    }
+
+    /// Set request channel capacity
+    pub const fn set_request_channel_capacity(&mut self, capacity: usize) -> &mut Self {
+        self.request_channel_capacity = capacity;
+        self
+    }
+
+    /// Request channel capacity
+    pub const fn request_channel_capacity(&self) -> usize {
+        self.request_channel_capacity
+    }
+
+    /// Set maximum number of requests processed in one eventloop iteration.
+    ///
+    /// `0` preserves legacy behavior (effectively processes one request).
+    pub const fn set_max_request_batch(&mut self, max: usize) -> &mut Self {
+        self.max_request_batch = max;
+        self
+    }
+
+    /// Maximum number of requests processed in one eventloop iteration.
+    pub const fn max_request_batch(&self) -> usize {
+        self.max_request_batch
+    }
+
+    /// Set maximum number of packets processed in one network read batch.
+    ///
+    /// `0` enables adaptive batching.
+    pub const fn set_read_batch_size(&mut self, size: usize) -> &mut Self {
+        self.read_batch_size = size;
+        self
+    }
+
+    /// Maximum number of packets processed in one network read batch.
+    ///
+    /// `0` means adaptive batching.
+    pub const fn read_batch_size(&self) -> usize {
+        self.read_batch_size
+    }
+
+    /// Enables throttling and sets outoing message rate to the specified 'rate'
+    pub const fn set_pending_throttle(&mut self, duration: Duration) -> &mut Self {
+        self.pending_throttle = duration;
+        self
+    }
+
+    /// Outgoing message rate
+    pub const fn pending_throttle(&self) -> Duration {
+        self.pending_throttle
+    }
+
+    /// Try to set number of concurrent in flight messages
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Inflight`] if `inflight` is zero.
+    pub const fn try_set_inflight(&mut self, inflight: u16) -> Result<&mut Self, ConfigError> {
+        if inflight == 0 {
+            return Err(ConfigError::Inflight);
+        }
+
+        self.inflight = inflight;
+        Ok(self)
+    }
+
+    /// Set number of concurrent in flight messages
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inflight` is zero.
+    pub fn set_inflight(&mut self, inflight: u16) -> &mut Self {
+        self.try_set_inflight(inflight)
+            .expect("zero in flight is not allowed")
+    }
+
+    /// Number of concurrent in flight messages
+    pub const fn inflight(&self) -> u16 {
+        self.inflight
+    }
+
+    /// Set how incoming publish acknowledgements are handled.
+    pub const fn set_ack_mode(&mut self, ack_mode: AckMode) -> &mut Self {
+        self.ack_mode = ack_mode;
+        self
+    }
+
+    /// Returns how incoming publish acknowledgements are handled.
+    pub const fn ack_mode(&self) -> AckMode {
+        self.ack_mode
+    }
+
+    /// Set durable storage for MQTT 3.1.1 persistent client session state.
+    ///
+    /// rumqttc supplies the [`SessionStore`] trait and [`PersistedSession`]
+    /// data model. Applications provide serialization and the storage backend.
+    /// When this is configured with `clean_session(false)`, a newly
+    /// constructed `EventLoop` can restore local client session state before
+    /// accepting a broker session resume.
+    ///
+    /// The stored checkpoint covers MQTT protocol recovery state already
+    /// admitted into the client state machine: in-flight `QoS` flows, packet
+    /// identifier ownership and progress, SUBSCRIBE/UNSUBSCRIBE state, and
+    /// incoming `QoS` 2 state. Protocol replay requests keep their packet
+    /// identifiers and replay semantics across restoration.
+    ///
+    /// This is not a durable application outbox. Requests accepted by the
+    /// client but not yet admitted into MQTT protocol state can be retried
+    /// across ordinary live reconnects while the same `EventLoop` remains
+    /// alive, but they are not persisted. Applications that need every
+    /// submitted request to survive process restart must keep their own durable
+    /// outbound queue.
+    ///
+    /// MQTT 3.1.1 requires clients using `CleanSession = 0` to store session
+    /// state while the session exists. For restart-safe QoS/session resume,
+    /// configure a store that durably saves checkpoints before returning from
+    /// [`SessionStore::save`].
+    pub fn set_session_store<S>(&mut self, store: S) -> &mut Self
+    where
+        S: SessionStore,
+    {
+        self.session_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Set durable session storage from a shared trait object.
+    ///
+    /// See [`MqttOptions::set_session_store`] for persistence semantics.
+    pub fn set_session_store_arc(&mut self, store: Arc<dyn SessionStore>) -> &mut Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// Clear the configured durable session store.
+    pub fn clear_session_store(&mut self) -> &mut Self {
+        self.session_store = None;
+        self
+    }
+
+    /// Returns the configured durable session store, if any.
+    pub fn session_store(&self) -> Option<Arc<dyn SessionStore>> {
+        self.session_store.clone()
+    }
+
+    /// Set the application-defined scope for durable session storage keys.
+    ///
+    /// The empty default scope is appropriate only when the configured store is
+    /// already scoped externally, such as by using a dedicated file directory
+    /// for one broker/environment/client profile. Shared stores should use a
+    /// stable scope that distinguishes broker clusters, tenants, environments,
+    /// or connection profiles that may reuse the same MQTT Client Identifier.
+    pub fn set_session_store_scope<S: Into<String>>(&mut self, scope: S) -> &mut Self {
+        self.session_store_scope = scope.into();
+        self
+    }
+
+    /// Clear the application-defined durable session storage scope.
+    pub fn clear_session_store_scope(&mut self) -> &mut Self {
+        self.session_store_scope.clear();
+        self
+    }
+
+    /// Returns the application-defined durable session storage scope.
+    pub fn session_store_scope(&self) -> &str {
+        &self.session_store_scope
+    }
+
+    /// Returns the durable session storage key for the current client id.
+    pub fn session_store_key(&self) -> SessionStoreKey {
+        SessionStoreKey::new(self.session_store_scope.clone(), self.client_id())
+    }
+
+    #[cfg(feature = "proxy")]
+    pub fn set_proxy(&mut self, proxy: Proxy) -> &mut Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    #[cfg(feature = "proxy")]
+    pub fn proxy(&self) -> Option<Proxy> {
+        self.proxy.clone()
+    }
+
+    /// Sets an infallible handler for modifying the websocket HTTP request before it is sent.
+    ///
+    /// Calling this method replaces any previously configured fallible request modifier.
+    #[cfg(feature = "websocket")]
+    pub fn set_request_modifier<F, O>(&mut self, request_modifier: F) -> &mut Self
+    where
+        F: Fn(http::Request<()>) -> O + Send + Sync + 'static,
+        O: IntoFuture<Output = http::Request<()>> + 'static,
+        O::IntoFuture: Send,
+    {
+        self.request_modifier = Some(Arc::new(move |request| {
+            let request_modifier = request_modifier(request).into_future();
+            Box::pin(request_modifier)
+        }));
+        self.fallible_request_modifier = None;
+        self
+    }
+
+    /// Sets a fallible handler for modifying the websocket HTTP request before it is sent.
+    ///
+    /// Calling this method replaces any previously configured infallible request modifier.
+    /// If the modifier returns an error, the connection fails with
+    /// [`ConnectionError::RequestModifier`].
+    #[cfg(feature = "websocket")]
+    pub fn set_fallible_request_modifier<F, O, E>(&mut self, request_modifier: F) -> &mut Self
+    where
+        F: Fn(http::Request<()>) -> O + Send + Sync + 'static,
+        O: IntoFuture<Output = Result<http::Request<()>, E>> + 'static,
+        O::IntoFuture: Send,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.fallible_request_modifier = Some(Arc::new(move |request| {
+            let request_modifier = request_modifier(request).into_future();
+            Box::pin(async move {
+                request_modifier
+                    .await
+                    .map_err(|error| Box::new(error) as RequestModifierError)
+            })
+        }));
+        self.request_modifier = None;
+        self
+    }
+
+    #[cfg(feature = "websocket")]
+    pub fn request_modifier(&self) -> Option<RequestModifierFn> {
+        self.request_modifier.clone()
+    }
+
+    #[cfg(feature = "websocket")]
+    pub(crate) fn fallible_request_modifier(&self) -> Option<FallibleRequestModifierFn> {
+        self.fallible_request_modifier.clone()
+    }
+
+    /// Sets a custom socket connector, overriding the default TCP socket creation logic.
+    ///
+    /// The connector is used to create the base stream before optional proxy/TLS/WebSocket layers
+    /// managed by `MqttOptions` are applied.
+    ///
+    /// If the connector already performs TLS/proxy work, configure `MqttOptions` transport/proxy
+    /// to avoid layering those concerns twice.
+    ///
+    /// Once a custom connector is selected, it owns socket creation and rumqttc does not apply
+    /// `network_options` after the connector returns. A connector that still uses rumqttc's TCP
+    /// dialer should pass those options unchanged to [`default_socket_connect`]. Connectors for
+    /// other transports, including simulated networks such as Turmoil, decide which options apply.
+    ///
+    /// # Example
+    /// ```
+    /// # use rumqttc::MqttOptions;
+    /// # let mut options = MqttOptions::new("test", "localhost");
+    /// options.set_socket_connector(|host, network_options| async move {
+    ///     rumqttc::default_socket_connect(host, network_options).await
+    /// });
+    /// ```
+    pub fn set_socket_connector<F, Fut, S>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(String, NetworkOptions) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<S, std::io::Error>> + Send + 'static,
+        S: crate::framed::AsyncReadWrite + 'static,
+    {
+        self.socket_connector = Some(Arc::new(move |host, network_options| {
+            let stream_future = f(host, network_options);
+            let future = async move {
+                let stream = stream_future.await?;
+                let stream: Box<dyn crate::framed::AsyncReadWrite> = Box::new(stream);
+                Ok(stream)
+            };
+            Box::pin(future)
+        }));
+        self
+    }
+
+    /// Returns whether a custom socket connector has been set.
+    pub fn has_socket_connector(&self) -> bool {
+        self.socket_connector.is_some()
+    }
+
+    pub(crate) fn effective_socket_connector(&self) -> SocketConnector {
+        self.socket_connector
+            .clone()
+            .unwrap_or_else(default_socket_connector)
+    }
+
+    pub(crate) async fn socket_connect(
+        &self,
+        host: String,
+        network_options: NetworkOptions,
+    ) -> std::io::Result<Box<dyn crate::framed::AsyncReadWrite>> {
+        let connector = self.effective_socket_connector();
+        connector(host, network_options).await
+    }
+}
+
+/// Builder for [`MqttOptions`].
+pub struct MqttOptionsBuilder {
+    options: MqttOptions,
+}
+
+impl MqttOptionsBuilder {
+    /// Create a new [`MqttOptions`] builder.
+    #[must_use]
+    pub fn new<S: Into<String>, B: Into<Broker>>(id: S, broker: B) -> Self {
+        Self {
+            options: MqttOptions::new(id, broker),
+        }
+    }
+
+    /// Build the configured [`MqttOptions`].
+    #[must_use]
+    pub fn build(self) -> MqttOptions {
+        self.options
+    }
+
+    /// Try to build the configured [`MqttOptions`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if the configured options are locally invalid.
+    pub fn try_build(self) -> Result<MqttOptions, ConfigError> {
+        self.options.validate()?;
+        Ok(self.options)
+    }
+
+    /// Set the last will.
+    #[must_use]
+    pub fn last_will(mut self, will: LastWill) -> Self {
+        self.options.set_last_will(will);
+        self
+    }
+
+    /// Set the client identifier.
+    #[must_use]
+    pub fn client_id(mut self, client_id: String) -> Self {
+        self.options.set_client_id(client_id);
+        self
+    }
+
+    /// Set the transport.
+    #[cfg(not(any(feature = "use-rustls-no-provider", feature = "use-native-tls")))]
+    #[must_use]
+    pub const fn transport(mut self, transport: Transport) -> Self {
+        self.options.set_transport(transport);
+        self
+    }
+
+    /// Set the transport.
+    #[cfg(any(feature = "use-rustls-no-provider", feature = "use-native-tls"))]
+    #[must_use]
+    pub fn transport(mut self, transport: Transport) -> Self {
+        self.options.set_transport(transport);
+        self
+    }
+
+    /// Set number of seconds after which client should ping the broker if there is no other data exchange.
+    #[must_use]
+    pub fn keep_alive(mut self, seconds: u16) -> Self {
+        self.options.set_keep_alive(seconds);
+        self
+    }
+
+    /// Set packet size limits for incoming and outgoing packets.
+    #[must_use]
+    pub const fn max_packet_size(mut self, incoming: usize, outgoing: usize) -> Self {
+        self.options.set_max_packet_size(incoming, outgoing);
+        self
+    }
+
+    /// Set whether the broker should clean the client session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `clean_session` is false when `client_id` is empty.
+    #[must_use]
+    pub fn clean_session(mut self, clean_session: bool) -> Self {
+        self.options.set_clean_session(clean_session);
+        self
+    }
+
+    /// Set whether this client uses a clean or persistent session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if mode is [`SessionMode::Persistent`] when `client_id` is empty.
+    #[must_use]
+    pub fn session_mode(mut self, mode: SessionMode) -> Self {
+        self.options.set_session_mode(mode);
+        self
+    }
+
+    /// Replace the current CONNECT authentication state.
+    #[must_use]
+    pub fn auth(mut self, auth: ConnectAuth) -> Self {
+        self.options.set_auth(auth);
+        self
+    }
+
+    /// Clear CONNECT authentication fields.
+    #[must_use]
+    pub fn clear_auth(mut self) -> Self {
+        self.options.clear_auth();
+        self
+    }
+
+    /// Set only the MQTT username field.
+    #[must_use]
+    pub fn username<U: Into<String>>(mut self, username: U) -> Self {
+        self.options.set_username(username);
+        self
+    }
+
+    /// Set both MQTT username and binary password fields.
+    #[must_use]
+    pub fn credentials<U: Into<String>, P: Into<Bytes>>(
+        mut self,
+        username: U,
+        password: P,
+    ) -> Self {
+        self.options.set_credentials(username, password);
+        self
+    }
+
+    /// Set request channel capacity.
+    #[must_use]
+    pub const fn request_channel_capacity(mut self, capacity: usize) -> Self {
+        self.options.set_request_channel_capacity(capacity);
+        self
+    }
+
+    /// Set maximum number of requests processed in one eventloop iteration.
+    #[must_use]
+    pub const fn max_request_batch(mut self, max: usize) -> Self {
+        self.options.set_max_request_batch(max);
+        self
+    }
+
+    /// Set maximum number of packets processed in one network read batch.
+    #[must_use]
+    pub const fn read_batch_size(mut self, size: usize) -> Self {
+        self.options.set_read_batch_size(size);
+        self
+    }
+
+    /// Set the minimum delay between retransmitted outgoing packets.
+    #[must_use]
+    pub const fn pending_throttle(mut self, duration: Duration) -> Self {
+        self.options.set_pending_throttle(duration);
+        self
+    }
+
+    /// Set number of concurrent in flight messages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inflight` is zero.
+    #[must_use]
+    pub fn inflight(mut self, inflight: u16) -> Self {
+        self.options.set_inflight(inflight);
+        self
+    }
+
+    /// Set how incoming publish acknowledgements are handled.
+    #[must_use]
+    pub const fn ack_mode(mut self, ack_mode: AckMode) -> Self {
+        self.options.set_ack_mode(ack_mode);
+        self
+    }
+
+    /// Set durable storage for MQTT 3.1.1 persistent client session state.
+    ///
+    /// See [`MqttOptions::set_session_store`] for persistence semantics.
+    #[must_use]
+    pub fn session_store<S>(mut self, store: S) -> Self
+    where
+        S: SessionStore,
+    {
+        self.options.set_session_store(store);
+        self
+    }
+
+    /// Set durable session storage from a shared trait object.
+    ///
+    /// See [`MqttOptions::set_session_store`] for persistence semantics.
+    #[must_use]
+    pub fn session_store_arc(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.options.set_session_store_arc(store);
+        self
+    }
+
+    /// Set the application-defined scope for durable session storage keys.
+    ///
+    /// See [`MqttOptions::set_session_store_scope`] for scope semantics.
+    #[must_use]
+    pub fn session_store_scope<S: Into<String>>(mut self, scope: S) -> Self {
+        self.options.set_session_store_scope(scope);
+        self
+    }
+
+    /// Set proxy configuration.
+    #[cfg(feature = "proxy")]
+    #[must_use]
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.options.set_proxy(proxy);
+        self
+    }
+
+    /// Set an infallible handler for modifying the websocket HTTP request before it is sent.
+    #[cfg(feature = "websocket")]
+    #[must_use]
+    pub fn request_modifier<F, O>(mut self, request_modifier: F) -> Self
+    where
+        F: Fn(http::Request<()>) -> O + Send + Sync + 'static,
+        O: IntoFuture<Output = http::Request<()>> + 'static,
+        O::IntoFuture: Send,
+    {
+        self.options.set_request_modifier(request_modifier);
+        self
+    }
+
+    /// Set a fallible handler for modifying the websocket HTTP request before it is sent.
+    #[cfg(feature = "websocket")]
+    #[must_use]
+    pub fn fallible_request_modifier<F, O, E>(mut self, request_modifier: F) -> Self
+    where
+        F: Fn(http::Request<()>) -> O + Send + Sync + 'static,
+        O: IntoFuture<Output = Result<http::Request<()>, E>> + 'static,
+        O::IntoFuture: Send,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.options.set_fallible_request_modifier(request_modifier);
+        self
+    }
+
+    /// Set a custom socket connector.
+    #[must_use]
+    pub fn socket_connector<F, Fut, S>(mut self, f: F) -> Self
+    where
+        F: Fn(String, NetworkOptions) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<S, std::io::Error>> + Send + 'static,
+        S: crate::framed::AsyncReadWrite + 'static,
+    {
+        self.options.set_socket_connector(f);
+        self
+    }
+}
+
+const fn broker_transport_matches(broker: &Broker, transport: &Transport) -> bool {
+    match transport {
+        Transport::Tcp => matches!(broker.inner, BrokerInner::Tcp { .. }),
+        #[cfg(any(feature = "use-rustls-no-provider", feature = "use-native-tls"))]
+        Transport::Tls(_) => matches!(broker.inner, BrokerInner::Tcp { .. }),
+        #[cfg(unix)]
+        Transport::Unix => matches!(broker.inner, BrokerInner::Unix { .. }),
+        #[cfg(feature = "websocket")]
+        Transport::Ws => matches!(broker.inner, BrokerInner::Websocket { secure: false, .. }),
+        #[cfg(all(
+            any(feature = "use-rustls-no-provider", feature = "use-native-tls"),
+            feature = "websocket"
+        ))]
+        Transport::Wss(_) => matches!(broker.inner, BrokerInner::Websocket { .. }),
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigError {
+    #[error("Broker target is incompatible with the selected transport")]
+    BrokerTransportMismatch,
+    #[error("MQTT 3.1.1 persistent sessions require a non-empty client ID")]
+    PersistentSessionRequiresClientId,
+    #[error("Invalid max-incoming-packet-size value")]
+    MaxIncomingPacketSize,
+    #[error("Invalid max-outgoing-packet-size value")]
+    MaxOutgoingPacketSize,
+    #[error("Invalid inflight value")]
+    Inflight,
+}
+
+#[non_exhaustive]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum OptionError {
+    #[error("Unsupported URL scheme.")]
+    Scheme,
+
+    #[error(
+        "Secure MQTT URL schemes require explicit TLS transport configuration via MqttOptions::set_transport(...)."
+    )]
+    SecureUrlRequiresExplicitTransport,
+
+    #[error("Missing client ID.")]
+    ClientId,
+
+    #[error("Invalid Unix socket path.")]
+    UnixSocketPath,
+
+    #[cfg(feature = "websocket")]
+    #[error("Invalid websocket url.")]
+    WebsocketUrl,
+
+    #[cfg(feature = "websocket")]
+    #[error(
+        "Secure websocket URLs require Broker::websocket(\"ws://...\") plus MqttOptions::set_transport(Transport::wss_with_config(...))."
+    )]
+    WssRequiresExplicitTransport,
+
+    #[cfg(feature = "websocket")]
+    #[error("Secure websocket options require a wss:// URL.")]
+    WssUrlRequired,
+
+    #[error("Invalid keep-alive value.")]
+    KeepAlive,
+
+    #[error("Invalid clean-session value.")]
+    CleanSession,
+
+    #[error("Invalid max-incoming-packet-size value.")]
+    MaxIncomingPacketSize,
+
+    #[error("Invalid max-outgoing-packet-size value.")]
+    MaxOutgoingPacketSize,
+
+    #[error("Invalid request-channel-capacity value.")]
+    RequestChannelCapacity,
+
+    #[error("Invalid max-request-batch value.")]
+    MaxRequestBatch,
+
+    #[error("Invalid read-batch-size value.")]
+    ReadBatchSize,
+
+    #[error("Invalid pending-throttle value.")]
+    PendingThrottle,
+
+    #[error("Invalid inflight value.")]
+    Inflight,
+
+    #[error("Invalid configuration: {0}")]
+    Config(#[from] ConfigError),
+
+    #[error("Unknown option: {0}")]
+    Unknown(String),
+
+    #[cfg(feature = "url")]
+    #[error("Couldn't parse option from url: {0}")]
+    Parse(#[from] url::ParseError),
+}
+
+#[cfg(all(
+    any(feature = "use-rustls-no-provider", feature = "use-native-tls"),
+    feature = "websocket"
+))]
+#[derive(Debug, thiserror::Error)]
+pub enum WebsocketTlsOptionsError {
+    #[error(transparent)]
+    Option(#[from] OptionError),
+    #[error(transparent)]
+    Tls(#[from] TlsError),
+}
+
+#[cfg(feature = "url")]
+impl std::convert::TryFrom<url::Url> for MqttOptions {
+    type Error = OptionError;
+
+    fn try_from(url: url::Url) -> Result<Self, Self::Error> {
+        use std::collections::HashMap;
+
+        let broker = match url.scheme() {
+            "mqtts" | "ssl" => return Err(OptionError::SecureUrlRequiresExplicitTransport),
+            "mqtt" | "tcp" => Broker::tcp(
+                url.host_str().unwrap_or_default(),
+                url.port().unwrap_or(DEFAULT_BROKER_PORT),
+            ),
+            #[cfg(unix)]
+            "unix" => Broker::unix(parse_unix_socket_path(&url)?),
+            #[cfg(feature = "websocket")]
+            "ws" => Broker::websocket(url.as_str().to_owned())?,
+            #[cfg(feature = "websocket")]
+            "wss" => return Err(OptionError::WssRequiresExplicitTransport),
+            _ => return Err(OptionError::Scheme),
+        };
+
+        let mut queries = url.query_pairs().collect::<HashMap<_, _>>();
+
+        let id = queries
+            .remove("client_id")
+            .ok_or(OptionError::ClientId)?
+            .into_owned();
+
+        let mut options = Self::new(id, broker);
+
+        if let Some(keep_alive) = queries
+            .remove("keep_alive_secs")
+            .map(|v| v.parse::<u16>().map_err(|_| OptionError::KeepAlive))
+            .transpose()?
+        {
+            options.set_keep_alive(keep_alive);
+        }
+
+        if let Some(clean_session) = queries
+            .remove("clean_session")
+            .map(|v| v.parse::<bool>().map_err(|_| OptionError::CleanSession))
+            .transpose()?
+        {
+            options.try_set_clean_session(clean_session)?;
+        }
+
+        set_url_credentials(&mut options, &url);
+
+        if let (Some(incoming), Some(outgoing)) = (
+            queries
+                .remove("max_incoming_packet_size_bytes")
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| OptionError::MaxIncomingPacketSize)
+                })
+                .transpose()?,
+            queries
+                .remove("max_outgoing_packet_size_bytes")
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| OptionError::MaxOutgoingPacketSize)
+                })
+                .transpose()?,
+        ) {
+            options.set_max_packet_size(incoming, outgoing);
+        }
+
+        if let Some(request_channel_capacity) = queries
+            .remove("request_channel_capacity_num")
+            .map(|v| {
+                v.parse::<usize>()
+                    .map_err(|_| OptionError::RequestChannelCapacity)
+            })
+            .transpose()?
+        {
+            options.request_channel_capacity = request_channel_capacity;
+        }
+
+        if let Some(max_request_batch) = queries
+            .remove("max_request_batch_num")
+            .map(|v| v.parse::<usize>().map_err(|_| OptionError::MaxRequestBatch))
+            .transpose()?
+        {
+            options.max_request_batch = max_request_batch;
+        }
+
+        if let Some(read_batch_size) = queries
+            .remove("read_batch_size_num")
+            .map(|v| v.parse::<usize>().map_err(|_| OptionError::ReadBatchSize))
+            .transpose()?
+        {
+            options.read_batch_size = read_batch_size;
+        }
+
+        if let Some(pending_throttle) = queries
+            .remove("pending_throttle_usecs")
+            .map(|v| v.parse::<u64>().map_err(|_| OptionError::PendingThrottle))
+            .transpose()?
+        {
+            options.set_pending_throttle(Duration::from_micros(pending_throttle));
+        }
+
+        if let Some(inflight) = queries
+            .remove("inflight_num")
+            .map(|v| v.parse::<u16>().map_err(|_| OptionError::Inflight))
+            .transpose()?
+        {
+            options.try_set_inflight(inflight)?;
+        }
+
+        if let Some((opt, _)) = queries.into_iter().next() {
+            return Err(OptionError::Unknown(opt.into_owned()));
+        }
+
+        options.validate()?;
+
+        Ok(options)
+    }
+}
+
+#[cfg(feature = "url")]
+fn set_url_credentials(options: &mut MqttOptions, url: &url::Url) {
+    let username = url.username();
+    if let Some(password) = url.password() {
+        options.set_credentials(username, password.to_owned());
+    } else if !username.is_empty() {
+        options.set_username(username);
+    }
+}
+
+#[cfg(all(feature = "url", unix))]
+fn parse_unix_socket_path(url: &url::Url) -> Result<PathBuf, OptionError> {
+    if url.host_str().is_some() {
+        return Err(OptionError::UnixSocketPath);
+    }
+
+    let path = percent_decode_str(url.path()).collect::<Vec<u8>>();
+    if path.is_empty() || path == b"/" {
+        return Err(OptionError::UnixSocketPath);
+    }
+
+    Ok(PathBuf::from(OsString::from_vec(path)))
+}
+
+// Implement Debug manually because ClientConfig doesn't implement it, so derive(Debug) doesn't
+// work.
+impl Debug for MqttOptions {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("MqttOptions")
+            .field("broker", &self.broker)
+            .field("keep_alive", &self.keep_alive)
+            .field("clean_session", &self.clean_session)
+            .field("client_id", &self.client_id)
+            .field("auth", &self.auth)
+            .field("max_packet_size", &self.max_incoming_packet_size)
+            .field("request_channel_capacity", &self.request_channel_capacity)
+            .field("max_request_batch", &self.max_request_batch)
+            .field("read_batch_size", &self.read_batch_size)
+            .field("pending_throttle", &self.pending_throttle)
+            .field("inflight", &self.inflight)
+            .field("last_will", &self.last_will)
+            .field("ack_mode", &self.ack_mode)
+            .field("session_store", &self.session_store.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::net::{TcpListener, TcpSocket};
+    use tokio::runtime::Builder;
+    use tokio::sync::Notify;
+
+    fn runtime() -> tokio::runtime::Runtime {
+        Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    #[test]
+    fn staggered_attempts_allow_later_success_to_win() {
+        runtime().block_on(async {
+            let started = Arc::new(AtomicUsize::new(0));
+            let started_for_connect = Arc::clone(&started);
+            let begin = std::time::Instant::now();
+
+            let result = first_success_with_stagger(
+                [0_u8, 1_u8],
+                std::time::Duration::from_millis(10),
+                move |attempt| {
+                    let started = Arc::clone(&started_for_connect);
+                    async move {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            Err(std::io::Error::other("slow failure"))
+                        } else {
+                            Ok(42_u8)
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result, 42);
+            assert_eq!(started.load(Ordering::SeqCst), 2);
+            assert!(begin.elapsed() < std::time::Duration::from_millis(150));
+        });
+    }
+
+    #[test]
+    fn staggered_connect_returns_invalid_input_for_empty_candidates() {
+        runtime().block_on(async {
+            let err = connect_resolved_addrs_staggered(Vec::new(), NetworkOptions::new())
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), "could not resolve to any address");
+        });
+    }
+
+    #[test]
+    fn staggered_connect_tries_later_candidates() {
+        runtime().block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let good_addr = listener.local_addr().unwrap();
+
+            let unused_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let bad_addr = unused_listener.local_addr().unwrap();
+            drop(unused_listener);
+
+            let accept_task = tokio::spawn(async move {
+                let (_stream, _) = listener.accept().await.unwrap();
+            });
+
+            let stream =
+                connect_resolved_addrs_staggered(vec![bad_addr, good_addr], NetworkOptions::new())
+                    .await
+                    .unwrap();
+            assert_eq!(stream.peer_addr().unwrap(), good_addr);
+
+            accept_task.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn fixed_bind_port_retry_mode_keeps_slow_first_candidate_alive() {
+        runtime().block_on(async {
+            let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let bind_port = reserved.local_addr().unwrap().port();
+            drop(reserved);
+
+            let mut network_options = NetworkOptions::new();
+            network_options.set_bind_addr(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                bind_port,
+            )));
+
+            let first_attempt_started = Arc::new(Notify::new());
+            let second_attempt_started = Arc::new(AtomicBool::new(false));
+
+            let mut connect_task = tokio::spawn({
+                let first_attempt_started = Arc::clone(&first_attempt_started);
+                let second_attempt_started = Arc::clone(&second_attempt_started);
+                let network_options = network_options.clone();
+                async move {
+                    connect_with_retry_mode_and_delay(
+                        [0_u8, 1_u8],
+                        network_options,
+                        Duration::from_millis(10),
+                        move |attempt, network_options| {
+                            let first_attempt_started = Arc::clone(&first_attempt_started);
+                            let second_attempt_started = Arc::clone(&second_attempt_started);
+                            async move {
+                                if attempt == 0 {
+                                    let bind_addr = network_options.bind_addr().unwrap();
+                                    let socket = match bind_addr {
+                                        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                                        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                                    };
+                                    socket.bind(bind_addr)?;
+                                    first_attempt_started.notify_one();
+                                    std::future::pending::<io::Result<()>>().await
+                                } else {
+                                    second_attempt_started.store(true, Ordering::SeqCst);
+                                    let _ = network_options;
+                                    Ok(())
+                                }
+                            }
+                        },
+                    )
+                    .await
+                }
+            });
+
+            first_attempt_started.notified().await;
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut connect_task)
+                    .await
+                    .is_err(),
+                "fixed-port dialing should keep the first slow candidate alive instead of capping it to the stagger delay"
+            );
+            assert!(
+                !second_attempt_started.load(Ordering::SeqCst),
+                "fixed-port dialing should not start later same-family candidates while the first is still pending"
+            );
+            connect_task.abort();
+        });
+    }
+
+    #[test]
+    fn fixed_bind_port_resolved_addrs_try_later_candidates() {
+        runtime().block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let good_addr = listener.local_addr().unwrap();
+
+            let unused_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let bad_addr = unused_listener.local_addr().unwrap();
+            drop(unused_listener);
+
+            let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let bind_port = reserved.local_addr().unwrap().port();
+            drop(reserved);
+
+            let mut network_options = NetworkOptions::new();
+            network_options.set_bind_addr(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                bind_port,
+            )));
+
+            let accept_task = tokio::spawn(async move {
+                let (stream, peer_addr) = listener.accept().await.unwrap();
+                drop(stream);
+                peer_addr
+            });
+
+            let stream =
+                connect_resolved_addrs_staggered(vec![bad_addr, good_addr], network_options)
+                    .await
+                    .unwrap();
+            assert_eq!(stream.peer_addr().unwrap(), good_addr);
+            drop(stream);
+
+            let peer_addr = accept_task.await.unwrap();
+            assert_eq!(peer_addr.port(), bind_port);
+            assert!(peer_addr.ip().is_loopback());
+        });
+    }
+
+    #[test]
+    fn socket_connect_uses_custom_connector_over_default() {
+        runtime().block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let good_addr = listener.local_addr().unwrap();
+            let used_custom = Arc::new(AtomicUsize::new(0));
+            let used_custom_for_connector = Arc::clone(&used_custom);
+
+            let accept_task = tokio::spawn(async move {
+                let (_stream, _) = listener.accept().await.unwrap();
+            });
+
+            let mut options = MqttOptions::new("test-client", "localhost");
+            options.set_socket_connector(move |_host, _network_options| {
+                let used_custom = Arc::clone(&used_custom_for_connector);
+                async move {
+                    used_custom.fetch_add(1, Ordering::SeqCst);
+                    TcpStream::connect(good_addr).await
+                }
+            });
+
+            assert!(options.has_socket_connector());
+            options
+                .socket_connect("invalid.invalid:1883".to_owned(), NetworkOptions::new())
+                .await
+                .unwrap();
+
+            assert_eq!(used_custom.load(Ordering::SeqCst), 1);
+            accept_task.await.unwrap();
+        });
+    }
+
+    #[cfg(all(feature = "use-rustls-no-provider", feature = "websocket"))]
+    mod request_modifier_tests {
+        use super::{Broker, MqttOptions};
+
+        #[derive(Debug)]
+        struct TestError;
+
+        impl std::fmt::Display for TestError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "test error")
+            }
+        }
+
+        impl std::error::Error for TestError {}
+
+        #[test]
+        fn infallible_modifier_is_set() {
+            let mut options = MqttOptions::new(
+                "test",
+                Broker::websocket("ws://localhost:8080").expect("valid websocket broker"),
+            );
+            options.set_request_modifier(|req| async move { req });
+            assert!(options.request_modifier().is_some());
+            assert!(options.fallible_request_modifier().is_none());
+        }
+
+        #[test]
+        fn fallible_modifier_is_set() {
+            let mut options = MqttOptions::new(
+                "test",
+                Broker::websocket("ws://localhost:8080").expect("valid websocket broker"),
+            );
+            options.set_fallible_request_modifier(|req| async move { Ok::<_, TestError>(req) });
+            assert!(options.request_modifier().is_none());
+            assert!(options.fallible_request_modifier().is_some());
+        }
+
+        #[test]
+        fn last_setter_call_wins() {
+            let mut options = MqttOptions::new(
+                "test",
+                Broker::websocket("ws://localhost:8080").expect("valid websocket broker"),
+            );
+
+            options
+                .set_fallible_request_modifier(|req| async move { Ok::<_, TestError>(req) })
+                .set_request_modifier(|req| async move { req });
+            assert!(options.request_modifier().is_some());
+            assert!(options.fallible_request_modifier().is_none());
+
+            options
+                .set_request_modifier(|req| async move { req })
+                .set_fallible_request_modifier(|req| async move { Ok::<_, TestError>(req) });
+            assert!(options.request_modifier().is_none());
+            assert!(options.fallible_request_modifier().is_some());
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "use-rustls-no-provider", feature = "websocket"))]
+    fn websocket_transport_can_be_explicitly_upgraded_to_wss() {
+        let broker = Broker::websocket(
+            "ws://a3f8czas.iot.eu-west-1.amazonaws.com/mqtt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=MyCreds%2F20201001%2Feu-west-1%2Fiotdevicegateway%2Faws4_request&X-Amz-Date=20201001T130812Z&X-Amz-Expires=7200&X-Amz-Signature=9ae09b49896f44270f2707551581953e6cac71a4ccf34c7c3415555be751b2d1&X-Amz-SignedHeaders=host",
+        )
+        .expect("valid websocket broker");
+        let mut mqttoptions = MqttOptions::new("client_a", broker);
+
+        assert!(matches!(mqttoptions.transport(), crate::Transport::Ws));
+        mqttoptions.set_transport(crate::Transport::wss(Vec::from("Test CA"), None, None));
+
+        if let crate::Transport::Wss(TlsConfiguration::Simple {
+            ca,
+            client_auth,
+            alpn,
+        }) = mqttoptions.transport()
+        {
+            assert_eq!(ca.as_slice(), b"Test CA");
+            assert_eq!(client_auth, None);
+            assert_eq!(alpn, None);
+        } else {
+            panic!("Unexpected transport!");
+        }
+
+        assert_eq!(
+            mqttoptions.broker().websocket_url(),
+            Some(
+                "ws://a3f8czas.iot.eu-west-1.amazonaws.com/mqtt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=MyCreds%2F20201001%2Feu-west-1%2Fiotdevicegateway%2Faws4_request&X-Amz-Date=20201001T130812Z&X-Amz-Expires=7200&X-Amz-Signature=9ae09b49896f44270f2707551581953e6cac71a4ccf34c7c3415555be751b2d1&X-Amz-SignedHeaders=host"
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "use-rustls-no-provider", feature = "websocket"))]
+    fn secure_websocket_options_accept_wss_url() {
+        let options = MqttOptions::websocket_with_tls_config(
+            "client_a",
+            "wss://example.com/mqtt",
+            TlsConfiguration::Simple {
+                ca: Vec::from("Test CA"),
+                client_auth: None,
+                alpn: None,
+            },
+        )
+        .expect("valid secure websocket options");
+
+        assert_eq!(
+            options.broker().websocket_url(),
+            Some("wss://example.com/mqtt")
+        );
+        assert!(matches!(options.transport(), crate::Transport::Wss(_)));
+        assert_eq!(options.validate(), Ok(()));
+    }
+
+    #[test]
+    #[cfg(all(feature = "use-rustls-no-provider", feature = "websocket"))]
+    fn secure_websocket_options_reject_ws_url() {
+        assert!(matches!(
+            MqttOptions::websocket_with_tls_config(
+                "client_a",
+                "ws://example.com/mqtt",
+                TlsConfiguration::Simple {
+                    ca: Vec::from("Test CA"),
+                    client_auth: None,
+                    alpn: None,
+                },
+            ),
+            Err(OptionError::WssUrlRequired)
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "use-rustls-no-provider", feature = "websocket"))]
+    fn secure_websocket_options_reject_plain_ws_transport() {
+        let mut options = MqttOptions::websocket_with_tls_config(
+            "client_a",
+            "wss://example.com/mqtt",
+            TlsConfiguration::Simple {
+                ca: Vec::from("Test CA"),
+                client_auth: None,
+                alpn: None,
+            },
+        )
+        .expect("valid secure websocket options");
+
+        options.set_transport(crate::Transport::Ws);
+
+        assert_eq!(
+            options.validate(),
+            Err(ConfigError::BrokerTransportMismatch)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "use-rustls-no-provider", feature = "websocket"))]
+    fn try_secure_websocket_options_reject_ws_url_before_default_tls() {
+        assert!(matches!(
+            MqttOptions::try_websocket_with_default_tls("client_a", "ws://example.com/mqtt"),
+            Err(WebsocketTlsOptionsError::Option(
+                OptionError::WssUrlRequired
+            ))
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "websocket")]
+    fn wss_websocket_urls_require_explicit_transport() {
+        assert_eq!(
+            Broker::websocket("wss://example.com/mqtt"),
+            Err(OptionError::WssRequiresExplicitTransport)
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "url",
+        feature = "use-rustls-no-provider",
+        feature = "websocket"
+    ))]
+    fn parse_url_ws_transport_can_be_explicitly_upgraded_to_wss() {
+        let mut mqttoptions =
+            MqttOptions::parse_url("ws://example.com:443/mqtt?client_id=client_a")
+                .expect("valid websocket options");
+
+        assert!(matches!(mqttoptions.transport(), crate::Transport::Ws));
+        mqttoptions.set_transport(crate::Transport::wss(Vec::from("Test CA"), None, None));
+
+        if let crate::Transport::Wss(TlsConfiguration::Simple {
+            ca,
+            client_auth,
+            alpn,
+        }) = mqttoptions.transport()
+        {
+            assert_eq!(ca.as_slice(), b"Test CA");
+            assert_eq!(client_auth, None);
+            assert_eq!(alpn, None);
+        } else {
+            panic!("Unexpected transport!");
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "url", feature = "use-rustls-no-provider"))]
+    fn parse_url_mqtt_transport_can_be_explicitly_upgraded_to_tls() {
+        let mut mqttoptions = MqttOptions::parse_url("mqtt://example.com:8883?client_id=client_a")
+            .expect("valid tls options");
+
+        assert!(matches!(mqttoptions.transport(), crate::Transport::Tcp));
+        mqttoptions.set_transport(crate::Transport::tls(Vec::from("Test CA"), None, None));
+
+        if let crate::Transport::Tls(TlsConfiguration::Simple {
+            ca,
+            client_auth,
+            alpn,
+        }) = mqttoptions.transport()
+        {
+            assert_eq!(ca.as_slice(), b"Test CA");
+            assert_eq!(client_auth, None);
+            assert_eq!(alpn, None);
+        } else {
+            panic!("Unexpected transport!");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "url")]
+    fn parse_url_rejects_secure_url_schemes() {
+        assert!(matches!(
+            MqttOptions::parse_url("mqtts://example.com:8883?client_id=client_a"),
+            Err(OptionError::SecureUrlRequiresExplicitTransport)
+        ));
+        assert!(matches!(
+            MqttOptions::parse_url("ssl://example.com:8883?client_id=client_a"),
+            Err(OptionError::SecureUrlRequiresExplicitTransport)
+        ));
+
+        #[cfg(feature = "websocket")]
+        assert!(matches!(
+            MqttOptions::parse_url("wss://example.com:443/mqtt?client_id=client_a"),
+            Err(OptionError::WssRequiresExplicitTransport)
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "url")]
+    fn from_url() {
+        fn opt(s: &str) -> Result<MqttOptions, OptionError> {
+            MqttOptions::parse_url(s)
+        }
+        fn ok(s: &str) -> MqttOptions {
+            opt(s).expect("valid options")
+        }
+        fn err(s: &str) -> OptionError {
+            opt(s).expect_err("invalid options")
+        }
+
+        let v = ok("mqtt://host:42?client_id=foo");
+        assert_eq!(v.broker().tcp_address(), Some(("host", 42)));
+        assert_eq!(v.client_id(), "foo".to_owned());
+
+        let v = ok("mqtt://host:42?client_id=foo&keep_alive_secs=5");
+        assert_eq!(v.keep_alive, Duration::from_secs(5));
+        let v = ok("mqtt://host:42?client_id=foo&keep_alive_secs=0");
+        assert_eq!(v.keep_alive, Duration::from_secs(0));
+        let v = ok("mqtt://host:42?client_id=foo&read_batch_size_num=32");
+        assert_eq!(v.read_batch_size(), 32);
+        let v = ok("mqtt://user@host:42?client_id=foo");
+        assert_eq!(
+            v.auth(),
+            &ConnectAuth::Username {
+                username: "user".to_owned(),
+            }
+        );
+        let v = ok("mqtt://user:pw@host:42?client_id=foo");
+        assert_eq!(
+            v.auth(),
+            &ConnectAuth::UsernamePassword {
+                username: "user".to_owned(),
+                password: Bytes::from_static(b"pw"),
+            }
+        );
+        let v = ok("mqtt://:pw@host:42?client_id=foo");
+        assert_eq!(
+            v.auth(),
+            &ConnectAuth::UsernamePassword {
+                username: String::new(),
+                password: Bytes::from_static(b"pw"),
+            }
+        );
+
+        assert_eq!(err("mqtt://host:42"), OptionError::ClientId);
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&foo=bar"),
+            OptionError::Unknown("foo".to_owned())
+        );
+        assert_eq!(err("mqt://host:42?client_id=foo"), OptionError::Scheme);
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&keep_alive_secs=foo"),
+            OptionError::KeepAlive
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&keep_alive_secs=65536"),
+            OptionError::KeepAlive
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&clean_session=foo"),
+            OptionError::CleanSession
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&max_incoming_packet_size_bytes=foo"),
+            OptionError::MaxIncomingPacketSize
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&max_outgoing_packet_size_bytes=foo"),
+            OptionError::MaxOutgoingPacketSize
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&request_channel_capacity_num=foo"),
+            OptionError::RequestChannelCapacity
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&max_request_batch_num=foo"),
+            OptionError::MaxRequestBatch
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&read_batch_size_num=foo"),
+            OptionError::ReadBatchSize
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&pending_throttle_usecs=foo"),
+            OptionError::PendingThrottle
+        );
+        assert_eq!(
+            err("mqtt://host:42?client_id=foo&inflight_num=foo"),
+            OptionError::Inflight
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_broker_sets_unix_transport_and_preserves_defaults() {
+        let options = MqttOptions::new("client_id", Broker::unix("/tmp/mqtt.sock"));
+        let baseline = MqttOptions::new("client_id", "127.0.0.1");
+
+        assert!(matches!(options.transport(), Transport::Unix));
+        assert_eq!(
+            options.broker().unix_path(),
+            Some(std::path::Path::new("/tmp/mqtt.sock"))
+        );
+        assert_eq!(options.keep_alive, baseline.keep_alive);
+        assert_eq!(options.clean_session, baseline.clean_session);
+        assert_eq!(options.client_id, baseline.client_id);
+        assert_eq!(
+            options.max_incoming_packet_size,
+            baseline.max_incoming_packet_size
+        );
+        assert_eq!(
+            options.max_outgoing_packet_size,
+            baseline.max_outgoing_packet_size
+        );
+        assert_eq!(
+            options.request_channel_capacity,
+            baseline.request_channel_capacity
+        );
+        assert_eq!(options.max_request_batch, baseline.max_request_batch);
+        assert_eq!(options.read_batch_size, baseline.read_batch_size);
+        assert_eq!(options.pending_throttle, baseline.pending_throttle);
+        assert_eq!(options.inflight, baseline.inflight);
+        assert_eq!(options.ack_mode, baseline.ack_mode);
+    }
+
+    #[test]
+    #[cfg(all(feature = "url", unix))]
+    fn from_url_supports_unix_socket_paths() {
+        let options = MqttOptions::parse_url(
+            "unix:///tmp/mqtt.sock?client_id=foo&keep_alive_secs=5&read_batch_size_num=32",
+        )
+        .expect("valid unix socket options");
+
+        assert!(matches!(options.transport(), Transport::Unix));
+        assert_eq!(
+            options.broker().unix_path(),
+            Some(std::path::Path::new("/tmp/mqtt.sock"))
+        );
+        assert_eq!(options.client_id(), "foo");
+        assert_eq!(options.keep_alive, Duration::from_secs(5));
+        assert_eq!(options.read_batch_size(), 32);
+    }
+
+    #[test]
+    #[cfg(all(feature = "url", unix))]
+    fn from_url_decodes_percent_escaped_unix_socket_paths() {
+        let options =
+            MqttOptions::parse_url("unix:///tmp/mqtt%20broker.sock?client_id=foo").unwrap();
+
+        assert_eq!(
+            options.broker().unix_path(),
+            Some(std::path::Path::new("/tmp/mqtt broker.sock"))
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "url", unix))]
+    fn from_url_preserves_percent_decoded_unix_socket_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let options = MqttOptions::parse_url("unix:///tmp/mqtt%FF.sock?client_id=foo").unwrap();
+
+        assert_eq!(
+            options.broker().unix_path().unwrap().as_os_str().as_bytes(),
+            b"/tmp/mqtt\xff.sock"
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "url", unix))]
+    fn from_url_rejects_invalid_unix_socket_paths() {
+        fn err(s: &str) -> OptionError {
+            MqttOptions::parse_url(s).expect_err("invalid unix socket url")
+        }
+
+        assert_eq!(err("unix:///tmp/mqtt.sock"), OptionError::ClientId);
+        assert_eq!(
+            err("unix://localhost/tmp/mqtt.sock?client_id=foo"),
+            OptionError::UnixSocketPath
+        );
+        assert_eq!(err("unix:///?client_id=foo"), OptionError::UnixSocketPath);
+    }
+
+    #[test]
+    fn accept_empty_client_id() {
+        let _mqtt_opts = MqttOptions::new("", "127.0.0.1").set_clean_session(true);
+    }
+
+    #[test]
+    fn accepts_broad_valid_client_ids() {
+        for client_id in [
+            "this-client-id-is-definitely-longer-than-twenty-three-bytes",
+            "client.with.dots",
+            "client_with_underscores",
+            "client-123",
+            "cliente-áéíóú",
+        ] {
+            let options = MqttOptions::new(client_id, "127.0.0.1");
+            assert_eq!(options.client_id(), client_id);
+        }
+    }
+
+    #[test]
+    fn minimum_client_id_helper_accepts_server_required_profile() {
+        assert!(is_mqtt_minimum_client_id("abcXYZ01234567890123456"));
+    }
+
+    #[test]
+    fn minimum_client_id_helper_rejects_values_outside_server_required_profile() {
+        assert!(!is_mqtt_minimum_client_id(""));
+        assert!(!is_mqtt_minimum_client_id("abc-123"));
+        assert!(!is_mqtt_minimum_client_id("abcXYZ012345678901234567"));
+        assert!(!is_mqtt_minimum_client_id("clienté"));
+    }
+
+    #[test]
+    fn mqtt_options_builder_matches_setter_configuration() {
+        let will = LastWill::new("hello/world", "good bye", QoS::AtLeastOnce, false);
+        let mut expected = MqttOptions::new("client", ("localhost", 1884));
+        expected
+            .set_keep_alive(5)
+            .set_last_will(will.clone())
+            .set_clean_session(false)
+            .set_credentials("user", Bytes::from_static(b"password"))
+            .set_request_channel_capacity(16)
+            .set_max_request_batch(8)
+            .set_read_batch_size(32)
+            .set_pending_throttle(Duration::from_micros(250))
+            .set_inflight(4)
+            .set_ack_mode(AckMode::Manual)
+            .set_max_packet_size(4096, 2048);
+
+        let actual = MqttOptions::builder("client", ("localhost", 1884))
+            .keep_alive(5)
+            .last_will(will)
+            .clean_session(false)
+            .credentials("user", Bytes::from_static(b"password"))
+            .request_channel_capacity(16)
+            .max_request_batch(8)
+            .read_batch_size(32)
+            .pending_throttle(Duration::from_micros(250))
+            .inflight(4)
+            .ack_mode(AckMode::Manual)
+            .max_packet_size(4096, 2048)
+            .build();
+
+        assert_eq!(
+            actual.broker().tcp_address(),
+            expected.broker().tcp_address()
+        );
+        assert_eq!(actual.keep_alive(), expected.keep_alive());
+        assert_eq!(actual.last_will(), expected.last_will());
+        assert_eq!(actual.clean_session(), expected.clean_session());
+        assert_eq!(actual.auth(), expected.auth());
+        assert_eq!(
+            actual.request_channel_capacity(),
+            expected.request_channel_capacity()
+        );
+        assert_eq!(actual.max_request_batch(), expected.max_request_batch());
+        assert_eq!(actual.read_batch_size(), expected.read_batch_size());
+        assert_eq!(actual.pending_throttle(), expected.pending_throttle());
+        assert_eq!(actual.inflight(), expected.inflight());
+        assert_eq!(actual.ack_mode(), expected.ack_mode());
+        assert_eq!(
+            actual.max_incoming_packet_size,
+            expected.max_incoming_packet_size
+        );
+        assert_eq!(
+            actual.max_outgoing_packet_size,
+            expected.max_outgoing_packet_size
+        );
+    }
+
+    #[test]
+    fn mqtt_options_builder_can_replace_and_clear_auth() {
+        let actual = MqttOptions::builder("client", "localhost")
+            .username("user")
+            .clear_auth()
+            .auth(ConnectAuth::Username {
+                username: "next".to_owned(),
+            })
+            .build();
+
+        assert_eq!(
+            actual.auth(),
+            &ConnectAuth::Username {
+                username: "next".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn mqtt_options_builder_request_capacity_feeds_client_builder_default() {
+        let mqttoptions = MqttOptions::builder("test-1", "localhost")
+            .request_channel_capacity(1)
+            .build();
+        let (client, _eventloop) = AsyncClient::builder(mqttoptions).build();
+
+        client
+            .try_publish("hello/world", "one", PublishOptions::new(QoS::AtMostOnce))
+            .expect("first request should fit configured capacity");
+        assert!(matches!(
+            client.try_publish("hello/world", "two", PublishOptions::new(QoS::AtMostOnce)),
+            Err(ClientError::RequestChannelFull(request)) if matches!(*request, Request::Publish(_))
+        ));
+    }
+
+    #[test]
+    fn set_clean_session_when_client_id_present() {
+        let mut options = MqttOptions::new("client_id", "127.0.0.1");
+        options.set_clean_session(false);
+        options.set_clean_session(true);
+    }
+
+    #[test]
+    fn set_session_mode_when_client_id_present() {
+        let mut options = MqttOptions::new("client_id", "127.0.0.1");
+        options.set_session_mode(SessionMode::Persistent);
+        assert!(!options.clean_session());
+        options.set_session_mode(SessionMode::Clean);
+        assert!(options.clean_session());
+    }
+
+    #[test]
+    fn try_set_clean_session_reports_empty_client_id_error() {
+        let mut options = MqttOptions::new("", "127.0.0.1");
+        assert!(matches!(
+            options.try_set_clean_session(false),
+            Err(ConfigError::PersistentSessionRequiresClientId)
+        ));
+    }
+
+    #[test]
+    fn try_set_inflight_reports_zero_error() {
+        let mut options = MqttOptions::new("client_id", "127.0.0.1");
+        assert!(matches!(
+            options.try_set_inflight(0),
+            Err(ConfigError::Inflight)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_packet_sizes() {
+        let mut options = MqttOptions::new("client_id", "127.0.0.1");
+        options.set_max_packet_size(0, 1024);
+        assert_eq!(options.validate(), Err(ConfigError::MaxIncomingPacketSize));
+
+        options.set_max_packet_size(1024, 0);
+        assert_eq!(options.validate(), Err(ConfigError::MaxOutgoingPacketSize));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_rejects_unix_broker_with_tcp_transport() {
+        let mut options = MqttOptions::new("client_id", Broker::unix("/tmp/mqtt.sock"));
+        options.set_transport(Transport::tcp());
+        assert_eq!(
+            options.validate(),
+            Err(ConfigError::BrokerTransportMismatch)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "websocket")]
+    fn validate_rejects_tcp_broker_with_websocket_transport() {
+        let mut options = MqttOptions::new("client_id", "localhost");
+        options.set_transport(Transport::ws());
+        assert_eq!(
+            options.validate(),
+            Err(ConfigError::BrokerTransportMismatch)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "websocket")]
+    fn async_client_try_build_rejects_invalid_options() {
+        let mut options = MqttOptions::new("client_id", "localhost");
+        options.set_transport(Transport::ws());
+
+        assert!(matches!(
+            AsyncClient::builder(options).try_build(),
+            Err(ClientBuildError::Config(
+                ConfigError::BrokerTransportMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn read_batch_size_defaults_to_adaptive() {
+        let options = MqttOptions::new("client_id", "127.0.0.1");
+        assert_eq!(options.read_batch_size(), 0);
+    }
+
+    #[test]
+    fn session_store_scope_feeds_session_store_key() {
+        let options = MqttOptions::builder("client_id", "127.0.0.1")
+            .session_store_scope("tenant-a/broker-1")
+            .build();
+        let key = options.session_store_key();
+
+        assert_eq!(options.session_store_scope(), "tenant-a/broker-1");
+        assert_eq!(key.scope(), "tenant-a/broker-1");
+        assert_eq!(key.client_id(), "client_id");
+    }
+
+    #[test]
+    fn set_read_batch_size() {
+        let mut options = MqttOptions::new("client_id", "127.0.0.1");
+        options.set_read_batch_size(48);
+        assert_eq!(options.read_batch_size(), 48);
+    }
+
+    /// MQTT-3.1.3-7: setting an empty client_id with clean_session=false must panic.
+    #[test]
+    #[should_panic(expected = "Cannot set empty client id when clean session is false")]
+    fn set_client_id_panics_on_empty_with_clean_session_false() {
+        let mut options = MqttOptions::new("id", "127.0.0.1");
+        options.set_clean_session(false);
+        options.set_client_id(String::new());
+    }
+
+    /// MQTT-3.1.3-7: disabling clean_session with an empty client_id must panic.
+    #[test]
+    #[should_panic(expected = "Cannot unset clean session when client id is empty")]
+    fn set_clean_session_panics_on_false_with_empty_client_id() {
+        let mut options = MqttOptions::new("", "127.0.0.1");
+        options.set_clean_session(false);
+    }
+
+    /// MQTT-3.1.3-7: builder with empty client_id and clean_session=false must panic.
+    #[test]
+    #[should_panic(expected = "Cannot unset clean session when client id is empty")]
+    fn builder_panics_on_clean_session_false_with_empty_client_id() {
+        drop(
+            MqttOptions::builder("", "127.0.0.1")
+                .clean_session(false)
+                .build(),
+        );
+    }
+
+    /// MQTT-3.1.3-7: URL parsing with empty client_id and clean_session=false must error.
+    #[test]
+    #[cfg(feature = "url")]
+    fn parse_url_errors_on_clean_session_false_with_empty_client_id() {
+        assert!(matches!(
+            MqttOptions::parse_url("mqtt://127.0.0.1?client_id=&clean_session=false"),
+            Err(OptionError::Config(
+                ConfigError::PersistentSessionRequiresClientId
+            ))
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "url")]
+    fn parse_url_errors_on_zero_inflight() {
+        assert!(matches!(
+            MqttOptions::parse_url("mqtt://127.0.0.1?client_id=client&inflight_num=0"),
+            Err(OptionError::Config(ConfigError::Inflight))
+        ));
+    }
+}

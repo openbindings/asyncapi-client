@@ -2,7 +2,7 @@
 
 This unpublished crate executes prepared plans from `dynamic-asyncapi-client`. It owns Tokio and the protocol libraries; the semantic engine and its Wasm composition remain independent of native dependencies.
 
-The first execution slice supports schema-free binary messages over MQTT 3.1.1 QoS 0/1 and WebSocket RFC 6455, over TCP. TLS, MQTT QoS 2, automatic recovery, wildcard receive dispatch, payload schemas, authentication-scheme planning and replies remain required expansion work. Explicit session credentials are currently available for MQTT; they are never copied into a document or plan.
+The first execution slice supports schema-free binary messages over MQTT 3.1.1 QoS 0/1/2 and WebSocket RFC 6455, over TCP. TLS, MQTT 5, automatic recovery, wildcard receive dispatch, payload schemas, authentication-scheme planning and replies remain required expansion work. Explicit session credentials are currently available for MQTT; they are never copied into a document or plan.
 
 ```rust,ignore
 let send = document.operation_id("emit")?.compile()?.prepare(&PlanOptions::application())?;
@@ -18,7 +18,7 @@ The plan slice establishes explicit connection sharing. Plans must agree on conn
 
 A session owns one driver task. MQTT keepalive and WebSocket control frames progress while the application is idle. WebSocket reads continue while a write is pending. Sender handles can be retained or used concurrently with a receive wait, but the driver serializes application sends. Close rejects new sends, performs protocol shutdown, joins the task and releases its connection. Dropping an owner, including canceling its close future, aborts that task and initiates connection release.
 
-MQTT QoS 0 receipts mean PUBLISH was flushed locally; no broker acknowledgment exists. QoS 1 receipts identify the matching PUBACK. WebSocket receipts mean the frame was flushed to the socket. Neither receipt establishes application processing by a peer. MQTT receive delivery is automatically acknowledged by this initial driver before application processing; manual settlement is not implemented yet. Unexpected WebSocket text is a rejected observation, never a binary operation result.
+MQTT QoS 0 receipts mean PUBLISH was flushed locally; no broker acknowledgment exists. QoS 1 receipts identify the matching PUBACK. QoS 2 receipts require the matching PUBCOMP after PUBREC/PUBREL; PUBREC alone is not completion. WebSocket receipts mean the frame was flushed to the socket. These receipts do not establish application processing by a peer. MQTT receive delivery is automatically acknowledged by this initial driver before application processing; manual settlement is not implemented yet. Unexpected WebSocket text is a rejected observation, never a binary operation result.
 
 Failed sends distinguish pre-admission rejection from potentially transmitted data with `delivery_unknown`. Canceling a send future does not retract bytes already handed to a driver. Queued canceled sends are skipped; a later acknowledgement cannot complete a different pending command. Deadlines after driver submission end the session, with no hidden reconnect or retransmission loop.
 
@@ -26,4 +26,4 @@ Default and maximum admission limits in this slice are 16 attached plans, 64 que
 
 The development checks include actual loopback peers, wrong-route and serialized-I/O controls, readiness, cancellation, deadlines, idle control traffic, queue/byte limits and repeated closes. These are development evidence; the full independent protocol, ownership, host and performance gates remain open.
 
-QoS 2 remains refused before connection. A source-level dependency probe found duplicate-publication and duplicate-acknowledgment gaps in the current backend. Enabling QoS 2 requires a verified repair or replacement, including receive deduplication, identifier reuse and complete PUBREC/PUBREL/PUBCOMP handling.
+MQTT 3.1.1 uses a [pinned repaired transport](../vendor/rumqttc-v4-next/LOCAL-CHANGES.md). Source provenance, the original license and the exact local patch are retained. It suppresses duplicate QoS 2 publication delivery, responds to repeated PUBREC/PUBREL, permits completed packet identifier reuse and validates acknowledgment type/phase/identity. Inbound QoS 2 tracking uses fixed packet-identifier bitsets; it does not retain already-delivered payloads. Live packet tests include 1,000 completed sends with one reusable queue slot. Recovery, manual settlement and independent conformance/performance qualification remain open; these tests do not imply an exactly-once application transaction.

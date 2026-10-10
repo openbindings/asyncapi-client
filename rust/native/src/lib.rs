@@ -1,12 +1,12 @@
 //! Explicitly owned native protocol sessions for immutable AsyncAPI plans.
-//! This initial execution slice supports MQTT 3.1.1 QoS 0/1 and binary WebSocket,
+//! This initial execution slice supports MQTT 3.1.1 QoS 0/1/2 and binary WebSocket,
 //! both over TCP. TLS, recovery and other protocol profiles remain open work.
 #![forbid(unsafe_code)]
 mod mqtt;
 mod websocket;
 
 pub use bytes::Bytes;
-use dynamic_asyncapi_client::{Plan, TransportPlan};
+use dynamic_asyncapi_client::Plan;
 use dynamic_asyncapi_session::{Budget, ConnectionPlan as Connection, Lease, Limits, SessionPlan};
 pub use dynamic_asyncapi_session::{RuntimeCode, RuntimeError};
 use serde::Serialize;
@@ -99,6 +99,10 @@ pub enum Receipt {
     MqttPublishFlushed,
     /// The broker returned PUBACK for this QoS 1 PUBLISH.
     MqttPubAck {
+        packet_id: u16,
+    },
+    /// The broker completed this QoS 2 exchange with PUBCOMP.
+    MqttPubComp {
         packet_id: u16,
     },
     WebSocketFlushed,
@@ -282,17 +286,6 @@ impl Session {
     pub async fn open(plans: &[Plan], options: SessionOptions) -> Result<Self, RuntimeError> {
         options.validate()?;
         let plans = SessionPlan::new(plans)?;
-        if plans.plans().iter().any(|plan| {
-            matches!(
-                plan.describe().transport,
-                TransportPlan::Mqtt311 { qos: 2, .. }
-            )
-        }) {
-            return Err(RuntimeError::new(
-                RuntimeCode::Unsupported,
-                "MQTT QoS 2 execution awaits a backend with verified duplicate-packet handling",
-            ));
-        }
         let connection = plans.connection().clone();
         match &connection {
             Connection::Mqtt(settings) if settings.tls => {

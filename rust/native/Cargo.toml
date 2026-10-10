@@ -14,7 +14,7 @@ dynamic-asyncapi-client = { path = "../client" }
 dynamic-asyncapi-session = { path = "../session" }
 serde.workspace = true
 bytes = "=1.12.1"
-rumqttc = { version = "=0.25.1", default-features = false }
+rumqttc = { package = "rumqttc-v4-next", path = "../vendor/rumqttc-v4-next", version = "=0.34.0", default-features = false }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
 tokio = { version = "=1.53.2", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
 futures-util = { version = "=0.3.32", features = ["sink"] }

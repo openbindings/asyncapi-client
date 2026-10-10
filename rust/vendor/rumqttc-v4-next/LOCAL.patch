@@ -1,0 +1,59 @@
+--- upstream/src/state.rs
++++ local/src/state.rs
+@@ -1174,10 +1174,13 @@
+             .get_mut(usize::from(puback.pkid))
+             .ok_or(StateError::Unsolicited(puback.pkid))?;
+ 
+-        if publish.take().is_none() {
+-            error!("Unsolicited puback packet: {:?}", puback.pkid);
++        if !publish
++            .as_ref()
++            .is_some_and(|publish| publish.qos == QoS::AtLeastOnce)
++        {
+             return Err(StateError::Unsolicited(puback.pkid));
+         }
++        publish.take();
+         self.outgoing_pub_flush_attempted
+             .set(usize::from(puback.pkid), false);
+         self.mark_outgoing_packet_id_complete(puback.pkid);
+@@ -1210,15 +1213,27 @@
+         &mut self,
+         pubrec: &PubRec,
+     ) -> Result<IncomingPacketEffects, StateError> {
++        // MQTT 3.1.1 4.3.3: a repeated PUBREC still requires PUBREL.
++        // Retain the original completion notice and in-flight reservation.
++        if self.outgoing_rel.contains(usize::from(pubrec.pkid)) {
++            self.events
++                .push_back(Event::Outgoing(Outgoing::PubRel(pubrec.pkid)));
++            return Ok(IncomingPacketEffects::outgoing(Some(Packet::PubRel(
++                PubRel::new(pubrec.pkid),
++            ))));
++        }
+         let publish = self
+             .outgoing_pub
+             .get_mut(usize::from(pubrec.pkid))
+             .ok_or(StateError::Unsolicited(pubrec.pkid))?;
+ 
+-        if publish.take().is_none() {
+-            error!("Unsolicited pubrec packet: {:?}", pubrec.pkid);
++        if !publish
++            .as_ref()
++            .is_some_and(|publish| publish.qos == QoS::ExactlyOnce)
++        {
+             return Err(StateError::Unsolicited(pubrec.pkid));
+         }
++        publish.take();
+         self.outgoing_pub_flush_attempted
+             .set(usize::from(pubrec.pkid), false);
+ 
+--- upstream/Cargo.toml
++++ local/Cargo.toml
+@@ -16,7 +16,7 @@
+ version = "0.34.0"
+ authors = ["tekjar <raviteja@bytebeam.io>"]
+ build = false
+-publish = true
++publish = false
+ autolib = false
+ autobins = false
+ autoexamples = false

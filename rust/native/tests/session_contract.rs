@@ -570,16 +570,28 @@ async fn control_frames_are_not_limited_by_a_smaller_binary_message_budget() {
 
 /// A deliberately small independent packet writer for the receive contracts.
 async fn incoming_publish(stream: &mut TcpStream, qos: u8) {
+    incoming_publication(stream, qos, 7, false, b"payload").await;
+}
+async fn incoming_publication(
+    stream: &mut TcpStream,
+    qos: u8,
+    id: u16,
+    duplicate: bool,
+    payload: &[u8],
+) {
     let topic = b"fixture/events";
     let mut body = Vec::from((topic.len() as u16).to_be_bytes());
     body.extend_from_slice(topic);
     if qos > 0 {
-        body.extend_from_slice(&[0, 7]);
+        body.extend_from_slice(&id.to_be_bytes());
     }
-    body.extend_from_slice(b"payload");
+    body.extend_from_slice(payload);
     assert!(body.len() < 128);
     stream
-        .write_all(&[0x30 | (qos << 1), body.len() as u8])
+        .write_all(&[
+            0x30 | (qos << 1) | (u8::from(duplicate) << 3),
+            body.len() as u8,
+        ])
         .await
         .unwrap();
     stream.write_all(&body).await.unwrap();
@@ -628,8 +640,20 @@ async fn qos_zero_flushes_without_puback_and_releases_capacity() {
 
 #[tokio::test]
 async fn subscription_grants_are_maxima_and_delivery_reports_actual_qos() {
-    for (requested, granted, actual) in [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 1, 1)] {
+    for (requested, granted, actual) in [
+        (0, 0, 0),
+        (1, 0, 0),
+        (1, 1, 0),
+        (1, 1, 1),
+        (2, 0, 0),
+        (2, 1, 0),
+        (2, 1, 1),
+        (2, 2, 0),
+        (2, 2, 1),
+        (2, 2, 2),
+    ] {
         let (listener, port) = listener().await;
+        let (done, observed) = oneshot::channel();
         let server = tokio::spawn(async move {
             let mut stream = mqtt_ready(listener).await;
             let (kind, body) = packet(&mut stream).await;
@@ -642,7 +666,12 @@ async fn subscription_grants_are_maxima_and_delivery_reports_actual_qos() {
             incoming_publish(&mut stream, actual).await;
             if actual == 1 {
                 assert_eq!(packet(&mut stream).await, (0x40, vec![0, 7]));
+            } else if actual == 2 {
+                assert_eq!(packet(&mut stream).await, (0x50, vec![0, 7]));
+                stream.write_all(&[0x62, 2, 0, 7]).await.unwrap();
+                assert_eq!(packet(&mut stream).await, (0x70, vec![0, 7]));
             }
+            done.send(()).unwrap();
             // A QoS 0 delivery has no acknowledgment on the wire.
             assert_eq!(packet(&mut stream).await.0, 0xe0);
             socket_closed(&mut stream).await;
@@ -667,6 +696,7 @@ async fn subscription_grants_are_maxima_and_delivery_reports_actual_qos() {
         assert!(
             matches!(message.delivery, Delivery::Mqtt {qos,packet_id,..} if qos == actual && packet_id == if actual == 0 { 0 } else { 7 })
         );
+        observed.await.unwrap();
         session.close().await.unwrap();
         server.await.unwrap();
     }
@@ -744,21 +774,6 @@ async fn publication_above_negotiated_grant_is_a_protocol_failure() {
         RuntimeCode::Protocol
     );
     server.await.unwrap();
-}
-
-#[tokio::test]
-async fn qos_two_refuses_before_any_connection_attempt() {
-    let (listener, port) = listener().await;
-    for (send, receive) in [(2, 1), (1, 2)] {
-        assert!(
-            matches!(Session::open(&plans_at_qos("mqtt",port,true,send,receive), SessionOptions::default()).await, Err(error) if error.code == RuntimeCode::Unsupported)
-        );
-    }
-    assert!(
-        timeout(Duration::from_millis(20), listener.accept())
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]
@@ -843,4 +858,322 @@ async fn suback_must_match_subscription_identity_and_count() {
         );
         server.await.unwrap();
     }
+}
+
+async fn control_packet(stream: &mut TcpStream, kind: u8, id: u16) {
+    stream
+        .write_all(&[kind, 2, (id >> 8) as u8, id as u8])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn qos_two_receipt_waits_for_pubcomp_after_repeated_pubrec() {
+    let (listener, port) = listener().await;
+    let (seen, observed) = oneshot::channel();
+    let (release, wait) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        let (kind, body) = packet(&mut stream).await;
+        assert_eq!(kind, 0x34);
+        let (id, payload) = publish(&body);
+        assert_eq!(payload, b"payload");
+        for _ in 0..2 {
+            control_packet(&mut stream, 0x50, id).await;
+            assert_eq!(packet(&mut stream).await, (0x62, id.to_be_bytes().to_vec()));
+        }
+        seen.send(id).unwrap();
+        wait.await.unwrap();
+        control_packet(&mut stream, 0x70, id).await;
+        assert_eq!(packet(&mut stream).await.0, 0xe0);
+        socket_closed(&mut stream).await;
+    });
+    let session = Session::open(
+        &plans_at_qos("mqtt", port, false, 2, 0),
+        SessionOptions::default(),
+    )
+    .await
+    .unwrap();
+    let sender = session.sender();
+    let mut sending = Box::pin(sender.send(0, Vec::from(b"payload".as_slice())));
+    let id = tokio::select! { result=&mut sending=>panic!("send completed before PUBCOMP: {result:?}"), id=observed=>id.unwrap() };
+    assert!(
+        timeout(Duration::from_millis(20), &mut sending)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        sending.await.unwrap(),
+        Receipt::MqttPubComp { packet_id: id }
+    );
+    session.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn qos_two_receive_suppresses_duplicates_and_allows_completed_identifier_reuse() {
+    for id in [7, u16::MAX] {
+        let (listener, port) = listener().await;
+        let (done, observed) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut stream = mqtt_ready(listener).await;
+            let (_, body) = packet(&mut stream).await;
+            stream
+                .write_all(&[0x90, 3, body[0], body[1], 2])
+                .await
+                .unwrap();
+            for payload in [b"first".as_slice(), b"second".as_slice()] {
+                for duplicate in [false, true] {
+                    incoming_publication(&mut stream, 2, id, duplicate, payload).await;
+                    assert_eq!(packet(&mut stream).await, (0x50, id.to_be_bytes().to_vec()));
+                }
+                for _ in 0..2 {
+                    control_packet(&mut stream, 0x62, id).await;
+                    assert_eq!(packet(&mut stream).await, (0x70, id.to_be_bytes().to_vec()));
+                }
+            }
+            done.send(()).unwrap();
+            assert_eq!(packet(&mut stream).await.0, 0xe0);
+            socket_closed(&mut stream).await;
+        });
+        let mut session = Session::open(
+            &plans_at_qos("mqtt", port, true, 0, 2),
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+        for payload in [b"first".as_slice(), b"second".as_slice()] {
+            let Some(Incoming::Message(message)) = session.next().await.unwrap() else {
+                panic!("missing publication")
+            };
+            assert_eq!(message.payload.as_ref(), payload);
+            assert!(
+                matches!(message.delivery,Delivery::Mqtt{qos:2,packet_id,duplicate:false,..} if packet_id==id)
+            );
+        }
+        observed.await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(20), session.next())
+                .await
+                .is_err()
+        );
+        session.close().await.unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn qos_two_rejects_acknowledgment_type_phase_and_identity_mismatches() {
+    for mode in [
+        "puback",
+        "premature-pubcomp",
+        "wrong-pubrec",
+        "wrong-pubcomp",
+    ] {
+        let (listener, port) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut stream = mqtt_ready(listener).await;
+            let (_, body) = packet(&mut stream).await;
+            let (id, _) = publish(&body);
+            match mode {
+                "puback" => control_packet(&mut stream, 0x40, id).await,
+                "premature-pubcomp" => control_packet(&mut stream, 0x70, id).await,
+                "wrong-pubrec" => control_packet(&mut stream, 0x50, id + 1).await,
+                "wrong-pubcomp" => {
+                    control_packet(&mut stream, 0x50, id).await;
+                    assert_eq!(packet(&mut stream).await, (0x62, id.to_be_bytes().to_vec()));
+                    control_packet(&mut stream, 0x70, id + 1).await;
+                }
+                _ => unreachable!(),
+            }
+            socket_closed(&mut stream).await;
+        });
+        let session = Session::open(
+            &plans_at_qos("mqtt", port, false, 2, 0),
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+        let error = session.send(0, vec![1]).await.unwrap_err();
+        assert_eq!(error.code, RuntimeCode::Protocol, "{mode}");
+        assert!(error.delivery_unknown);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn qos_one_rejects_a_pubrec_instead_of_switching_to_qos_two() {
+    let (listener, port) = listener().await;
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        let (_, body) = packet(&mut stream).await;
+        let (id, _) = publish(&body);
+        control_packet(&mut stream, 0x50, id).await;
+        socket_closed(&mut stream).await;
+    });
+    let session = Session::open(&plans("mqtt", port, false), SessionOptions::default())
+        .await
+        .unwrap();
+    let error = session.send(0, vec![1]).await.unwrap_err();
+    assert_eq!(error.code, RuntimeCode::Protocol);
+    assert!(error.delivery_unknown);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_qos_two_acknowledgments_expire_with_uncertain_delivery() {
+    for after_pubrec in [false, true] {
+        let (listener, port) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut stream = mqtt_ready(listener).await;
+            let (_, body) = packet(&mut stream).await;
+            let (id, _) = publish(&body);
+            if after_pubrec {
+                control_packet(&mut stream, 0x50, id).await;
+                assert_eq!(packet(&mut stream).await, (0x62, id.to_be_bytes().to_vec()));
+            }
+            socket_closed(&mut stream).await;
+        });
+        let session = Session::open(
+            &plans_at_qos("mqtt", port, false, 2, 0),
+            SessionOptions {
+                operation_timeout: Duration::from_millis(60),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let error = session.send(0, vec![1]).await.unwrap_err();
+        assert_eq!(error.code, RuntimeCode::Deadline);
+        assert!(error.delivery_unknown);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn qos_two_protocol_state_and_capacity_are_reusable_across_many_sends() {
+    let (listener, port) = listener().await;
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        for sequence in 0..1000_u16 {
+            let (kind, body) = packet(&mut stream).await;
+            assert_eq!(kind, 0x34);
+            let (id, payload) = publish(&body);
+            assert_eq!(payload, sequence.to_be_bytes());
+            control_packet(&mut stream, 0x50, id).await;
+            assert_eq!(packet(&mut stream).await, (0x62, id.to_be_bytes().to_vec()));
+            control_packet(&mut stream, 0x70, id).await;
+        }
+        assert_eq!(packet(&mut stream).await.0, 0xe0);
+        socket_closed(&mut stream).await;
+    });
+    let session = Session::open(
+        &plans_at_qos("mqtt", port, false, 2, 0),
+        SessionOptions {
+            max_messages: 1,
+            max_message_bytes: 2,
+            max_buffered_bytes: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    for sequence in 0..1000_u16 {
+        assert!(
+            matches!(session.send(0,sequence.to_be_bytes().to_vec()).await.unwrap(),Receipt::MqttPubComp{packet_id} if packet_id>0)
+        );
+    }
+    session.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_a_qos_two_waiter_does_not_cross_complete_the_next_send() {
+    let (listener, port) = listener().await;
+    let (seen, observed) = oneshot::channel();
+    let (release, wait) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        let (_, body) = packet(&mut stream).await;
+        let (first, payload) = publish(&body);
+        assert_eq!(payload, [1]);
+        control_packet(&mut stream, 0x50, first).await;
+        assert_eq!(
+            packet(&mut stream).await,
+            (0x62, first.to_be_bytes().to_vec())
+        );
+        seen.send(first).unwrap();
+        wait.await.unwrap();
+        // Repeated PUBREC after the application cancelled its waiter still
+        // belongs to the first protocol exchange.
+        control_packet(&mut stream, 0x50, first).await;
+        assert_eq!(
+            packet(&mut stream).await,
+            (0x62, first.to_be_bytes().to_vec())
+        );
+        control_packet(&mut stream, 0x70, first).await;
+        let (_, body) = packet(&mut stream).await;
+        let (second, payload) = publish(&body);
+        assert_ne!(first, second);
+        assert_eq!(payload, [2]);
+        control_packet(&mut stream, 0x50, second).await;
+        assert_eq!(
+            packet(&mut stream).await,
+            (0x62, second.to_be_bytes().to_vec())
+        );
+        control_packet(&mut stream, 0x70, second).await;
+        assert_eq!(packet(&mut stream).await.0, 0xe0);
+        socket_closed(&mut stream).await;
+        second
+    });
+    let session = Session::open(
+        &plans_at_qos("mqtt", port, false, 2, 0),
+        SessionOptions::default(),
+    )
+    .await
+    .unwrap();
+    let sender = session.sender();
+    let first = tokio::spawn(async move { sender.send(0, vec![1]).await });
+    let first_id = observed.await.unwrap();
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let sender = session.sender();
+    let second = tokio::spawn(async move { sender.send(0, vec![2]).await });
+    release.send(()).unwrap();
+    let Receipt::MqttPubComp { packet_id } = second.await.unwrap().unwrap() else {
+        panic!("wrong receipt")
+    };
+    assert_ne!(packet_id, first_id);
+    session.close().await.unwrap();
+    assert_eq!(server.await.unwrap(), packet_id);
+}
+
+#[tokio::test]
+async fn dropping_qos_two_owner_releases_an_unfinished_exchange() {
+    let (listener, port) = listener().await;
+    let (seen, observed) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut stream = mqtt_ready(listener).await;
+        let (_, body) = packet(&mut stream).await;
+        let (id, _) = publish(&body);
+        control_packet(&mut stream, 0x50, id).await;
+        assert_eq!(packet(&mut stream).await, (0x62, id.to_be_bytes().to_vec()));
+        seen.send(()).unwrap();
+        socket_closed(&mut stream).await;
+    });
+    let session = Session::open(
+        &plans_at_qos("mqtt", port, false, 2, 0),
+        SessionOptions::default(),
+    )
+    .await
+    .unwrap();
+    let sender = session.sender();
+    let sending = tokio::spawn(async move { sender.send(0, vec![1]).await });
+    observed.await.unwrap();
+    drop(session);
+    let error = sending.await.unwrap().unwrap_err();
+    assert_eq!(error.code, RuntimeCode::Closed);
+    assert!(error.delivery_unknown);
+    server.await.unwrap();
 }
