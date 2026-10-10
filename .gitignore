@@ -7,3 +7,4 @@ rust/target/
 packages/client/wasm/
 packages/client/dist/
 qualification/composition/target/
+qualification/driver-controls/target/
