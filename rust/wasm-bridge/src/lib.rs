@@ -1,5 +1,7 @@
 //! Private ABI used by the handwritten TypeScript facade. Not a second engine.
-use dynamic_asyncapi_client::{Diagnostic, Document, Json, Operation};
+use dynamic_asyncapi_client::{
+    Code, CompiledOperation, Diagnostic, Document, Json, Operation, Plan, PlanOptions,
+};
 use wasm_bindgen::prelude::*;
 
 fn encoded(value: &impl serde::Serialize) -> String {
@@ -71,6 +73,43 @@ impl OperationHandle {
     }
     pub fn authored(&self) -> JsonHandle {
         JsonHandle(self.0.authored())
+    }
+    pub fn compile(&self) -> Result<CompiledOperationHandle, JsValue> {
+        self.0.compile().map(CompiledOperationHandle).map_err(error)
+    }
+}
+
+#[wasm_bindgen]
+pub struct CompiledOperationHandle(CompiledOperation);
+#[wasm_bindgen]
+impl CompiledOperationHandle {
+    pub fn describe_json(&self) -> String {
+        encoded(self.0.describe())
+    }
+    pub fn message_source(&self, key: &str) -> Option<JsonHandle> {
+        self.0.message_source(key).map(JsonHandle)
+    }
+    pub fn server_source(&self, key: &str) -> Option<JsonHandle> {
+        self.0.server_source(key).map(JsonHandle)
+    }
+    pub fn prepare(&self, options: &str) -> Result<PlanHandle, JsValue> {
+        let options: PlanOptions = serde_json::from_str(options).map_err(|_| {
+            error(Diagnostic {
+                code: Code::InvalidConfiguration,
+                location: None,
+                requirement: None,
+                detail: "preparation options have an invalid field or type".into(),
+            })
+        })?;
+        self.0.prepare(&options).map(PlanHandle).map_err(error)
+    }
+}
+#[wasm_bindgen]
+pub struct PlanHandle(Plan);
+#[wasm_bindgen]
+impl PlanHandle {
+    pub fn describe_json(&self) -> String {
+        encoded(self.0.describe())
     }
 }
 

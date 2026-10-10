@@ -1,6 +1,6 @@
+use crate::effective::{Effective, with_traits};
 use crate::source::{Source, escape, valid_pointer};
 use crate::{Code, Diagnostic, Json, Limits, Location, Requirement};
-use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -110,6 +110,10 @@ impl Document {
             limits,
         })))
     }
+    pub(crate) fn limits(&self) -> Limits {
+        self.0.limits
+    }
+
     pub fn edition(&self) -> Edition {
         self.0.edition
     }
@@ -338,7 +342,7 @@ impl Document {
         Ok(node)
     }
 
-    fn reference_target(&self, node: &Json) -> Result<Json, Diagnostic> {
+    pub(crate) fn reference_target(&self, node: &Json) -> Result<Json, Diagnostic> {
         if self.0.limits.reference_steps == 0 {
             return Err(
                 Diagnostic::new(Code::Limit, "reference traversal limit exceeded")
@@ -460,72 +464,23 @@ impl Operation {
                     .replace("~0", "~"),
             ));
         }
-        let (object, effective) = self.effective()?;
-        optional_string(&effective, "operationId", &object.location())
+        let (_, effective) = self.effective()?;
+        effective.optional_string("operationId")
     }
 
-    fn effective(&self) -> Result<(Json, Value), Diagnostic> {
+    pub(crate) fn effective(&self) -> Result<(Json, Effective), Diagnostic> {
         let object = self.document.resolve(self.authored.clone())?;
-        if !object.value().is_object() {
-            return Err(
-                Diagnostic::new(Code::InvalidOperation, "operation must be an object")
-                    .at(object.location()),
-            );
-        }
-        let mut effective = Value::Object(Default::default());
-        let mut remaining = self.document.0.limits.merge_nodes;
-        if let Some(traits) = object.get("traits") {
-            let items = traits.elements().ok_or_else(|| {
-                Diagnostic::new(Code::InvalidOperation, "traits must be an array")
-                    .at(traits.location())
-            })?;
-            if items.len() > self.document.0.limits.trait_count {
-                return Err(
-                    Diagnostic::new(Code::Limit, "operation trait limit exceeded")
-                        .at(traits.location()),
-                );
-            }
-            for item in items {
-                let item = self.document.resolve(item)?;
-                let forbidden: &[&str] = if self.legacy_action.is_some() {
-                    &["message", "traits"]
-                } else {
-                    &["action", "channel", "messages", "traits"]
-                };
-                if !item.value().is_object() || forbidden.iter().any(|key| item.get(key).is_some())
-                {
-                    return Err(Diagnostic::new(
-                        Code::InvalidOperation,
-                        "invalid operation trait field or shape",
-                    )
-                    .at(item.location()));
-                }
-                merge_patch(&mut effective, item.value(), &mut remaining)
-                    .map_err(|e| e.at(item.location()))?;
-            }
-        }
-        merge_patch(&mut effective, object.value(), &mut remaining)
-            .map_err(|e| e.at(object.location()))?;
+        let forbidden: &[&str] = if self.legacy_action.is_some() {
+            &["message", "traits"]
+        } else {
+            &["action", "channel", "messages", "traits"]
+        };
+        let effective = with_traits(&self.document, object.clone(), forbidden)?;
         Ok((object, effective))
     }
 
-    pub fn describe(&self) -> Result<OperationDescription, Diagnostic> {
-        let (object, effective) = self.effective()?;
-        let action = match self.legacy_action {
-            Some(action) => action,
-            None => match object.get("action").as_ref().and_then(Json::as_str) {
-                Some("send") => Action::Send,
-                Some("receive") => Action::Receive,
-                _ => {
-                    return Err(Diagnostic::new(
-                        Code::InvalidOperation,
-                        "action must be send or receive",
-                    )
-                    .at(object.location()));
-                }
-            },
-        };
-        let (channel, address) = if let Some((address, channel)) = &self.channel {
+    pub(crate) fn channel(&self, object: &Json) -> Result<(Json, Option<String>), Diagnostic> {
+        let result = if let Some((address, channel)) = &self.channel {
             (channel.clone(), Some(address.clone()))
         } else {
             let channel_ref = object.get("channel").ok_or_else(|| {
@@ -540,11 +495,16 @@ impl Operation {
                 .at(channel_ref.location()));
             }
             let channel_target = self.document.reference_target(&channel_ref)?;
-            if !Arc::ptr_eq(&channel_target.source, &self.document.0.root)
-                || !channel_target
-                    .pointer
-                    .strip_prefix("/channels/")
-                    .is_some_and(|key| !key.contains('/'))
+            let component_operation = object
+                .pointer
+                .strip_prefix("/components/operations/")
+                .is_some_and(|key| !key.contains('/'));
+            if !component_operation
+                && (!Arc::ptr_eq(&channel_target.source, &self.document.0.root)
+                    || !channel_target
+                        .pointer
+                        .strip_prefix("/channels/")
+                        .is_some_and(|key| !key.contains('/')))
             {
                 return Err(Diagnostic::new(
                     Code::InvalidOperation,
@@ -561,88 +521,56 @@ impl Operation {
             }
             let address = match channel.get("address") {
                 Some(value) if value.is_null() => None,
-                _ => optional_string(channel.value(), "address", &channel.location())?,
+                _ => Effective::from(channel.clone()).optional_string("address")?,
             };
             (channel, address)
         };
+        Ok(result)
+    }
+
+    pub fn describe(&self) -> Result<OperationDescription, Diagnostic> {
+        let (object, effective) = self.effective()?;
+        let (channel, address) = self.channel(&object)?;
+        self.describe_resolved(&object, &effective, &channel, address)
+    }
+
+    pub(crate) fn describe_resolved(
+        &self,
+        object: &Json,
+        effective: &Effective,
+        channel: &Json,
+        address: Option<String>,
+    ) -> Result<OperationDescription, Diagnostic> {
+        let action = match self.legacy_action {
+            Some(action) => action,
+            None => match object.get("action").as_ref().and_then(Json::as_str) {
+                Some("send") => Action::Send,
+                Some("receive") => Action::Receive,
+                _ => {
+                    return Err(Diagnostic::new(
+                        Code::InvalidOperation,
+                        "action must be send or receive",
+                    )
+                    .at(object.location()));
+                }
+            },
+        };
         let operation_id = if self.legacy_action.is_some() {
-            optional_string(&effective, "operationId", &object.location())?
+            effective.optional_string("operationId")?
         } else {
             self.authored_id()?
         };
         Ok(OperationDescription {
             action,
             operation_id,
-            summary: optional_string(&effective, "summary", &object.location())?,
-            description: optional_string(&effective, "description", &object.location())?,
+            summary: effective.optional_string("summary")?,
+            description: effective.optional_string("description")?,
             channel: channel.location(),
             address,
         })
     }
 }
 
-fn optional_string(
-    value: &Value,
-    key: &str,
-    location: &Location,
-) -> Result<Option<String>, Diagnostic> {
-    match value.get(key) {
-        None => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
-        _ => Err(
-            Diagnostic::new(Code::InvalidOperation, "declared field must be a string")
-                .at(location.clone()),
-        ),
-    }
-}
-fn spend(remaining: &mut usize) -> Result<(), Diagnostic> {
-    *remaining = remaining.checked_sub(1).ok_or_else(|| {
-        Diagnostic::new(Code::Limit, "effective declaration merge limit exceeded")
-    })?;
-    Ok(())
-}
-fn count_clone(value: &Value, remaining: &mut usize) -> Result<(), Diagnostic> {
-    spend(remaining)?;
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                count_clone(item, remaining)?;
-            }
-        }
-        Value::Object(fields) => {
-            for item in fields.values() {
-                count_clone(item, remaining)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-fn merge_patch(target: &mut Value, patch: &Value, remaining: &mut usize) -> Result<(), Diagnostic> {
-    if let Value::Object(fields) = patch {
-        spend(remaining)?;
-        if !target.is_object() {
-            *target = Value::Object(Default::default());
-        }
-        let target = target.as_object_mut().unwrap();
-        for (key, value) in fields {
-            if value.is_null() {
-                spend(remaining)?;
-                target.remove(key);
-            } else {
-                merge_patch(
-                    target.entry(key.clone()).or_insert(Value::Null),
-                    value,
-                    remaining,
-                )?;
-            }
-        }
-    } else {
-        count_clone(patch, remaining)?;
-        *target = patch.clone();
-    }
-    Ok(())
-}
 fn resource_uri(uri: &str) -> Result<String, Diagnostic> {
     let parsed = fluent_uri::Uri::parse(uri)
         .map_err(|_| Diagnostic::new(Code::InvalidReference, "source URI must be absolute"))?;

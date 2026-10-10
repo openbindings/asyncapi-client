@@ -5,10 +5,16 @@
 #![forbid(unsafe_code)]
 
 mod document;
+mod effective;
+mod preparation;
 mod source;
 mod yaml;
 
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};
+pub use preparation::{
+    CompiledDescription, CompiledOperation, MessageDescription, Plan, PlanDescription, PlanOptions,
+    ProtocolProfile, Role, ServerDescription, TransportPlan,
+};
 pub use source::{Json, Location};
 
 /// Stable coarse diagnostic classification. Individual reasons may be extended.
@@ -28,16 +34,38 @@ pub enum Code {
     InvalidOperation,
     MissingOperation,
     AmbiguousOperation,
+    NoMessages,
+    MissingConfiguration,
+    InvalidConfiguration,
+    UnsupportedFeature,
+    UnsupportedProtocol,
+    UnsupportedBinding,
     Limit,
 }
 
 /// A requirement the caller can satisfy without changing the original source.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Requirement {
     Resource { uri: String },
     SourceUri,
+    Server { choices: Vec<String> },
+    Message { choices: Vec<String> },
+    Variable { name: String },
+    Parameter { name: String },
+    Address,
+    ClientIdentity,
+    ProtocolProfile,
+    PeerRoute,
+    Codec { content_type: Option<String> },
+    Evaluator,
+    Reply,
+    Authentication,
 }
 
 /// An error tied to the original resource and JSON Pointer when available.

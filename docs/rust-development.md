@@ -4,10 +4,10 @@ The replacement is a standalone dynamic AsyncAPI client: portable Rust semantics
 
 | Location | Responsibility | Current status |
 | --- | --- | --- |
-| `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON/YAML source/inspection prototype; reader families 2.6, 3.0, 3.1 |
-| `rust/wasm-bridge` | Private ABI for the TypeScript facade | Inspection/owning handles; no transport logic |
+| `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON/YAML inspection and pure MQTT/WebSocket preparation; reader families 2.6, 3.0, 3.1 |
+| `rust/wasm-bridge` | Private ABI for the TypeScript facade | Inspection, compilation and pure plan handles; no transport logic |
 | `packages/client` | Supported TypeScript API under development | Private preview; exact values, structured errors and deterministic disposal |
-| `qualification/composition` | External Rust consumer with optional outer Wasm API | Direct inspection calls; preparation/message exchange still required |
+| `qualification/composition` | External Rust consumer with optional outer Wasm API | Direct inspection and preparation calls; message exchange still required |
 
 The target editions are 2.0–2.6, 3.0 and 3.1 in JSON and YAML. The native protocol target is MQTT 3.1.1/5, WebSocket, Kafka, AMQP 0-9-1, HTTP and Core NATS. Browser and Worker execution begins with WebSocket and HTTP clients. This table describes work in progress; neither accepting a version nor compiling Wasm establishes that target's support.
 
@@ -39,6 +39,6 @@ The package currently lives outside the legacy pnpm workspace to avoid resolving
 
 Source admission rejects duplicate decoded JSON keys, retains original byte ranges and exact numeric tokens, and bounds source size, depth, nodes and reference/trait work. Limits are development policy, not completed performance qualification. The implementation's depth ceiling is 96. Each document/resource completion is immutable; retained operations and source views own their data.
 
-Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait-field source traces, complete message/server inspection, broader format qualification, preparation, drivers and payload schemas remain open.
+Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait fields retain their defining source, including relative references inherited from external traits. Compilation preserves native message/server selection and explicit empty message sets. The first pure plan supports one schema-free binary message over MQTT 3.1.1 or WebSocket RFC 6455. It resolves declared variables and parameters without I/O. Security schemes, reply plans, schema evaluation, drivers and complete profile/edition conformance remain open. See [preparation](preparation.md) for the current contract and limits.
 
 Development assertions are regression evidence. Independent wire observations, installed-package consumers, memory/performance budgets, long runs and fresh conformance challenges are required before mature-product claims. The prior Go/TypeScript behavior is not an oracle for new semantics.

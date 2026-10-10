@@ -1,4 +1,4 @@
-import initializeWasm, { DocumentHandle, OperationHandle, JsonHandle, type InitInput } from '../wasm/asyncapi.js';
+import initializeWasm, { DocumentHandle, OperationHandle, CompiledOperationHandle, PlanHandle, JsonHandle, type InitInput } from '../wasm/asyncapi.js';
 
 export interface SourceLocation {
   readonly uri: string | null;
@@ -7,7 +7,12 @@ export interface SourceLocation {
   readonly aliases: ReadonlyArray<{ readonly start: number; readonly end: number }>;
 }
 export interface OperationIdentity { readonly uri: string | null; readonly pointer: string }
-export type Requirement = { readonly kind: 'sourceUri' } | { readonly kind: 'resource'; readonly uri: string };
+export type Requirement =
+  | { readonly kind: 'sourceUri' | 'address' | 'clientIdentity' | 'protocolProfile' | 'peerRoute' | 'evaluator' | 'reply' | 'authentication' }
+  | { readonly kind: 'resource'; readonly uri: string }
+  | { readonly kind: 'server' | 'message'; readonly choices: ReadonlyArray<string> }
+  | { readonly kind: 'variable' | 'parameter'; readonly name: string }
+  | { readonly kind: 'codec'; readonly contentType: string | null };
 export interface Diagnostic {
   readonly code: string;
   readonly location: SourceLocation | null;
@@ -21,6 +26,53 @@ export interface OperationDescription {
   readonly description: string | null;
   readonly channel: SourceLocation;
   readonly address: string | null;
+}
+export interface PlanOptions {
+  readonly role: 'application' | 'peer';
+  readonly server?: string;
+  readonly message?: string;
+  readonly profile?: 'mqtt311' | 'webSocket6455';
+  readonly variables?: Readonly<Record<string, string>>;
+  readonly parameters?: Readonly<Record<string, string>>;
+  readonly address?: string;
+  readonly clientId?: string;
+}
+export interface MessageDescription {
+  readonly key: string;
+  readonly selection: SourceLocation;
+  readonly definition: SourceLocation;
+  readonly name: string | null;
+  readonly contentType: string | null;
+  readonly payload: SourceLocation | null;
+  readonly headers: SourceLocation | null;
+}
+export interface ServerDescription {
+  readonly key: string;
+  readonly selection: SourceLocation;
+  readonly definition: SourceLocation;
+  readonly protocol: string;
+  readonly protocolVersion: string | null;
+}
+export interface CompiledDescription {
+  readonly identity: OperationIdentity;
+  readonly operation: OperationDescription;
+  readonly messages: ReadonlyArray<MessageDescription>;
+  readonly servers: ReadonlyArray<ServerDescription>;
+  readonly reply: SourceLocation | null;
+  readonly operationSecurity: SourceLocation | null;
+}
+export type TransportPlan =
+  | { readonly kind: 'mqtt311'; readonly endpoint: string; readonly clientId: string; readonly cleanSession: boolean; readonly keepAliveSeconds: number; readonly topic: string; readonly qos: 0 | 1 | 2; readonly retain: boolean }
+  | { readonly kind: 'webSocket6455'; readonly endpoint: string; readonly method: 'GET' };
+export interface PlanDescription {
+  readonly identity: OperationIdentity;
+  readonly role: 'application' | 'peer';
+  readonly applicationAction: 'send' | 'receive';
+  readonly wireAction: 'send' | 'receive';
+  readonly server: string;
+  readonly message: string;
+  readonly contentType: string;
+  readonly transport: TransportPlan;
 }
 export type Discovery<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: AsyncApiError };
 
@@ -119,6 +171,21 @@ export class Operation extends Owner<OperationHandle> {
   get location(): SourceLocation { return JSON.parse(this.handle.location_json()) as SourceLocation; }
   get authored(): JsonView { return new JsonView(this.handle.authored()); }
   describe(): OperationDescription { return call(() => JSON.parse(this.handle.describe_json()) as OperationDescription); }
+  compile(): CompiledOperation { return call(() => new CompiledOperation(this.handle.compile())); }
+}
+export class CompiledOperation extends Owner<CompiledOperationHandle> {
+  /** @internal Use Operation.compile. Owns its snapshot independently. */
+  constructor(handle: CompiledOperationHandle) { super(handle); }
+  describe(): CompiledDescription { return JSON.parse(this.handle.describe_json()) as CompiledDescription; }
+  messageSource(key: string): JsonView | undefined { const value = this.handle.message_source(key); return value ? new JsonView(value) : undefined; }
+  serverSource(key: string): JsonView | undefined { const value = this.handle.server_source(key); return value ? new JsonView(value) : undefined; }
+  /** Resolves choices in Rust; does not connect, send, or acquire credentials. */
+  prepare(options: PlanOptions): Plan { return call(() => new Plan(this.handle.prepare(JSON.stringify(options)))); }
+}
+export class Plan extends Owner<PlanHandle> {
+  /** @internal Use CompiledOperation.prepare. */
+  constructor(handle: PlanHandle) { super(handle); }
+  describe(): PlanDescription { return JSON.parse(this.handle.describe_json()) as PlanDescription; }
 }
 export class JsonView extends Owner<JsonHandle> {
   /** @internal Obtain a source view from a document or operation. */

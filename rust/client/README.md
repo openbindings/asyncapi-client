@@ -1,6 +1,6 @@
 # Dynamic AsyncAPI client
 
-An unpublished Rust foundation for a standalone dynamic AsyncAPI client. The current slice is JSON/YAML source admission and native document inspection, with an initial Rust-backed TypeScript facade. Protocol execution and complete facade journeys are under development. A reader accepting a version does not establish complete support for that edition.
+An unpublished Rust foundation for a standalone dynamic AsyncAPI client. The current slice is JSON/YAML source admission, native inspection, and pure binary MQTT/WebSocket preparation, with a Rust-backed TypeScript facade. Protocol execution and complete facade journeys are under development. A reader accepting a version does not establish complete support for that edition.
 
 The engine has no OpenBindings, JavaScript, Tokio or network dependency. Downstream Rust consumers can compose it directly, including inside a Wasm build. Host drivers and the public TypeScript facade will be separate packages.
 

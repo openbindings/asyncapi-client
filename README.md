@@ -10,8 +10,8 @@ This repository is also the execution substrate used by the OpenBindings AsyncAP
 > implementation with Rust and TypeScript APIs. The new foundation is in
 > [`rust/`](rust/client/README.md), with the Rust-backed TypeScript preview in
 > [`packages/client/`](packages/client/README.md). It currently supports JSON
-> and YAML admission and operation inspection, not protocol execution or full edition
-> conformance. See [Rust development](docs/rust-development.md).
+> and YAML admission, operation inspection, and pure binary MQTT/WebSocket plans.
+> Protocol execution and full edition conformance remain in development. See [Rust development](docs/rust-development.md).
 >
 > Existing Go and independent TypeScript engines are retained for transition.
 > The invocation examples and conformance claims below describe those legacy

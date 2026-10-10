@@ -96,3 +96,43 @@ test('valid serde-looking application property is preserved; duplicates remain e
   value.dispose(); root.dispose(); doc.dispose();
   assert.throws(() => client.parse(source.replace('"address":null', '"address":null,"address":"second"')), error => error.code === 'DuplicateMember');
 });
+
+const binarySource = JSON.stringify({
+  asyncapi:'3.1.0', info:{title:'binary',version:'1'},
+  servers:{local:{host:'example.test',protocol:'wss'}},
+  channels:{events:{address:'/events',messages:{event:{contentType:'application/octet-stream'}}}},
+  operations:{emit:{action:'send',channel:{$ref:'#/channels/events'}}},
+});
+test('Rust compilation and pure preparation survive disposal and preserve typed choices', () => {
+  const doc = client.parse(binarySource);
+  const operation = doc.operation('emit');
+  const compiled = operation.compile();
+  operation.dispose(); doc.dispose();
+  const message = compiled.messageSource('event');
+  const contentType=message.get('contentType');
+  assert.equal(contentType.string, 'application/octet-stream');
+  contentType.dispose();
+  message.dispose();
+  assert.equal(compiled.describe().messages[0].selection.pointer, '/channels/events/messages/event');
+  const plan = compiled.prepare({role:'application'});
+  assert.deepEqual(plan.describe().transport, {kind:'webSocket6455',endpoint:'wss://example.test/events',method:'GET'});
+  assert.throws(() => compiled.prepare({role:'peer'}), error => error instanceof AsyncApiError && error.requirement.kind === 'peerRoute');
+  assert.throws(() => compiled.prepare({role:'application',surprise:true}), error => error.code === 'InvalidConfiguration');
+  compiled.dispose();
+  assert.equal(plan.describe().wireAction, 'send');
+  plan.dispose();
+  assert.throws(() => plan.describe(), error => error.code === 'Disposed');
+});
+
+test('empty messages and codec requirements survive the TypeScript boundary distinctly', () => {
+  for (const [changed, code, requirement] of [
+    [binarySource.replace('"contentType":"application/octet-stream"', ''), 'UnsupportedFeature', {kind:'codec',contentType:null}],
+    [binarySource.replace('"action":"send"', '"action":"send","messages":[]'), 'NoMessages', null],
+  ]) {
+    const doc=client.parse(changed);const operation=doc.operation('emit');const compiled=operation.compile();
+    assert.throws(() => compiled.prepare({role:'application'}), error => {
+      assert.equal(error.code,code);assert.deepEqual(error.requirement,requirement);return true;
+    });
+    compiled.dispose();operation.dispose();doc.dispose();
+  }
+});
