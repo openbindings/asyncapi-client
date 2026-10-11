@@ -1,0 +1,20 @@
+[package]
+name = "dynamic-asyncapi-client"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Dynamic AsyncAPI interpretation with exact values and explicit host capabilities"
+readme = "README.md"
+
+[dependencies]
+bytes = "=1.12.1"
+serde.workspace = true
+serde_json.workspace = true
+fluent-uri.workspace = true
+granit-parser.workspace = true
+
+[lints]
+workspace = true

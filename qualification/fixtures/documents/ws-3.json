@@ -1,0 +1,37 @@
+{
+  "asyncapi": "3.1.0",
+  "info": {
+    "title": "Disposable runtime fixture",
+    "version": "1"
+  },
+  "servers": {
+    "local": {
+      "protocol": "ws",
+      "host": "127.0.0.1:__PORT__"
+    }
+  },
+  "channels": {
+    "events": {
+      "address": "/events",
+      "messages": {
+        "event": {
+          "contentType": "application/octet-stream"
+        }
+      }
+    }
+  },
+  "operations": {
+    "emit": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/events"
+      }
+    },
+    "listen": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/events"
+      }
+    }
+  }
+}

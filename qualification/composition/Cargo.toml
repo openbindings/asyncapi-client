@@ -1,0 +1,26 @@
+[package]
+name = "asyncapi-external-composition"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+dynamic-asyncapi-client = { path = "../../rust/client" }
+serde_json = "=1.0.151"
+wasm-bindgen = { version = "=0.2.129", optional = true }
+
+dynamic-asyncapi-host = { path = "../../rust/host", optional = true }
+wasm-bindgen-futures = { version = "=0.4.79", optional = true }
+
+[features]
+wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:dynamic-asyncapi-host"]
+
+[profile.dev]
+debug = 0
+incremental = false

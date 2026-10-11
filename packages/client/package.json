@@ -1,0 +1,20 @@
+{
+  "name": "@openbindings/asyncapi-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Development preview of the Rust-backed dynamic AsyncAPI client",
+  "license": "Apache-2.0",
+  "files": ["dist", "wasm", "types", "README.md"],
+  "exports": {
+    ".": {"types":"./dist/index.d.ts","import":"./dist/index.js"},
+    "./asyncapi.wasm": {"types":"./types/wasm-module.d.ts","default":"./wasm/asyncapi_bg.wasm"}
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {"typescript":"5.9.3"},
+  "engines": {"node":">=22"}
+}

@@ -1,0 +1,12 @@
+asyncapi: 2.6.0
+info: {title: Disposable runtime fixture, version: '1'}
+servers:
+  local: {url: '127.0.0.1:__PORT__', protocol: ws}
+channels:
+  /events:
+    subscribe:
+      operationId: emit
+      message: {contentType: application/octet-stream}
+    publish:
+      operationId: listen
+      message: {contentType: application/octet-stream}

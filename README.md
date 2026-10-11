@@ -6,10 +6,23 @@ The client does not generate source code and does not require an OpenBindings In
 
 This repository is also the execution substrate used by the OpenBindings AsyncAPI adapter. Its public API is intentionally AsyncAPI-native; protocol abstraction belongs in the adapter above it.
 
-> Status: pre-release. TypeScript and Go clients are runnable and tested while
-> their public APIs and qualification corpus are being stabilized.
+> Status: Rust is the main line of development, with one engine exposing Rust
+> and TypeScript APIs. See [`rust/client`](rust/client/README.md), the
+> [`packages/client`](packages/client/README.md) facade, and the
+> [paused development checkpoint](docs/rust-development.md).
+> The current implementation includes native 2.6/3.0/3.1 JSON/YAML inspection,
+> binary/JSON/text MQTT 3.1.1 QoS 0/1/2 and WebSocket sessions, explicit native
+> TLS, selected authentication, and exact correlation-expression inspection.
+> Browser/Worker paths and direct Rust/Wasm composition are in development;
+> an intermittent Worker transport failure remains unresolved.
+>
+> This is an unpublished development implementation. Source landing does not
+> establish complete version/protocol support, product maturity, or release
+> readiness. Existing Go and independent TypeScript engines remain transitional
+> code; the examples and conformance claims below describe those legacy
+> packages and are not evidence for the Rust engine.
 
-## TypeScript
+## Legacy TypeScript
 
 ```ts
 import { AsyncAPIClient } from "@openbindings/asyncapi-client";
@@ -31,7 +44,7 @@ await subscription.completed;
 needs explicit input half-close, output iteration, cancellation, metadata,
 and terminal completion.
 
-## Go
+## Legacy Go
 
 ```go
 client, err := asyncapiclient.Load(ctx, asyncapiclient.Source{
@@ -51,7 +64,7 @@ Go's `Client.Start` and `Execution` expose the same explicit session lifecycle
 as TypeScript. `Client.Operations` inventories the artifact without creating
 or synthesizing an OBI.
 
-## Artifact semantics
+## Legacy artifact semantics
 
 - Exact AsyncAPI editions 2.0.0–2.6.0, 3.0.0, and 3.1.0 are accepted; other editions fail loudly.
 - `receive` is invoked as a publish interaction; `send` is invoked as a subscription, because the artifact describes the application rather than the caller.

@@ -1,0 +1,70 @@
+name: Rust foundation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  native:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          rustup default 1.99.0
+      - run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+      - run: cargo test --manifest-path rust/Cargo.toml --workspace --locked
+      - run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - run: cargo check --manifest-path rust/Cargo.toml --workspace --exclude dynamic-asyncapi-native --locked --target wasm32-unknown-unknown
+      - run: cargo test --manifest-path qualification/composition/Cargo.toml --locked
+      - run: cargo check --manifest-path qualification/composition/Cargo.toml --features wasm --target wasm32-unknown-unknown --locked
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: qualification/fixtures
+      - run: cargo build --manifest-path rust/Cargo.toml -p dynamic-asyncapi-native --examples --locked
+      - run: node qualification/fixtures/check-native.mjs "$RUNNER_TEMP/asyncapi-native-fixtures"
+      - run: node qualification/fixtures/check-codecs.mjs "$RUNNER_TEMP/asyncapi-native-codecs"
+      - run: node qualification/fixtures/check-tls.mjs "$RUNNER_TEMP/asyncapi-native-tls"
+      - run: node qualification/fixtures/check-query-auth.mjs "$RUNNER_TEMP/asyncapi-query-auth"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-protocol-fixtures-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/asyncapi-native-fixtures
+            ${{ runner.temp }}/asyncapi-native-codecs
+            ${{ runner.temp }}/asyncapi-native-tls
+            ${{ runner.temp }}/asyncapi-query-auth
+
+  typescript-preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Pinned Rust and Wasm builder
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
+          rustup default 1.99.0
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: packages/client
+      - run: npm run build:wasm && npm run build && npm test
+        working-directory: packages/client

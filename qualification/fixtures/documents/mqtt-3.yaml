@@ -1,0 +1,23 @@
+asyncapi: 3.1.0
+info: {title: Disposable runtime fixture, version: '1'}
+servers:
+  local:
+    host: '127.0.0.1:__PORT__'
+    protocol: mqtt
+    protocolVersion: 3.1.1
+    bindings:
+      mqtt: {clientId: asyncapi-fixture, cleanSession: true, keepAlive: 1, bindingVersion: 0.2.0}
+channels:
+  events:
+    address: fixture/events
+    messages:
+      event: {contentType: application/octet-stream}
+operations:
+  emit:
+    action: send
+    channel: {$ref: '#/channels/events'}
+    bindings: {mqtt: {qos: 1, retain: false, bindingVersion: 0.2.0}}
+  listen:
+    action: receive
+    channel: {$ref: '#/channels/events'}
+    bindings: {mqtt: {qos: 1, bindingVersion: 0.2.0}}

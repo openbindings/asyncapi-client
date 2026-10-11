@@ -1,0 +1,21 @@
+[package]
+name = "asyncapi-driver-controls"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+rumqttc = { version = "=0.25.1", default-features = false }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
+tokio = { version = "=1.53.2", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
+futures-util = { version = "=0.3.32", features = ["sink"] }
+serde_json = "=1.0.151"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+lto = "thin"
