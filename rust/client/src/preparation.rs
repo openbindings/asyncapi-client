@@ -1,4 +1,9 @@
 //! Reusable, pure preparation. No transport is opened by this module.
+mod exchange;
+pub use exchange::{
+    CompiledReply, ExchangeDescription, ExchangeOptions, ExchangePlan, ReplyAddressDescription,
+    ReplyCompletion, ReplyDescription,
+};
 use crate::effective::{Effective, with_traits};
 use crate::{
     Action, Code, Codec, Diagnostic, Document, Edition, Json, Location, Operation,
@@ -117,6 +122,34 @@ struct Compilation {
     servers: Vec<Server>,
     channel_message_count: usize,
 }
+/// A view of one side of an operation, without manufacturing an authored
+/// operation or changing its native identity/description.
+struct PreparationContext<'a> {
+    compilation: &'a Compilation,
+    channel: &'a Json,
+    messages: &'a [Message],
+    servers: &'a [Server],
+    channel_message_count: usize,
+    address: Option<&'a str>,
+    action: Action,
+}
+impl<'a> PreparationContext<'a> {
+    fn operation(compilation: &'a Compilation) -> Self {
+        Self {
+            compilation,
+            channel: &compilation.channel,
+            messages: &compilation.messages,
+            servers: &compilation.servers,
+            channel_message_count: compilation.channel_message_count,
+            address: compilation.description.operation.address.as_deref(),
+            action: compilation.description.operation.action,
+        }
+    }
+}
+impl std::ops::Deref for PreparationContext<'_> {
+    type Target = Compilation;
+    fn deref(&self) -> &Self::Target { self.compilation }
+}
 /// Owning topology and trait compilation. Profile binding resolution occurs
 /// during preparation; a resulting Plan performs neither on the message path.
 #[derive(Clone, Debug)]
@@ -207,12 +240,18 @@ fn messages(
             )
         }
     } else {
+        three_x_entries(document, operation.get("messages"), channel)?
+    };
+    Ok((resolve_messages(document, entries)?, count))
+}
+fn three_x_entries(document: &Document, selected: Option<Json>, channel: &Json) -> Result<(Vec<(String, Json)>, usize), Diagnostic> {
+    Ok({
         let channel_entries = match channel.get("messages") {
             Some(m) => map(&m)?,
             None => vec![],
         };
         let count = channel_entries.len();
-        if let Some(selected) = operation.get("messages") {
+        if let Some(selected) = selected {
             let mut entries = Vec::new();
             let mut seen = HashSet::new();
             for item in array(&selected)? {
@@ -235,7 +274,10 @@ fn messages(
         } else {
             (channel_entries, count)
         }
-    };
+
+    })
+}
+fn resolve_messages(document: &Document, entries: Vec<(String, Json)>) -> Result<Vec<Message>, Diagnostic> {
     let mut result = Vec::with_capacity(entries.len());
     for (key, selection) in entries {
         let definition = document.resolve(selection.clone())?;
@@ -258,7 +300,7 @@ fn messages(
             effective,
         });
     }
-    Ok((result, count))
+    Ok(result)
 }
 fn servers(document: &Document, channel: &Json) -> Result<Vec<Server>, Diagnostic> {
     let root = document.root();
@@ -499,7 +541,15 @@ impl CompiledOperation {
             .map(|s| s.object.clone())
     }
     pub fn prepare(&self, options: &PlanOptions) -> Result<Plan, Diagnostic> {
-        let c = &self.0;
+        self.prepare_message(options, PreparationContext::operation(&self.0), false, false)
+    }
+    fn prepare_message(
+        &self,
+        options: &PlanOptions,
+        c: PreparationContext<'_>,
+        allow_reply: bool,
+        allow_correlation: bool,
+    ) -> Result<Plan, Diagnostic> {
         let supplied_bytes = options
             .variables
             .iter()
@@ -555,7 +605,7 @@ impl CompiledOperation {
                 Some(Requirement::Evaluator),
             ));
         }
-        if let Some(reply) = c.operation.get("reply") {
+        if let Some(reply) = c.operation.get("reply") && !allow_reply {
             return Err(unsupported(
                 &reply.source,
                 "declared reply needs a reply-capable plan",
@@ -563,6 +613,7 @@ impl CompiledOperation {
             ));
         }
         for field in ["payload", "headers", "correlationId"] {
+            if field == "correlationId" && allow_correlation { continue; }
             if let Some(value) = message.effective.get(field) {
                 return Err(unsupported(
                     &value.source,
@@ -581,7 +632,7 @@ impl CompiledOperation {
                 }),
             )
         })?;
-        let action = c.description.operation.action;
+        let action = c.action;
         let wire_action = match (options.role, action) {
             (Role::Application, a) => a,
             (Role::Peer, Action::Send) => Action::Receive,
@@ -655,7 +706,7 @@ impl CompiledOperation {
         let address = address(
             &c.document,
             &c.channel,
-            c.description.operation.address.as_deref(),
+            c.address,
             options,
         )?;
         if profile == ProtocolProfile::Mqtt311 && options.websocket_frame.is_some() {
@@ -666,10 +717,10 @@ impl CompiledOperation {
         }
         let mut transport = match profile {
             ProtocolProfile::Mqtt311 => {
-                mqtt(c, server, message, options, wire_action, endpoint, address)?
+                mqtt(&c, server, message, options, wire_action, endpoint, address)?
             }
             ProtocolProfile::WebSocket6455 => {
-                websocket(c, server, message, options, endpoint, address)?
+                websocket(&c, server, message, options, endpoint, address)?
             }
         };
         if let TransportPlan::WebSocket6455 { frame, .. } = &mut transport {
@@ -794,7 +845,7 @@ fn int_field(
     }
 }
 fn mqtt(
-    c: &Compilation,
+    c: &PreparationContext<'_>,
     server: &Server,
     message: &Message,
     options: &PlanOptions,
@@ -944,7 +995,7 @@ fn mqtt(
     })
 }
 fn websocket(
-    c: &Compilation,
+    c: &PreparationContext<'_>,
     server: &Server,
     message: &Message,
     options: &PlanOptions,

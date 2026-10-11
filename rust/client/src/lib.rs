@@ -22,8 +22,9 @@ pub use codec::{Codec, Payload, WebSocketFrame};
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};
 pub use expression::{CorrelationDescription, ExpressionSource, RuntimeExpression};
 pub use preparation::{
-    CompiledDescription, CompiledOperation, MessageDescription, Plan, PlanDescription, PlanOptions,
-    ProtocolProfile, Role, ServerDescription, TransportPlan,
+    CompiledDescription, CompiledOperation, CompiledReply, ExchangeDescription, ExchangeOptions,
+    ExchangePlan, MessageDescription, Plan, PlanDescription, PlanOptions, ProtocolProfile,
+    ReplyAddressDescription, ReplyCompletion, ReplyDescription, Role, ServerDescription, TransportPlan,
 };
 pub use source::{DeserializationError, Json, Location};
 
@@ -88,6 +89,9 @@ pub enum Requirement {
     },
     Evaluator,
     Reply,
+    ReplyChannel,
+    ReplyCompletion,
+    Correlation { side: String },
     Authentication,
     AuthenticationChoice {
         scope: SecurityScope,
