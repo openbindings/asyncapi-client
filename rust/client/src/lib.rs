@@ -8,6 +8,7 @@ mod authentication;
 mod codec;
 mod document;
 mod effective;
+mod expression;
 mod preparation;
 mod serializable;
 mod source;
@@ -19,6 +20,7 @@ pub use authentication::{
 };
 pub use codec::{Codec, Payload, WebSocketFrame};
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};
+pub use expression::{CorrelationDescription, ExpressionSource, RuntimeExpression};
 pub use preparation::{
     CompiledDescription, CompiledOperation, MessageDescription, Plan, PlanDescription, PlanOptions,
     ProtocolProfile, Role, ServerDescription, TransportPlan,

@@ -15,19 +15,19 @@ export function bounds(options: ValueLimits, refuse: Refuse): Bounds {
   return { ...result, depth: Math.min(result.depth, 96) };
 }
 /** Check UTF-16 -> UTF-8 conversion before Wasm allocation, without changing source. */
-export function admitSource(source: string, limit: Bounds, refuse: Refuse): void {
-  if (typeof source !== 'string') refuse('InvalidValue', 'JSON source must be a string');
-  if (source.length > limit.bytes) refuse('Limit', 'JSON source byte limit exceeded');
+export function admitSource(source: string, limit: Bounds, refuse: Refuse, label = 'JSON source'): void {
+  if (typeof source !== 'string') refuse('InvalidValue', `${label} must be a string`);
+  if (source.length > limit.bytes) refuse('Limit', `${label} byte limit exceeded`);
   let bytes = 0;
   for (let i = 0; i < source.length; i++) {
     const code = source.charCodeAt(i);
     if (code >= 0xd800 && code <= 0xdbff) {
       const next = source.charCodeAt(++i);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) refuse('InvalidValue', 'JSON source must contain Unicode scalar values');
+      if (!(next >= 0xdc00 && next <= 0xdfff)) refuse('InvalidValue', `${label} must contain Unicode scalar values`);
       bytes += 4;
-    } else if (code >= 0xdc00 && code <= 0xdfff) refuse('InvalidValue', 'JSON source must contain Unicode scalar values');
+    } else if (code >= 0xdc00 && code <= 0xdfff) refuse('InvalidValue', `${label} must contain Unicode scalar values`);
     else bytes += code < 128 ? 1 : code < 2048 ? 2 : 3;
-    if (bytes > limit.bytes) refuse('Limit', 'JSON source byte limit exceeded');
+    if (bytes > limit.bytes) refuse('Limit', `${label} byte limit exceeded`);
   }
 }
 export function ordinaryJson(value: unknown, limit: Bounds, refuse: Refuse): string {

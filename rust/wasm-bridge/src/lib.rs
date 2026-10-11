@@ -87,6 +87,12 @@ impl CompiledOperationHandle {
     pub fn describe_json(&self) -> String {
         encoded(self.0.describe())
     }
+    pub fn correlation_json(&self, message: &str) -> Result<String, JsValue> {
+        self.0
+            .correlation(message)
+            .map(|value| encoded(&value))
+            .map_err(error)
+    }
     pub fn authentication_json(&self, server: &str) -> Result<String, JsValue> {
         self.0
             .authentication(server)
@@ -122,6 +128,25 @@ impl PlanHandle {
 
 #[wasm_bindgen]
 pub struct JsonHandle(Json);
+#[wasm_bindgen]
+pub struct RuntimeExpressionHandle(dynamic_asyncapi_client::RuntimeExpression);
+#[wasm_bindgen]
+impl RuntimeExpressionHandle {
+    pub fn parse(expression: &str) -> Result<Self, JsValue> {
+        dynamic_asyncapi_client::RuntimeExpression::parse(expression)
+            .map(Self)
+            .map_err(error)
+    }
+    pub fn describe_json(&self) -> String {
+        encoded(&self.0)
+    }
+    pub fn evaluate_header(&self, header: &JsonHandle) -> Option<JsonHandle> {
+        self.0.evaluate(Some(&header.0), None).map(JsonHandle)
+    }
+    pub fn evaluate_payload(&self, payload: &JsonHandle) -> Option<JsonHandle> {
+        self.0.evaluate(None, Some(&payload.0)).map(JsonHandle)
+    }
+}
 #[wasm_bindgen]
 impl JsonHandle {
     pub fn parse(source: &str, bytes: u32, depth: u32, nodes: u32) -> Result<JsonHandle, JsValue> {

@@ -18,6 +18,45 @@ pub fn inspect_from_outer_api(source: &str) -> Result<String, String> {
     serde_json::to_string(&facts).map_err(|error| error.to_string())
 }
 
+/// Expression parsing and exact lookup compose directly into a downstream module.
+#[cfg_attr(feature = "wasm", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn expression_from_outer_api(
+    expression: &str,
+    payload: &str,
+) -> Result<Option<String>, String> {
+    let expression =
+        dynamic_asyncapi_client::RuntimeExpression::parse(expression).map_err(|e| e.to_string())?;
+    let payload = dynamic_asyncapi_client::Json::parse(payload, Default::default())
+        .map_err(|e| e.to_string())?;
+    let result = expression.evaluate(None, Some(&payload));
+    drop(payload);
+    drop(expression);
+    Ok(result.map(|value| value.to_json()))
+}
+
+#[test]
+fn external_expression_preserves_types_and_independent_ownership() {
+    assert_eq!(
+        expression_from_outer_api(
+            "$message.payload#/id",
+            r#"{"id":9007199254740993123456789}"#
+        )
+        .unwrap()
+        .as_deref(),
+        Some("9007199254740993123456789")
+    );
+    assert_eq!(
+        expression_from_outer_api("$message.payload#/id", r#"{"id":null}"#)
+            .unwrap()
+            .as_deref(),
+        Some("null")
+    );
+    assert_eq!(
+        expression_from_outer_api("$message.header#/id", r#"{"id":1}"#).unwrap(),
+        None
+    );
+}
+
 /// A downstream Rust adapter can compile and prepare directly. Only its outer
 /// result crosses Wasm; it never routes through the standalone TypeScript API.
 #[cfg_attr(feature = "wasm", wasm_bindgen::prelude::wasm_bindgen)]

@@ -1,6 +1,6 @@
 import { admitSource, bounds, ordinaryJson, type ValueLimits } from './json-input.js';
 export type { ValueLimits } from './json-input.js';
-import initializeWasm, { DocumentHandle, OperationHandle, CompiledOperationHandle, PlanHandle, JsonHandle, HostSessionBuilder, HostSessionHandle, HostSenderHandle, CancellationHandle, IncomingHandle, type InitInput } from '../wasm/asyncapi.js';
+import initializeWasm, { DocumentHandle, OperationHandle, CompiledOperationHandle, PlanHandle, JsonHandle, RuntimeExpressionHandle, HostSessionBuilder, HostSessionHandle, HostSenderHandle, CancellationHandle, IncomingHandle, type InitInput } from '../wasm/asyncapi.js';
 
 export interface SourceLocation {
   readonly uri: string | null;
@@ -50,6 +50,19 @@ export interface MessageDescription {
   readonly contentType: string | null;
   readonly payload: SourceLocation | null;
   readonly headers: SourceLocation | null;
+  readonly correlationId: SourceLocation | null;
+}
+export interface RuntimeExpressionDescription {
+  readonly expression: string;
+  readonly source: 'header' | 'payload';
+  readonly pointer: string;
+}
+export interface CorrelationDescription {
+  readonly selection: SourceLocation;
+  readonly definition: SourceLocation;
+  readonly location: SourceLocation;
+  readonly description: string | null;
+  readonly expression: RuntimeExpressionDescription;
 }
 export interface ServerDescription {
   readonly key: string;
@@ -159,6 +172,8 @@ function valueRefusal(code: 'InvalidValue' | 'InvalidConfiguration' | 'Limit', d
   throw new AsyncApiError({ code, detail, location: null, requirement: null });
 }
 export interface Client {
+  /** Compile an AsyncAPI message expression in Rust. No I/O or value coercion. */
+  runtimeExpression(expression: string): RuntimeExpression;
   /** Admit strict JSON, preserving exact authored numbers. No YAML or schema validation. */
   parseJson(source: string, limits?: ValueLimits): JsonView;
   /** Checked plain JavaScript values; no getter/toJSON invocation or lossy substitution. */
@@ -167,6 +182,10 @@ export interface Client {
   openSession(plans: readonly Plan[], options?: HostSessionOptions & { signal?: AbortSignal }): Promise<HostSession>;
 }
 class RustClient implements Client {
+  runtimeExpression(expression: string): RuntimeExpression {
+    admitSource(expression, {bytes: 16 * 1024, depth: 0, nodes: 0}, valueRefusal, 'runtime expression');
+    return call(() => new RuntimeExpression(RuntimeExpressionHandle.parse(expression)));
+  }
   parseJson(source: string, options: ValueLimits = {}): JsonView {
     const limit = bounds(options, valueRefusal);
     admitSource(source, limit, valueRefusal);
@@ -230,6 +249,10 @@ export class CompiledOperation extends Owner<CompiledOperationHandle> {
   /** @internal Use Operation.compile. Owns its snapshot independently. */
   constructor(handle: CompiledOperationHandle) { super(handle); }
   describe(): CompiledDescription { return JSON.parse(this.handle.describe_json()) as CompiledDescription; }
+  /** Inspect the effective declaration; absence is null, invalid declarations throw. */
+  correlation(message: string): CorrelationDescription | null {
+    return call(() => JSON.parse(this.handle.correlation_json(message)) as CorrelationDescription | null);
+  }
   /** Inspect all security alternatives for this server, without acquiring credentials. */
   authentication(server: string): AuthenticationDescription {
     return call(() => JSON.parse(this.handle.authentication_json(server)) as AuthenticationDescription);
@@ -247,6 +270,11 @@ export class Plan extends Owner<PlanHandle> {
   attachTo(builder: HostSessionBuilder): void { runtimeCall(() => builder.add(this.handle)); }
 }
 export class JsonView extends Owner<JsonHandle> {
+  /** @internal Rust evaluates the expression against the explicit message root. */
+  evaluateExpression(expression: RuntimeExpressionHandle, source: 'header' | 'payload'): JsonView | undefined {
+    const value = source === 'header' ? expression.evaluate_header(this.handle) : expression.evaluate_payload(this.handle);
+    return value ? new JsonView(value) : undefined;
+  }
   /** @internal Keep the generated handle private to the owning facade. */
   sendTo(sender: HostSenderHandle, operation: number): string { return sender.send_json(operation, this.handle); }
   /** @internal Obtain a source view from a document or operation. */
@@ -266,6 +294,22 @@ export class JsonView extends Owner<JsonHandle> {
     const handle = this.handle.at(index); return handle ? new JsonView(handle) : undefined;
   }
   pointer(pointer: string): JsonView | undefined { const handle = this.handle.pointer(pointer); return handle ? new JsonView(handle) : undefined; }
+}
+
+export class RuntimeExpression extends Owner<RuntimeExpressionHandle> {
+  readonly #description: RuntimeExpressionDescription;
+  /** @internal Use Client.runtimeExpression. */
+  constructor(handle: RuntimeExpressionHandle) {
+    super(handle);
+    this.#description = JSON.parse(handle.describe_json()) as RuntimeExpressionDescription;
+  }
+  describe(): RuntimeExpressionDescription { void this.handle; return {...this.#description}; }
+  /** Missing roots/paths return undefined. A present null remains an owning JsonView.
+   * Dispose the result independently; numeric tokens and value types stay exact. */
+  evaluate(message: { readonly header?: JsonView; readonly payload?: JsonView }): JsonView | undefined {
+    const handle = this.handle, source = this.#description.source;
+    return message[source]?.evaluateExpression(handle, source);
+  }
 }
 
 /** Limits account for Rust-owned queues. Host network buffers are separate. */

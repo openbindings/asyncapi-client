@@ -1,7 +1,24 @@
 function check(value,message){if(!value)throw new Error(message);}
 async function failure(operation,code){try{await operation();}catch(error){check(error.code===code,`expected ${code}, got ${error.code}: ${error}`);return error.code;}throw new Error(`expected ${code}`);}
-export async function exerciseFaults(client,source,port){
+export async function exerciseFaults(client,source,port,outerExpression){
  const observations=[];
+ {
+  const value=JSON.parse(source);value.channels.events.messages.event.correlationId={location:'$message.payload#/id'};
+  const doc=client.parse(JSON.stringify(value)),op=doc.operation('emit'),compiled=op.compile();
+  let expression,payload,id;
+  try {
+   const declaration=compiled.correlation('event');
+   check(declaration?.expression.source==='payload','correlation source metadata lost');
+   expression=client.runtimeExpression(declaration.expression.expression);payload=client.parseJson('{"id":9007199254740993123456789}');
+   id=expression.evaluate({payload});payload.dispose();expression.dispose();
+   check(id?.numberText==='9007199254740993123456789','expression rounded or lost its owning result');
+   await failure(()=>compiled.prepare({role:'application'}),'UnsupportedFeature');
+  }finally{id?.dispose();payload?.dispose();expression?.dispose();compiled.dispose();op.dispose();doc.dispose();}
+  observations.push({name:'correlation inspection and expressions preserve exact owning values without claiming execution'});
+  check(outerExpression('$message.payload#/id','{"id":9007199254740993123456789}')==='9007199254740993123456789','downstream Rust/Wasm expression rounded a value');
+  check(outerExpression('$message.payload#/missing','{"id":1}')===undefined,'downstream Rust/Wasm expression lost absence');
+  observations.push({name:'downstream Rust/Wasm expression composes without the TypeScript facade'});
+ }
  // Security refusal is a preflight result in both actual hosts. The endpoint
  // deliberately cannot complete TLS with this plaintext fixture server.
  const secure=JSON.parse(source);secure.servers.local.protocol='wss';secure.servers.local.security=[{type:'X509'}];

@@ -8,6 +8,21 @@ The current reader families are AsyncAPI 2.6, 3.0 and 3.1, retaining declared pa
 
 No package is published. The older Go and TypeScript implementations are historical/transitional code, not an oracle for this engine.
 
+## Correlation inspection and message expressions
+
+`compiled.correlation(message_key)` resolves a message's effective correlation
+declaration, including traits and supplied external resources. It returns source
+coordinates and a `RuntimeExpression`, or `None` when absent. Unknown message keys
+and invalid declarations return diagnostics. This does not enable request/reply
+execution; preparation still refuses declarations needing that runtime support.
+
+`RuntimeExpression::parse("$message.payload#/id")?.evaluate(header, payload)`
+selects an owning `Json` view without coercion or number rounding. Missing roots
+and paths return `None`; JSON null remains a present value. Expressions admit
+16 KiB and 256 pointer segments. The suffix follows AsyncAPI's JSON Pointer
+string grammar, including `~0`/`~1`; percent signs are literal. Root expressions
+with or without a trailing `#` select the entire header or payload value.
+
 ## Independent message values
 
 `Json::parse(text, limits)` admits strict JSON independently of a document. It

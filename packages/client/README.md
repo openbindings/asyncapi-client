@@ -69,6 +69,25 @@ encoding is performed in Rust, and reusable plans never contain the supplied val
 connection to the same server. Plan descriptions contain endpoint and client
 identity but never credentials. See [preparation contract](../../docs/preparation.md).
 
+## Correlation inspection and message expressions
+
+`compiled.correlation(messageKey)` inspects the effective correlation declaration
+in Rust, preserving trait/reference origins. Absence returns `null`; malformed
+declarations throw. To evaluate a declared or explicitly configured expression:
+
+```ts
+using expression = client.runtimeExpression('$message.payload#/id');
+using payload = client.parseJson('{"id":9007199254740993123456789}');
+using id = expression.evaluate({payload});
+console.log(id?.numberText); // exact token, without JavaScript number conversion
+```
+
+The result owns its source independently and needs disposal. Missing roots or
+paths return `undefined`; a present JSON null remains a `JsonView`. Header roots
+can be supplied as `{header}`. Expressions admit 16 KiB and 256 pointer segments;
+the JSON Pointer suffix uses `~0`/`~1` escapes and literal percent signs. This is
+inspection and value evaluation; correlated request/reply execution remains open.
+
 ## Host WebSocket sessions
 
 The first transport API uses Rust session policy and Rust-owned host callbacks.

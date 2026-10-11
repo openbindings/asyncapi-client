@@ -76,6 +76,7 @@ pub struct MessageDescription {
     pub content_type: Option<String>,
     pub payload: Option<Location>,
     pub headers: Option<Location>,
+    pub correlation_id: Option<Location>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -250,6 +251,7 @@ fn messages(
             content_type,
             payload: effective.get("payload").map(|v| v.source.location()),
             headers: effective.get("headers").map(|v| v.source.location()),
+            correlation_id: effective.get("correlationId").map(|v| v.source.location()),
         };
         result.push(Message {
             description,
@@ -429,6 +431,30 @@ impl Plan {
 impl CompiledOperation {
     pub fn describe(&self) -> &CompiledDescription {
         &self.0.description
+    }
+    /// Resolve this message's effective correlation declaration on demand.
+    /// Absence is distinct from an unknown message key or a broken declaration.
+    /// Inspection does not assert transport or request/reply execution support.
+    pub fn correlation(
+        &self,
+        message: &str,
+    ) -> Result<Option<crate::CorrelationDescription>, Diagnostic> {
+        let message = self
+            .0
+            .messages
+            .iter()
+            .find(|m| m.description.key == message)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    Code::InvalidConfiguration,
+                    "selected message is not available",
+                )
+            })?;
+        message
+            .effective
+            .get("correlationId")
+            .map(|declaration| crate::expression::correlation(&self.0.document, declaration))
+            .transpose()
     }
     /// Inspect security alternatives for a server, including schemes outside
     /// current execution profiles. Resolves every alternative; preparation only

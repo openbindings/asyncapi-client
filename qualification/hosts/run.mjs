@@ -85,7 +85,7 @@ try {
     const composition = await import('/composition.js');
     const consumer = await import('/consumer.mjs');
     const [client] = await Promise.all([createClient(), composition.default()]);
-    return codecSuite ? consumer.exerciseCodecs(client,composition.exchange_codec_from_outer_api,source) : faultSuite ? consumer.exerciseFaults(client,source,Number(JSON.parse(source).servers.local.host.split(':')[1])) : consumer.exerciseSessions(client, composition.exchange_from_outer_api, source);
+    return codecSuite ? consumer.exerciseCodecs(client,composition.exchange_codec_from_outer_api,source) : faultSuite ? consumer.exerciseFaults(client,source,Number(JSON.parse(source).servers.local.host.split(':')[1]),composition.expression_from_outer_api) : consumer.exerciseSessions(client, composition.exchange_from_outer_api, source);
   },{source,faultSuite,codecSuite});
   const browserRecords=peers.records.filter(r=>r.digest);
   if(faultSuite) verifyQueryAuthentication(peers.records);
@@ -96,7 +96,7 @@ try {
   await browser.close(); browser = undefined;
   await writeFile(resolve(out,'report.json'),JSON.stringify(report,null,2));
   const workerEntry = `import {createClient} from ${JSON.stringify(resolve(repo,'packages/client/dist/index.js'))};
-import compositionInit, {exchange_from_outer_api,exchange_codec_from_outer_api} from ${JSON.stringify(resolve(compositionDir,'composition.js'))};
+import compositionInit, {exchange_from_outer_api,exchange_codec_from_outer_api,expression_from_outer_api} from ${JSON.stringify(resolve(compositionDir,'composition.js'))};
 import * as consumer from ${JSON.stringify(consumerPath)};
 import engineModule from './engine.wasm';
 import compositionModule from './composition.wasm';
@@ -104,7 +104,7 @@ export default { async fetch(request) {
   if(new URL(request.url).pathname==='/ready') return new Response('ready');
   const [client] = await Promise.all([createClient({wasm:engineModule}),compositionInit({module_or_path:compositionModule})]);
   const raw=${faultSuite||codecSuite?'[]':`await consumer.rawCloseControl(${JSON.stringify(source)})`};
-  try { return Response.json({raw,...await ${codecSuite?'consumer.exerciseCodecs(client,exchange_codec_from_outer_api,'+JSON.stringify(source)+')':faultSuite?'consumer.exerciseFaults(client, '+JSON.stringify(source)+', '+peers.port+')':'consumer.exerciseSessions(client,exchange_from_outer_api,'+JSON.stringify(source)+')'}}); } catch(error) { return Response.json({raw,error:String(error)},{status:500}); }
+  try { return Response.json({raw,...await ${codecSuite?'consumer.exerciseCodecs(client,exchange_codec_from_outer_api,'+JSON.stringify(source)+')':faultSuite?'consumer.exerciseFaults(client, '+JSON.stringify(source)+', '+peers.port+', expression_from_outer_api)':'consumer.exerciseSessions(client,exchange_from_outer_api,'+JSON.stringify(source)+')'}}); } catch(error) { return Response.json({raw,error:String(error)},{status:500}); }
 }};`;
   await writeFile(resolve(out,'worker-entry.mjs'),workerEntry);
   await esbuild.build({stdin:{contents:workerEntry,resolveDir:out,sourcefile:'worker-entry.mjs'},bundle:true,format:'esm',platform:'browser',target:'es2022',external:['./engine.wasm','./composition.wasm'],outfile:resolve(out,'worker.mjs')});
