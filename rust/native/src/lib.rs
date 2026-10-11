@@ -2,6 +2,8 @@
 //! This initial execution slice supports MQTT 3.1.1 QoS 0/1/2 and binary WebSocket,
 //! over TCP or explicitly configured TLS. Recovery and other profiles remain open work.
 #![forbid(unsafe_code)]
+mod exchange;
+pub use exchange::{ExchangeError, ExchangeResponse, request_reply};
 mod mqtt;
 mod tls;
 mod websocket;
@@ -359,9 +361,14 @@ pub struct Session {
     timeout: Duration,
 }
 impl Session {
-    pub async fn open(plans: &[Plan], mut options: SessionOptions) -> Result<Self, RuntimeError> {
+    pub async fn open(plans: &[Plan], options: SessionOptions) -> Result<Self, RuntimeError> {
+        Self::open_plan(SessionPlan::new(plans)?, options).await
+    }
+    async fn open_plan(
+        plans: SessionPlan,
+        mut options: SessionOptions,
+    ) -> Result<Self, RuntimeError> {
         options.validate()?;
-        let plans = SessionPlan::new(plans)?;
         let connection = plans.connection().clone();
         match &connection {
             Connection::WebSocket(endpoint)

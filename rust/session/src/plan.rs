@@ -1,5 +1,5 @@
 use crate::{RuntimeCode, RuntimeError};
-use dynamic_asyncapi_client::{Action, Plan, TransportPlan};
+use dynamic_asyncapi_client::{Action, ExchangePlan, Plan, TransportPlan};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +33,13 @@ struct Inner {
 pub struct SessionPlan(Arc<Inner>);
 impl SessionPlan {
     pub fn new(plans: &[Plan]) -> Result<Self, RuntimeError> {
+        Self::build(plans, false)
+    }
+    /// The two sides of a declared reply share one authored operation identity.
+    pub fn exchange(plan: &ExchangePlan) -> Result<Self, RuntimeError> {
+        Self::build(&[plan.request().clone(), plan.reply().clone()], true)
+    }
+    fn build(plans: &[Plan], exchange: bool) -> Result<Self, RuntimeError> {
         if plans.is_empty() || plans.len() > 16 {
             return Err(RuntimeError::new(
                 RuntimeCode::InvalidConfiguration,
@@ -45,9 +52,10 @@ impl SessionPlan {
         for (index, prepared) in plans.iter().enumerate() {
             let plan = prepared.describe();
             if plan.role != plans[0].describe().role
-                || plans[..index]
-                    .iter()
-                    .any(|p| p.describe().identity == plan.identity)
+                || !exchange
+                    && plans[..index]
+                        .iter()
+                        .any(|p| p.describe().identity == plan.identity)
             {
                 return Err(RuntimeError::new(
                     RuntimeCode::InvalidConfiguration,
