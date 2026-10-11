@@ -75,3 +75,8 @@ For a declared WebSocket HTTP API key in a query parameter, set
 parameter name. Missing/unused values refuse before connecting; query credentials
 do not apply to MQTT. Query encoding and declaration checks use the portable Rust
 session crate shared with browser/Worker execution. Plans never acquire the value.
+
+## Request/reply
+
+`request_reply` executes a prepared AsyncAPI 3.x declared reply over one owned
+WebSocket connection. See [the contract, limits and example](../../docs/request-reply.md).

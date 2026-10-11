@@ -14,7 +14,16 @@ The replacement is a standalone dynamic AsyncAPI client: portable Rust semantics
 
 The target editions are 2.0–2.6, 3.0 and 3.1 in JSON and YAML. The native protocol target is MQTT 3.1.1/5, WebSocket, Kafka, AMQP 0-9-1, HTTP and Core NATS. Browser and Worker execution begins with WebSocket and HTTP clients. This table describes work in progress; neither accepting a version nor compiling Wasm establishes that target's support.
 
-## Paused development checkpoint
+## Bounded native request/reply follow-up
+
+The 2026-10-11 follow-up adds one complete native WebSocket request/reply path:
+3.0/3.1 declared reply planning, exact string correlation, a connection per call,
+a single deadline, bounded nonmatching replies, cancellation and preserved send
+and shutdown evidence. See [the contract and example](request-reply.md).
+The broader continuous loop stays paused. Worker debugging is not part of this
+assignment, and the TypeScript facade does not yet expose request/reply execution.
+
+## Prior paused development checkpoint
 
 Matthew approved adopting the Rust work as the main line and pausing the
 continuous development loop on 2026-10-10. This is source adoption, not a release
@@ -38,7 +47,8 @@ and deployed Cloudflare verification remain open. Host errors are not suppressed
 The unfinished reply-topology/exchange-planning fragment is preserved separately
 on [codex/asyncapi-exchange-checkpoint-20261011](https://github.com/openbindings/asyncapi-client/tree/codex/asyncapi-exchange-checkpoint-20261011).
 It was interrupted before formatting, compilation, tests or TypeScript exposure
-and is excluded from this main-line implementation. Its checkpoint note records
+and was excluded from the initial main-line adoption. The bounded follow-up
+reuses and narrows its planner; the broader checkpoint is still not a verified feature. Its checkpoint note records
 the disposition; it must not be treated as an executable or verified feature.
 
 Request/reply runtime matching, dynamic reply addresses, schema evaluation,
@@ -78,7 +88,7 @@ The package currently lives outside the legacy pnpm workspace to avoid resolving
 
 Source admission rejects duplicate decoded JSON keys, retains original byte ranges and exact numeric tokens, and bounds source size, depth, nodes and reference/trait work. Limits are development policy, not completed performance qualification. The implementation's depth ceiling is 96. Each document/resource completion is immutable; retained operations and source views own their data.
 
-Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait fields retain their defining source, including relative references inherited from external traits. Compilation preserves native message/server selection and explicit empty message sets. Pure plans support schema-free binary, JSON and UTF-8 messages over MQTT 3.1.1 or WebSocket RFC 6455, with explicit variables, parameters and no preparation I/O. Native sessions support MQTT QoS 0/1/2 and WebSocket, system/custom CA trust and optional client identities. Selected document authentication covers native MQTT username/password, native secure-transport X509 and portable WebSocket query API keys. Server and operation requirements both apply; unsupported mechanisms refuse. Correlation inspection and runtime-expression evaluation retain exact values and provenance, but do not enable request/reply transport execution. Schemas, additional profiles/editions and complete security qualification remain open. See [native sessions](../rust/native/README.md) for current ownership and receipt semantics. See [preparation](preparation.md) for the current contract and limits.
+Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait fields retain their defining source, including relative references inherited from external traits. Compilation preserves native message/server selection and explicit empty message sets. Pure plans support schema-free binary, JSON and UTF-8 messages over MQTT 3.1.1 or WebSocket RFC 6455, with explicit variables, parameters and no preparation I/O. Native sessions support MQTT QoS 0/1/2 and WebSocket, system/custom CA trust and optional client identities. Selected document authentication covers native MQTT username/password, native secure-transport X509 and portable WebSocket query API keys. Server and operation requirements both apply; unsupported mechanisms refuse. Correlation inspection and runtime-expression evaluation retain exact values and provenance. The bounded follow-up enables the native WebSocket request/reply profile described above. Schemas, additional profiles/editions and complete security qualification remain open. See [native sessions](../rust/native/README.md) for current ownership and receipt semantics. See [preparation](preparation.md) for the current contract and limits.
 
 Development assertions are regression evidence. Independent wire observations, installed-package consumers, memory/performance budgets, long runs and fresh conformance challenges are required before mature-product claims. The prior Go/TypeScript behavior is not an oracle for new semantics.
 
