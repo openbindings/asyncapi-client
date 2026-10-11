@@ -6,19 +6,21 @@ The client does not generate source code and does not require an OpenBindings In
 
 This repository is also the execution substrate used by the OpenBindings AsyncAPI adapter. Its public API is intentionally AsyncAPI-native; protocol abstraction belongs in the adapter above it.
 
-> Status: Rust migration in progress. The maintained-engine target is one Rust
-> implementation with Rust and TypeScript APIs. The new foundation is in
-> [`rust/`](rust/client/README.md), with the Rust-backed TypeScript preview in
-> [`packages/client/`](packages/client/README.md). It currently supports JSON
-> and YAML admission, operation inspection, and pure binary MQTT/WebSocket plans.
-> The initial native runtime executes binary MQTT 3.1.1 QoS 1 and WebSocket
-> interactions over TCP. A Rust host runtime and TypeScript session API now
-> exercise browser/Worker WebSocket traffic; host qualification remains open.
-> Full profile/edition conformance remains in development. See [Rust development](docs/rust-development.md).
+> Status: Rust is the main line of development, with one engine exposing Rust
+> and TypeScript APIs. See [`rust/client`](rust/client/README.md), the
+> [`packages/client`](packages/client/README.md) facade, and the
+> [paused development checkpoint](docs/rust-development.md).
+> The current implementation includes native 2.6/3.0/3.1 JSON/YAML inspection,
+> binary/JSON/text MQTT 3.1.1 QoS 0/1/2 and WebSocket sessions, explicit native
+> TLS, selected authentication, and exact correlation-expression inspection.
+> Browser/Worker paths and direct Rust/Wasm composition are in development;
+> an intermittent Worker transport failure remains unresolved.
 >
-> Existing Go and independent TypeScript engines are retained for transition.
-> The invocation examples and conformance claims below describe those legacy
-> packages; they are not qualification evidence for the Rust engine.
+> This is an unpublished development implementation. Source landing does not
+> establish complete version/protocol support, product maturity, or release
+> readiness. Existing Go and independent TypeScript engines remain transitional
+> code; the examples and conformance claims below describe those legacy
+> packages and are not evidence for the Rust engine.
 
 ## Legacy TypeScript
 

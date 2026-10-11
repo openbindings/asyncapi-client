@@ -4,15 +4,51 @@ The replacement is a standalone dynamic AsyncAPI client: portable Rust semantics
 
 | Location | Responsibility | Current status |
 | --- | --- | --- |
-| `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON/YAML inspection and pure MQTT/WebSocket preparation; reader families 2.6, 3.0, 3.1 |
+| `rust/client` | Original source, immutable resource graph, native operation identity and semantics | JSON/YAML inspection, exact values, correlation expressions and pure MQTT/WebSocket preparation; reader families 2.6, 3.0, 3.1 |
 | `rust/session` | Portable admission, plan ownership, routing and shared payload quotas | Used by native and host runtimes |
-| `rust/host` | Rust-owned browser/Worker WebSocket callbacks and lifecycle | Binary execution, cancellation and bounded queues in development |
-| `rust/native` | Explicitly owned Tokio sessions and protocol drivers | Initial binary MQTT 3.1.1 QoS 0/1/2 and WebSocket over TCP |
+| `rust/host` | Rust-owned browser/Worker WebSocket callbacks and lifecycle | Binary/JSON/text execution, cancellation and bounded queues; Worker failure unresolved |
+| `rust/native` | Explicitly owned Tokio sessions and protocol drivers | Binary/JSON/text MQTT 3.1.1 QoS 0/1/2 and WebSocket, with explicit TLS and selected authentication |
 | `rust/wasm-bridge` | Private ABI for the TypeScript facade | Owning inspection/plan/session handles; delegates host execution to Rust |
 | `packages/client` | Supported TypeScript API under development | Private preview; exact values, structured errors and deterministic disposal |
 | `qualification/composition` | External Rust consumer with optional outer Wasm API | Direct inspection, preparation and host WebSocket exchange inside an outer Rust/Wasm module |
 
 The target editions are 2.0–2.6, 3.0 and 3.1 in JSON and YAML. The native protocol target is MQTT 3.1.1/5, WebSocket, Kafka, AMQP 0-9-1, HTTP and Core NATS. Browser and Worker execution begins with WebSocket and HTTP clients. This table describes work in progress; neither accepting a version nor compiling Wasm establishes that target's support.
+
+## Paused development checkpoint
+
+Matthew approved adopting the Rust work as the main line and pausing the
+continuous development loop on 2026-10-10. This is source adoption, not a release
+or a maturity declaration. No packages, tags or deployments were requested.
+
+The completed implementation checkpoint is `f761c77bbad2946a7f34e742c81027f62bb93c07`.
+It passed 126 Rust tests, 24 TypeScript tests, four external Rust tests, native
+and Wasm builds, formatting/clippy, a fresh npm archive consumer, and all four
+component CI jobs. Chromium passed 22 combined observations. A separate Worker
+consumer passed pure expression evaluation through both the TypeScript facade
+and an outer Rust/Wasm module.
+
+The combined Worker test failed after its first authenticated binary exchange
+on workerd 1.20261010.1, compatibility date 2026-10-08. The peer verified the
+credentials, echoed two bytes and observed close code 1000; the client received
+a terminal WebSocket error. A diagnostic reported `Network connection lost`.
+Unchanged passing runs and tracing controls are also preserved. None establishes
+a repair. This is the unresolved D019 failure; Worker transport qualification
+and deployed Cloudflare verification remain open. Host errors are not suppressed.
+
+The unfinished reply-topology/exchange-planning fragment is preserved separately
+on [codex/asyncapi-exchange-checkpoint-20261011](https://github.com/openbindings/asyncapi-client/tree/codex/asyncapi-exchange-checkpoint-20261011).
+It was interrupted before formatting, compilation, tests or TypeScript exposure
+and is excluded from this main-line implementation. Its checkpoint note records
+the disposition; it must not be treated as an executable or verified feature.
+
+Request/reply runtime matching, dynamic reply addresses, schema evaluation,
+additional authentication/acquisition paths, AsyncAPI 2.0–2.5, MQTT 5, Kafka,
+AMQP 0-9-1, HTTP and Core NATS remain incomplete. Recovery, manual settlement,
+ownership/performance qualification, independent conformance and the broader
+maturity gates also remain open. Current native MQTT acknowledges received
+messages before application processing. Legacy retirement and downstream
+consumer migration are separate, unfinished actions. Resumption requires a new
+assignment; this checkpoint does not schedule continued work.
 
 ## Checks
 
@@ -42,7 +78,7 @@ The package currently lives outside the legacy pnpm workspace to avoid resolving
 
 Source admission rejects duplicate decoded JSON keys, retains original byte ranges and exact numeric tokens, and bounds source size, depth, nodes and reference/trait work. Limits are development policy, not completed performance qualification. The implementation's depth ceiling is 96. Each document/resource completion is immutable; retained operations and source views own their data.
 
-Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait fields retain their defining source, including relative references inherited from external traits. Compilation preserves native message/server selection and explicit empty message sets. The first pure plan supports one schema-free binary message over MQTT 3.1.1 or WebSocket RFC 6455. It resolves declared variables and parameters without I/O. Native sessions execute the initial binary MQTT 3.1.1 QoS 0/1/2 and WebSocket paths over TCP. Security schemes, reply plans, schema evaluation, TLS, other driver profiles and complete edition conformance remain open. See [native sessions](../rust/native/README.md) for current ownership and receipt semantics. See [preparation](preparation.md) for the current contract and limits.
+Protocol references use URI plus JSON Pointer resolution with explicit resource supply. Schema references require their own dialect rules and are not yet evaluated. Operation traits use ordered merge patch with authored-target precedence. Native 2.x publish/subscribe positions remain distinct from authored convenience IDs and from application direction. YAML aliases retain their defining ranges and use-site trace; expanded bytes, nodes and number-conversion work are bounded. Effective trait fields retain their defining source, including relative references inherited from external traits. Compilation preserves native message/server selection and explicit empty message sets. Pure plans support schema-free binary, JSON and UTF-8 messages over MQTT 3.1.1 or WebSocket RFC 6455, with explicit variables, parameters and no preparation I/O. Native sessions support MQTT QoS 0/1/2 and WebSocket, system/custom CA trust and optional client identities. Selected document authentication covers native MQTT username/password, native secure-transport X509 and portable WebSocket query API keys. Server and operation requirements both apply; unsupported mechanisms refuse. Correlation inspection and runtime-expression evaluation retain exact values and provenance, but do not enable request/reply transport execution. Schemas, additional profiles/editions and complete security qualification remain open. See [native sessions](../rust/native/README.md) for current ownership and receipt semantics. See [preparation](preparation.md) for the current contract and limits.
 
 Development assertions are regression evidence. Independent wire observations, installed-package consumers, memory/performance budgets, long runs and fresh conformance challenges are required before mature-product claims. The prior Go/TypeScript behavior is not an oracle for new semantics.
 
@@ -67,12 +103,9 @@ WebSocket over local TCP; TLS and broader profiles need their own evidence.
 Host send receipts mean acceptance into the host buffer, not socket flush or
 peer processing. See [host sessions](../rust/host/README.md).
 
-Chrome and local workerd have exercised binary exchange, cancellation, queue
-limits and callback release. The current local profile pins workerd
-1.20261010.1 with compatibility date 2026-10-08 and the WebSocket constructor.
-The prior 1.20261006.1 runtime intermittently emitted an error followed by clean
-close. The newer release has relevant ownership repairs, and the constructor
-path passed 800 diagnostic control connections plus the actual-client suites.
-Other raw Worker connection methods still reproduced errors. The older failure
-receipts are preserved, and this is not a universal shutdown guarantee. The
-client continues to keep every host error terminal.
+Chrome and local workerd have exercised binary/JSON/text exchange, cancellation,
+queue limits, iterators and callback release. Local workerd uses 1.20261010.1,
+compatibility date 2026-10-08 and the WebSocket constructor. Both failed and
+passed outcomes remain recorded, including failures after the runtime upgrade.
+See the paused checkpoint above for the unresolved transport failure. A passing
+local run does not establish deployed Cloudflare or universal shutdown behavior.
