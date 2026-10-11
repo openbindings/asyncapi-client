@@ -10,7 +10,7 @@ pub use tls::TlsConfig;
 pub use bytes::Bytes;
 use dynamic_asyncapi_client::Plan;
 use dynamic_asyncapi_session::{Budget, ConnectionPlan as Connection, Lease, Limits, SessionPlan};
-pub use dynamic_asyncapi_session::{RuntimeCode, RuntimeError};
+pub use dynamic_asyncapi_session::{QueryCredentials, RuntimeCode, RuntimeError};
 use serde::Serialize;
 use std::time::Duration;
 use tokio::{
@@ -41,6 +41,7 @@ impl std::fmt::Debug for Credentials {
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
     pub credentials: Option<Credentials>,
+    pub query_credentials: QueryCredentials,
     /// Required for mqtts/wss; rejected for plaintext endpoints. Reuse a config
     /// to avoid reloading/parsing trust material on every connection.
     pub tls: Option<TlsConfig>,
@@ -54,6 +55,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             credentials: None,
+            query_credentials: QueryCredentials::default(),
             tls: None,
             connect_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(5),
@@ -357,7 +359,7 @@ pub struct Session {
     timeout: Duration,
 }
 impl Session {
-    pub async fn open(plans: &[Plan], options: SessionOptions) -> Result<Self, RuntimeError> {
+    pub async fn open(plans: &[Plan], mut options: SessionOptions) -> Result<Self, RuntimeError> {
         options.validate()?;
         let plans = SessionPlan::new(plans)?;
         let connection = plans.connection().clone();
@@ -390,6 +392,9 @@ impl Session {
         {
             let configured = match scheme.scheme_type.as_str() {
                 "userPassword" => options.credentials.is_some(),
+                "httpApiKey" => scheme.http_api_key.as_ref().is_some_and(|key| {
+                    key.location == dynamic_asyncapi_client::HttpApiKeyLocation::Query
+                }),
                 "X509" => options
                     .tls
                     .as_ref()
@@ -408,6 +413,17 @@ impl Session {
                 ));
             }
         }
+        let websocket_endpoint = match &connection {
+            Connection::WebSocket(_) => Some(plans.websocket_endpoint(&options.query_credentials)?),
+            Connection::Mqtt(_) if !options.query_credentials.is_empty() => {
+                return Err(RuntimeError::new(
+                    RuntimeCode::InvalidConfiguration,
+                    "query credentials do not apply to MQTT",
+                ));
+            }
+            Connection::Mqtt(_) => None,
+        };
+        options.query_credentials = QueryCredentials::default();
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(RuntimeError::new(
                 RuntimeCode::InvalidConfiguration,
@@ -427,9 +443,11 @@ impl Session {
                 Connection::Mqtt(settings) => mqtt::connect(settings, &context)
                     .await
                     .map(|driver| Driver::Mqtt(Box::new(driver))),
-                Connection::WebSocket(endpoint) => websocket::connect(&endpoint, &context)
-                    .await
-                    .map(|driver| Driver::WebSocket(Box::new(driver))),
+                Connection::WebSocket(_) => {
+                    websocket::connect(websocket_endpoint.as_ref().unwrap().as_str(), &context)
+                        .await
+                        .map(|driver| Driver::WebSocket(Box::new(driver)))
+                }
             }
         })
         .await

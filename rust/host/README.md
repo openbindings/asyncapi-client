@@ -35,11 +35,19 @@ qualification remains open. The current tested local profile pins workerd
 1.20261010.1, compatibility date 2026-10-08, and the WebSocket constructor. Its
 constructor path passed 800 raw control connections, but the later JSON codec
 consumer and a matched direct-next control both failed with a host WebSocket
-error. Current lifecycle/authentication checks pass without resolving that codec
-shutdown failure.
+error. The later uninstrumented query-authentication consumer also failed after its
+first binary exchange. Adding event tracing made that consumer pass, without a
+product repair; both outcomes are retained and shutdown remains unqualified.
 The older 1.20261006.1 profile had intermittent error/clean-close sequences;
 other raw connection methods still reproduce this on the newer runtime. These
 observations are preserved, not treated as client success. Declared X509 is
 refused before socket construction because this driver cannot configure a client
-identity. Host-capable authentication, broader TLS/codecs/protocols and sustained
+identity. Other authentication mechanisms, broader TLS/codecs/protocols and sustained
 performance/ownership qualification remain required work.
+
+Declared `httpApiKey` query authentication is supported through
+`SessionOptions.query_credentials` (`queryCredentials` in TypeScript). Supply only
+selected document query-parameter names; missing and unrelated entries refuse
+before socket construction. The portable Rust layer percent-encodes names and
+values into a runtime-only endpoint without mutating plan metadata. This driver
+still cannot configure custom handshake headers or client certificates.

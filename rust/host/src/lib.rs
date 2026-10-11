@@ -4,7 +4,7 @@
 mod wait;
 use dynamic_asyncapi_client::{Codec, Payload, Plan, WebSocketFrame};
 use dynamic_asyncapi_session::{Budget, ConnectionPlan, Lease, Route, SessionPlan, Usage};
-pub use dynamic_asyncapi_session::{Limits, RuntimeCode, RuntimeError};
+pub use dynamic_asyncapi_session::{Limits, QueryCredentials, RuntimeCode, RuntimeError};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
@@ -22,6 +22,7 @@ use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct SessionOptions {
     pub limits: Limits,
+    pub query_credentials: QueryCredentials,
     pub connect_timeout_ms: u32,
     pub close_timeout_ms: u32,
 }
@@ -29,6 +30,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             limits: Limits::default(),
+            query_credentials: QueryCredentials::default(),
             connect_timeout_ms: 5000,
             close_timeout_ms: 5000,
         }
@@ -377,7 +379,7 @@ pub struct Session(Rc<Driver>);
 impl Session {
     pub async fn open(
         plans: &[Plan],
-        options: SessionOptions,
+        mut options: SessionOptions,
         cancel: Option<Cancellation>,
     ) -> Result<Self, RuntimeError> {
         options.validate()?;
@@ -385,23 +387,26 @@ impl Session {
             return Err(cancelled());
         }
         let plan = SessionPlan::new(plans)?;
-        let ConnectionPlan::WebSocket(endpoint) = plan.connection() else {
+        let ConnectionPlan::WebSocket(_) = plan.connection() else {
             return Err(RuntimeError::new(
                 RuntimeCode::Unsupported,
                 "this host driver supports only WebSocket plans",
             ));
         };
-        if plan
-            .plans()
-            .iter()
-            .any(|p| p.describe().authentication.schemes().next().is_some())
-        {
+        if plan.plans().iter().any(|p| {
+            p.describe()
+                .authentication
+                .schemes()
+                .any(|s| s.scheme_type != "httpApiKey")
+        }) {
             return Err(RuntimeError::new(
                 RuntimeCode::Unsupported,
                 "host WebSocket cannot configure the selected security schemes",
             ));
         }
-        let socket = WebSocket::new(endpoint).map_err(|_| {
+        let endpoint = plan.websocket_endpoint(&options.query_credentials)?;
+        options.query_credentials = QueryCredentials::default();
+        let socket = WebSocket::new(endpoint.as_str()).map_err(|_| {
             RuntimeError::new(
                 RuntimeCode::Connection,
                 "host could not construct the WebSocket",

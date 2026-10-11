@@ -14,8 +14,8 @@ mod source;
 mod yaml;
 
 pub use authentication::{
-    AuthenticationDescription, AuthenticationPlan, SecurityAlternative, SecuritySchemeDescription,
-    SecurityScope, SecuritySelection,
+    AuthenticationDescription, AuthenticationPlan, HttpApiKeyDescription, HttpApiKeyLocation,
+    SecurityAlternative, SecuritySchemeDescription, SecurityScope, SecuritySelection,
 };
 pub use codec::{Codec, Payload, WebSocketFrame};
 pub use document::{Action, Document, Edition, Operation, OperationDescription, OperationIdentity};

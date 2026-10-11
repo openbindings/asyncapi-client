@@ -11,6 +11,12 @@ const repo = resolve(here, '../..');
 const {startPeers,verifyRecords}=await import(resolve(repo,'qualification/fixtures/peers.mjs'));
 const {startCodecPeers,verifyCodecRecords}=await import(resolve(repo,'qualification/fixtures/codec-peers.mjs'));
 const {startHostFaults}=await import(resolve(repo,'qualification/fixtures/host-faults.mjs'));
+function verifyQueryAuthentication(records) {
+ const requests=records.filter(r=>r.kind==='query-auth');
+ if(requests.length!==10 || requests.filter(r=>r.valid).length!==7 || records.some(r=>r.path==='/auth-leak') || records.filter(r=>r.kind==='auth-message').length!==6)throw Error('query authentication peer observations differ from fixed expectations');
+ const hashes=requests.filter(r=>r.valid && r.path==='/auth').map(r=>r.valueSha256);
+ if(new Set(hashes).size!==2)throw Error('per-session credentials were not isolated at the peer');
+}
 const hostTools = process.env.ASYNCAPI_HOST_TOOLS ?? here;
 const compositionDir = process.env.ASYNCAPI_COMPOSITION_WASM ?? resolve(repo,'qualification/composition/wasm');
 const suite = process.argv[2];
@@ -82,6 +88,7 @@ try {
     return codecSuite ? consumer.exerciseCodecs(client,composition.exchange_codec_from_outer_api,source) : faultSuite ? consumer.exerciseFaults(client,source,Number(JSON.parse(source).servers.local.host.split(':')[1])) : consumer.exerciseSessions(client, composition.exchange_from_outer_api, source);
   },{source,faultSuite,codecSuite});
   const browserRecords=peers.records.filter(r=>r.digest);
+  if(faultSuite) verifyQueryAuthentication(peers.records);
   if(codecSuite) report.browserPeer=verifyCodecRecords(peers.records);
   else if(!faultSuite) report.browserPeer=[verifyRecords(browserRecords.slice(0,8),{protocol:'websocket',count:8,size:1024}),verifyRecords(browserRecords.slice(8),{protocol:'websocket',count:8,size:1024})];
   await writeFile(resolve(out,'browser-peer.json'),JSON.stringify(peers.records,null,2));
@@ -131,6 +138,7 @@ const config :Workerd.Config = (
   if(!response?.ok) throw new Error(`workerd response ${response?.status}: ${await response?.text()}`);
   report.checks.workerd = await response.json();
   const workerRecords=peers.records.filter(r=>r.digest);
+  if(faultSuite) verifyQueryAuthentication(peers.records);
   if(codecSuite) report.workerPeer=verifyCodecRecords(peers.records);
   else if(!faultSuite) report.workerPeer=[verifyRecords(workerRecords.slice(0,8),{protocol:'websocket',count:8,size:1024}),verifyRecords(workerRecords.slice(8),{protocol:'websocket',count:8,size:1024})];
   await writeFile(resolve(out,'workerd-peer.json'),JSON.stringify(peers.records,null,2));

@@ -18,6 +18,21 @@ pub struct SecuritySelection {
     pub operation: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HttpApiKeyLocation {
+    Query,
+    Header,
+    Cookie,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpApiKeyDescription {
+    pub name: String,
+    pub location: HttpApiKeyLocation,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecuritySchemeDescription {
@@ -27,6 +42,7 @@ pub struct SecuritySchemeDescription {
     pub selection: Location,
     pub definition: Location,
     pub scopes: Vec<String>,
+    pub http_api_key: Option<HttpApiKeyDescription>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,6 +81,13 @@ impl AuthenticationPlan {
             let supported = match scheme.scheme_type.as_str() {
                 "userPassword" => matches!(protocol, "mqtt" | "mqtts"),
                 "X509" => matches!(protocol, "mqtts" | "wss"),
+                "httpApiKey" => {
+                    matches!(protocol, "ws" | "wss")
+                        && scheme
+                            .http_api_key
+                            .as_ref()
+                            .is_some_and(|key| key.location == HttpApiKeyLocation::Query)
+                }
                 _ => false,
             };
             if !supported {
@@ -174,8 +197,45 @@ fn scheme(
             "this security scheme cannot require OAuth scopes",
         ));
     }
+    let http_api_key = if kind == "httpApiKey" {
+        let name = definition
+            .get("name")
+            .ok_or_else(|| invalid(&definition, "HTTP API key name is required"))?;
+        let name = name
+            .as_str()
+            .ok_or_else(|| invalid(&name, "HTTP API key name must be a string"))?;
+        let placement = definition
+            .get("in")
+            .ok_or_else(|| invalid(&definition, "HTTP API key placement is required"))?;
+        let location = match placement.as_str() {
+            Some("query") => HttpApiKeyLocation::Query,
+            Some("header") => HttpApiKeyLocation::Header,
+            Some("cookie") => HttpApiKeyLocation::Cookie,
+            _ => {
+                return Err(invalid(
+                    &placement,
+                    "HTTP API key placement must be query, header or cookie",
+                ));
+            }
+        };
+        // Count resolved names as well as scopes against the shared expansion budget.
+        *remaining = remaining.checked_sub(name.len()).ok_or_else(|| {
+            Diagnostic::new(
+                Code::Limit,
+                "resolved security text exceeds the source byte limit",
+            )
+            .at(definition.location())
+        })?;
+        Some(HttpApiKeyDescription {
+            name: name.into(),
+            location,
+        })
+    } else {
+        None
+    };
     Ok(SecuritySchemeDescription {
         scheme_type: kind.into(),
+        http_api_key,
         component_name,
         selection: selection.location(),
         definition: definition.location(),

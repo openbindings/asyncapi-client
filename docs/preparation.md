@@ -58,18 +58,42 @@ Preparation resolves selected alternatives only; inspecting all alternatives can
 therefore report a missing resource which an explicitly selected plan does not need.
 
 Current execution plans support `userPassword` on MQTT 3.1.1 and `X509` on secure
-MQTT/WebSocket endpoints. Other mechanisms return an authentication requirement.
+MQTT/WebSocket endpoints, plus WebSocket `httpApiKey` with `in: query`. HTTP key
+name and placement are visible in `httpApiKey` inspection metadata. Header and
+cookie forms are inspectable but currently refuse execution. Other mechanisms
+return an authentication requirement.
 X509 never upgrades a plaintext endpoint implicitly. Plan descriptions expose
 selected requirements, never acquired credentials. Native session configuration
 supplies one connection-wide username/password pair and one optional TLS client
 identity; all attached plans must have their declared mechanisms configured before
 network activity. This is local configuration checking, not proof of authorization
-by the broker or server. Browser/Worker WebSocket sessions cannot configure these
-mechanisms and refuse before socket construction; ambient client certificates are
-not assumed to satisfy declared X509.
+by the broker or server. Browser/Worker WebSocket sessions support declared query keys; they refuse
+username/password and client-certificate mechanisms before socket construction.
+Ambient client certificates are not assumed to satisfy declared X509.
 
 Current profile bounds are 64 alternatives per security array, 16 schemes in a
-2.6 alternative, 256 scopes per scheme, and aggregate resolved scope text no larger
+2.6 alternative, 256 scopes per scheme, and aggregate resolved scope/key-name text no larger
 than the document's configured source-byte limit. Selection does not expand a
 server/operation cross product. No credentials are fetched during inspection or
 preparation. Additional mechanisms and host-capable authentication remain open.
+
+Query API-key values come from `SessionOptions.query_credentials` in Rust
+(`QueryCredentials::new([(name, value)])`) or `queryCredentials: { [name]: value }`
+in TypeScript. Keys are the declared HTTP parameter names, not component aliases.
+Missing and unused values refuse before I/O. Server/operation requirements across
+attached plans are combined; repeated declarations of one parameter emit it once.
+Two different definitions targeting the same parameter use the same explicitly
+supplied value; peer authorization is still required.
+
+A portable Rust routine builds a runtime-only endpoint using percent-encoded UTF-8
+names and values. Plans and their descriptions retain the original endpoint. The
+runtime endpoint and credential map redact Debug; session state does not retain
+the credential map after setup. The transport/host necessarily receives the URL;
+this is not a promise of zeroization or control over host logs. Native and Chromium redirect refusals are verified at peers. A traced Worker
+consumer also exercised refusal, but the uninstrumented Worker run failed during
+close of its first authenticated exchange; its reliability remains unqualified.
+Full independent qualification is still pending.
+
+Query credential limits are 32 names, 256 UTF-8 bytes per name, 16 KiB per value,
+and 64 KiB total raw name/value bytes. Current preparation excludes authored URL
+queries/fragments; the runtime refuses any collision rather than overwriting.

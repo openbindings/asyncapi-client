@@ -9,6 +9,37 @@ export async function exerciseFaults(client,source,port){
  try {await failure(()=>client.openSession([authPlan]),'Unsupported');}
  finally {authPlan.dispose();authCompiled.dispose();authOp.dispose();authDoc.dispose();}
  observations.push({name:'declared X509 refuses before host WebSocket construction'});
+ for(const edition of ['2.6.0','3.0.0','3.1.0']) {
+  const value=JSON.parse(source);value.asyncapi=edition;value.channels.events.address='/auth';
+  value.components={securitySchemes:{query:{type:'httpApiKey',in:'query',name:'access key+雪'},scope:{type:'httpApiKey',in:'query',name:'scope'}}};
+  if(edition==='2.6.0') {
+   value.servers.local.url=value.servers.local.host;delete value.servers.local.host;
+   value.servers.local.security=[{query:[],scope:[]}];
+   value.channels={'/auth':{subscribe:{operationId:'emit',message:{contentType:'application/octet-stream'}},publish:{operationId:'listen',message:{contentType:'application/octet-stream'}}}};delete value.operations;
+  } else {value.servers.local.security=[{$ref:'#/components/securitySchemes/query'}];value.operations.emit.security=[{$ref:'#/components/securitySchemes/scope'}];}
+  const doc=client.parse(JSON.stringify(value)),attached=[];
+  try {
+   for(const id of ['emit','listen']) {const op=doc.operation(id),c=op.compile();try {attached.push(c.prepare({role:'application'}));}finally {c.dispose();op.dispose();}}
+   const before=JSON.stringify(attached.map(p=>p.describe()));
+   for(const credential of ['v&=+?/雪#% ','different=雪']) {
+    const session=await client.openSession(attached,{queryCredentials:{'access key+雪':credential,scope:'events&read'}}),sender=session.sender();
+    try {sender.send(0,new Uint8Array([71,19]));const incoming=await session.next({signal:AbortSignal.timeout(1000)});check(incoming?.kind==='message' && incoming.payload[0]===71 && incoming.payload[1]===19,'authenticated echo mismatch');await session.close();}
+    finally {sender.dispose();session.dispose();}
+   }
+   check(JSON.stringify(attached.map(p=>p.describe()))===before,'session authentication mutated a plan');
+   await failure(()=>client.openSession(attached),'InvalidConfiguration');
+   await failure(()=>client.openSession(attached,{queryCredentials:{'access key+雪':'v&=+?/雪#% ',scope:'events&read',unrelated:'private'}}),'InvalidConfiguration');
+   await failure(()=>client.openSession(attached,{queryCredentials:{'access key+雪':'incorrect',scope:'events&read'}}),'Connection');
+  }finally {for(const plan of attached)plan.dispose();doc.dispose();}
+  observations.push({name:'declared query authentication '+edition+' exchanges, isolates credentials and refuses missing/unused/wrong values'});
+ }
+ {
+  const value=JSON.parse(source);value.channels.events.address='/auth-redirect';value.servers.local.security=[{type:'httpApiKey',in:'query',name:'access key+雪'}];value.operations.emit.security=[{type:'httpApiKey',in:'query',name:'scope'}];
+  const doc=client.parse(JSON.stringify(value)),op=doc.operation('emit'),c=op.compile(),plan=c.prepare({role:'application'});
+  try {await failure(()=>client.openSession([plan],{queryCredentials:{'access key+雪':'v&=+?/雪#% ',scope:'events&read'}}),'Connection');}
+  finally {plan.dispose();c.dispose();op.dispose();doc.dispose();}
+  observations.push({name:'authenticated WebSocket redirect refuses'});
+ }
  function plans(path){const parsed=JSON.parse(source);parsed.servers.local.host=`127.0.0.1:${port}`;parsed.channels.events.address=path;const document=client.parse(JSON.stringify(parsed));try{return ['emit','listen'].map(id=>{const operation=document.operation(id);try{const compiled=operation.compile();try{return compiled.prepare({role:'application'});}finally{compiled.dispose();}}finally{operation.dispose();}});}finally{document.dispose();}}
  async function withSession(path,options,run){const attached=plans(path);let session,sender;try{session=await client.openSession(attached,options);sender=session.sender();return await run(session,sender);}finally{sender?.dispose();session?.dispose();for(const plan of attached)plan.dispose();}}
  for(const [path,limits,count,size] of [['/count',{maxMessages:2},2,1],['/bytes',{maxBufferedBytes:8,maxMessageBytes:8},1,5]]){

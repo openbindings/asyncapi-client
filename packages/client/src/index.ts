@@ -75,6 +75,7 @@ export interface SecuritySchemeDescription {
   readonly selection: SourceLocation;
   readonly definition: SourceLocation;
   readonly scopes: ReadonlyArray<string>;
+  readonly httpApiKey: { readonly name: string; readonly location: 'query' | 'header' | 'cookie' } | null;
 }
 export interface SecurityAlternative {
   readonly index: number;
@@ -269,6 +270,8 @@ export class JsonView extends Owner<JsonHandle> {
 
 /** Limits account for Rust-owned queues. Host network buffers are separate. */
 export interface HostSessionOptions {
+  /** Values keyed by selected document query-parameter names. Unused keys refuse. */
+  readonly queryCredentials?: Readonly<Record<string, string>>;
   readonly limits?: { readonly maxMessages?: number; readonly maxBufferedBytes?: number; readonly maxMessageBytes?: number };
   readonly connectTimeoutMs?: number;
   readonly closeTimeoutMs?: number;

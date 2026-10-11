@@ -38,3 +38,16 @@ test('host refuses declared X509 before constructing a WebSocket',async()=>{
  try {await assert.rejects(client.openSession([plan]),e=>e instanceof AsyncApiRuntimeError && e.code==='Unsupported');assert.equal(attempts,0);}
  finally {globalThis.WebSocket=original;plan.dispose();c.dispose();op.dispose();doc.dispose();}
 });
+
+test('query key metadata and missing or unused credentials refuse before host I/O',async()=>{
+ const value=source();value.servers.s.security=[{type:'httpApiKey',in:'query',name:'access key+雪'}];
+ const doc=client.parse(JSON.stringify(value)),op=doc.operation('emit'),c=op.compile(),plan=c.prepare({role:'application'});
+ const original=globalThis.WebSocket;let attempts=0;globalThis.WebSocket=class {constructor(){attempts++;throw Error('unexpected socket');}};
+ try {
+  assert.deepEqual(c.authentication('s').server[0].schemes[0].httpApiKey,{name:'access key+雪',location:'query'});
+  for(const queryCredentials of [undefined,{'access key+雪':'secret-sentinel',unrelated:'private'},{'access key+雪':false},{'access key+雪':'x'.repeat(16385)}]) {
+   await assert.rejects(client.openSession([plan],{queryCredentials}),e=>e.code==='InvalidConfiguration'&&!String(e).includes('secret-sentinel'));
+  }
+  assert.equal(attempts,0);assert.equal(plan.describe().transport.endpoint,'wss://localhost:1/events');
+ }finally {globalThis.WebSocket=original;plan.dispose();c.dispose();op.dispose();doc.dispose();}
+});

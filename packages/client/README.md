@@ -61,7 +61,11 @@ this initial slice. `compiled.authentication(serverKey)` inspects security alter
 `prepare({role: "application", security: {server: 0, operation: 1}})` selects them
 independently when needed. Server and operation requirements both apply. MQTT
 username/password and secure-transport X509 plans are available for native drivers;
-host WebSocket sessions refuse these declared schemes before socket construction. A WebSocket peer requires a real peer route, not a second
+host WebSocket sessions refuse those mechanisms before socket construction.
+For declared `httpApiKey` query authentication, both native and host runtimes accept
+per-session values: `client.openSession(plans, {queryCredentials: {token: value}})`.
+Use the document parameter name; missing and unrelated entries refuse. Query
+encoding is performed in Rust, and reusable plans never contain the supplied value. A WebSocket peer requires a real peer route, not a second
 connection to the same server. Plan descriptions contain endpoint and client
 identity but never credentials. See [preparation contract](../../docs/preparation.md).
 

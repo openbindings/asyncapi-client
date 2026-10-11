@@ -29,6 +29,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .compile()?
         .prepare(&PlanOptions::application())?;
     drop(document);
+    let query_credentials = match std::env::var("ASYNCAPI_FIXTURE_QUERY_CREDENTIALS") {
+        Ok(value) => serde_json::from_str(&value)?,
+        Err(_) => dynamic_asyncapi_native::QueryCredentials::default(),
+    };
     let credentials = match (
         std::env::var("ASYNCAPI_FIXTURE_USERNAME"),
         std::env::var("ASYNCAPI_FIXTURE_PASSWORD"),
@@ -72,6 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &[send, receive],
         SessionOptions {
             credentials,
+            query_credentials,
             tls,
             connect_timeout,
             ..Default::default()

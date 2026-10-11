@@ -351,3 +351,69 @@ fn unknown_server_and_spurious_security_choice_refuse() {
     o.security.server = Some(0);
     assert_eq!(c.prepare(&o).unwrap_err().code, Code::InvalidConfiguration);
 }
+
+#[test]
+fn http_api_key_metadata_preserves_native_names_and_placement() {
+    for edition in ["2.6.0", "3.0.0", "3.1.0"] {
+        let mut v = source(edition);
+        v["servers"]["s"]["protocol"] = json!("wss");
+        v["servers"]["s"]
+            .as_object_mut()
+            .unwrap()
+            .remove("protocolVersion");
+        v["servers"]["s"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bindings");
+        if edition == "2.6.0" {
+            let channel = v["channels"]["events"].take();
+            v["channels"] = json!({"/events":channel});
+        } else {
+            v["channels"]["c"]["address"] = json!("/events");
+        }
+        for placement in ["query", "header", "cookie"] {
+            v["components"]["securitySchemes"]["key"] =
+                json!({"type":"httpApiKey","in":placement,"name":"access key+雪"});
+            v["servers"]["s"]["security"] = if edition == "2.6.0" {
+                json!([{"key":[]}])
+            } else {
+                json!([{"$ref":"#/components/securitySchemes/key"}])
+            };
+            let c = compiled(&v);
+            let auth = c.authentication("s").unwrap();
+            assert_eq!(
+                auth.server[0].schemes[0]
+                    .http_api_key
+                    .as_ref()
+                    .unwrap()
+                    .name,
+                "access key+雪"
+            );
+            let result = c.prepare(&PlanOptions::application());
+            if placement == "query" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.unwrap_err().requirement,
+                    Some(Requirement::Authentication)
+                );
+            }
+        }
+    }
+}
+#[test]
+fn malformed_http_api_key_declarations_refuse_during_inspection() {
+    let mut v = source("3.1.0");
+    for scheme in [
+        json!({"type":"httpApiKey","in":"query"}),
+        json!({"type":"httpApiKey","name":"x"}),
+        json!({"type":"httpApiKey","name":"x","in":"body"}),
+        json!({"type":"httpApiKey","name":false,"in":"query"}),
+    ] {
+        v["servers"]["s"]["security"] = json!([scheme]);
+        assert_eq!(
+            compiled(&v).authentication("s").unwrap_err().code,
+            Code::InvalidOperation
+        );
+    }
+}

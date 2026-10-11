@@ -68,3 +68,10 @@ Configured material does not guarantee peer authorization. Other declared scheme
 remain unsupported. The TLS peer suite includes document-declared requirements in
 AsyncAPI 2.6, 3.0 and 3.1, missing-material refusal without TCP activity, and actual
 broker rejection of a wrong password.
+
+For a declared WebSocket HTTP API key in a query parameter, set
+`query_credentials: QueryCredentials::new([("token", supplied_value)])?` in
+`SessionOptions`. Values are scoped to that session and keyed by the document's
+parameter name. Missing/unused values refuse before connecting; query credentials
+do not apply to MQTT. Query encoding and declaration checks use the portable Rust
+session crate shared with browser/Worker execution. Plans never acquire the value.

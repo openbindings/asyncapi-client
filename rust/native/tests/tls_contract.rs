@@ -117,3 +117,19 @@ async fn declared_authentication_requires_runtime_material_before_connecting() {
         }
     }
 }
+
+#[test]
+fn query_credential_deserialization_refuses_duplicates_and_redacts_invalid_values() {
+    use dynamic_asyncapi_native::QueryCredentials;
+    for source in [
+        r#""secret-sentinel""#,
+        r#"{"token":"secret-sentinel","token":"other"}"#,
+        r#"{"token":["secret-sentinel"]}"#,
+    ] {
+        let error = serde_json::from_str::<QueryCredentials>(source).unwrap_err();
+        assert!(!format!("{error:?}").contains("secret-sentinel"));
+    }
+    let credentials: QueryCredentials =
+        serde_json::from_str(r#"{"token":"secret-sentinel"}"#).unwrap();
+    assert!(!format!("{credentials:?}").contains("secret-sentinel"));
+}
